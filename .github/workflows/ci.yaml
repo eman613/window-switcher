@@ -23,6 +23,7 @@ jobs:
     runs-on: ${{matrix.os}}
 
     env:
+      MAX_RELEASE_SIZE_BYTES: 900000
       RUSTFLAGS: --deny warnings
 
     steps:
@@ -46,12 +47,18 @@ jobs:
       run: cargo fmt --all --check
 
     - name: Build release
-      run: cargo build --locked --release --package window-switcher
+      run: cargo build --locked --release --package window-switcher --target=${{ matrix.target }}
 
-    - name: Report release size
+    - name: Enforce release size budget
       shell: pwsh
       run: |
-        $artifact = 'target/release/window-switcher.exe'
+        $ErrorActionPreference = 'Stop'
+        $artifact = 'target/${{ matrix.target }}/release/window-switcher.exe'
         $size = (Get-Item -LiteralPath $artifact).Length
-        "### Release size`n`n- ``window-switcher.exe``: $size bytes" |
+        $maximumSize = [long] $env:MAX_RELEASE_SIZE_BYTES
+        $remaining = $maximumSize - $size
+        "### Release size`n`n- ``window-switcher.exe``: $size bytes`n- budget: $maximumSize bytes`n- remaining: $remaining bytes" |
           Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+        if ($size -gt $maximumSize) {
+          throw "Release size $size bytes exceeds the $maximumSize byte budget."
+        }

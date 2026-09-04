@@ -6,15 +6,13 @@ on:
     - v[0-9]+.[0-9]+.[0-9]+*
 
 jobs:
-  all:
+  build:
+    name: Build ${{ matrix.platform }}
     permissions:
-      contents: write
-    name: All
-
+      contents: read
     strategy:
+      fail-fast: false
       matrix:
-        target:
-        - x86_64-pc-windows-msvc
         include:
         - target: x86_64-pc-windows-msvc
           os: windows-latest
@@ -22,95 +20,138 @@ jobs:
         - target: aarch64-pc-windows-msvc
           os: windows-latest
           platform: windows-arm64
-          use-cross: true
 
-    runs-on: ${{matrix.os}}
-    env:
-      BUILD_CMD: cargo
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v6
 
-    - name: Check Tag
-      id: check-tag
-      shell: bash
-      run: |
-        ver=${GITHUB_REF##*/}
-        echo "version=$ver" >> $GITHUB_OUTPUT
-        if [[ "$ver" =~ [0-9]+.[0-9]+.[0-9]+$ ]]; then
-          echo "rc=false" >> $GITHUB_OUTPUT
-        else
-          echo "rc=true" >> $GITHUB_OUTPUT
-        fi
-
-
-    - name: Install Rust Toolchain Components
+    - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: ${{ matrix.target }}
 
-    - name: Install cross
-      if: matrix.use-cross
-      uses: taiki-e/install-action@v2
+    - uses: Swatinem/rust-cache@v2
       with:
-        tool: cross
-  
-    - name: Overwrite build command env variable
-      if: matrix.use-cross
-      shell: bash
-      run: echo "BUILD_CMD=cross" >> $GITHUB_ENV
+        key: ${{ matrix.target }}
 
-    - name: Show Version Information (Rust, cargo, GCC)
-      shell: bash
-      run: |
-        gcc --version || true
-        rustup -V
-        rustup toolchain list
-        rustup default
-        cargo -V
-        rustc -V
-      
-    - name: Build
-      shell: bash
-      run: $BUILD_CMD build --locked --release --target=${{ matrix.target }} ${{ matrix.cargo-flags }}
+    - name: Build release
+      shell: pwsh
+      run: cargo build --locked --release --target=${{ matrix.target }}
 
-    - name: Build Archive
-      shell: bash
-      id: package
+    - name: Build archive and SHA-256 checksum
+      shell: pwsh
       env:
-        target: ${{ matrix.target }}
-        platform: ${{ matrix.platform }}
-        version:  ${{ steps.check-tag.outputs.version }}
+        BINARY_NAME: ${{ github.event.repository.name }}
+        PLATFORM: ${{ matrix.platform }}
+        TARGET: ${{ matrix.target }}
+        VERSION: ${{ github.ref_name }}
       run: |
-        set -euxo pipefail
+        $ErrorActionPreference = 'Stop'
+        $executable = Join-Path "target/$env:TARGET/release" "$env:BINARY_NAME.exe"
+        if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+          throw "Release executable not found: $executable"
+        }
 
-        bin=${GITHUB_REPOSITORY##*/}
-        dist_dir=`pwd`/dist
-        name=$bin-$version-$platform
-        executable=target/$target/release/$bin
+        $distDirectory = Join-Path $env:GITHUB_WORKSPACE 'dist'
+        $null = New-Item -ItemType Directory -Path $distDirectory -Force
+        $archiveName = "$env:BINARY_NAME-$env:VERSION-$env:PLATFORM.zip"
+        $archivePath = Join-Path $distDirectory $archiveName
+        Compress-Archive -LiteralPath $executable -DestinationPath $archivePath -CompressionLevel Optimal
 
-        if [[ "$RUNNER_OS" == "Windows" ]]; then
-          executable=$executable.exe
-        fi
+        $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $checksumPath = "$archivePath.sha256"
+        [System.IO.File]::WriteAllText(
+          $checksumPath,
+          "$hash  $archiveName`n",
+          [System.Text.UTF8Encoding]::new($false)
+        )
 
-        mkdir $dist_dir
-        cp $executable $dist_dir
-        cd $dist_dir
+    - name: Upload release files
+      uses: actions/upload-artifact@v7
+      with:
+        name: release-${{ matrix.platform }}
+        path: |
+          dist/*.zip
+          dist/*.sha256
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0
 
-        if [[ "$RUNNER_OS" == "Windows" ]]; then
-            archive=$dist_dir/$name.zip
-            7z a $archive *
-            echo "archive=dist/$name.zip" >> $GITHUB_OUTPUT
-        else
-            archive=$dist_dir/$name.tar.gz
-            tar -czf $archive *
-            echo "archive=dist/$name.tar.gz" >> $GITHUB_OUTPUT
-        fi
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
 
-    - name: Publish Archive
-      uses: softprops/action-gh-release@v2
-      if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    steps:
+    - name: Download release files
+      uses: actions/download-artifact@v8
+      with:
+        path: dist
+        pattern: release-*
+        merge-multiple: true
+
+    - name: Verify release files
+      shell: pwsh
+      env:
+        BINARY_NAME: ${{ github.event.repository.name }}
+        VERSION: ${{ github.ref_name }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $expectedArchiveNames = @(
+          "$env:BINARY_NAME-$env:VERSION-windows-64.zip"
+          "$env:BINARY_NAME-$env:VERSION-windows-arm64.zip"
+        ) | Sort-Object
+        $expectedChecksumNames = @(
+          $expectedArchiveNames | ForEach-Object { "$_.sha256" }
+        )
+        $expectedFileNames = @(
+          ($expectedArchiveNames + $expectedChecksumNames) | Sort-Object
+        )
+        $releaseFiles = @(Get-ChildItem -LiteralPath 'dist' -File)
+        $actualFileNames = @($releaseFiles.Name | Sort-Object)
+        $differences = @(Compare-Object $expectedFileNames $actualFileNames)
+        if ($differences.Count -ne 0) {
+          throw 'Release file set does not match the expected x64 and ARM64 archives and checksums.'
+        }
+
+        $archives = @($releaseFiles | Where-Object { $_.Extension -ceq '.zip' })
+        $archives | ForEach-Object {
+          $checksumPath = "$($_.FullName).sha256"
+          if (-not (Test-Path -LiteralPath $checksumPath -PathType Leaf)) {
+            throw "Checksum file not found: $checksumPath"
+          }
+          $checksumText = [System.IO.File]::ReadAllText($checksumPath).Trim().TrimStart([char]0xfeff)
+          $checksumMatch = [regex]::Match(
+            $checksumText,
+            '^(?<hash>[0-9a-fA-F]{64})\s+\*?(?<name>.+)$'
+          )
+          if (-not $checksumMatch.Success -or $checksumMatch.Groups['name'].Value -cne $_.Name) {
+            throw "Invalid checksum file: $checksumPath"
+          }
+          $actualHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+          if ($actualHash -ine $checksumMatch.Groups['hash'].Value) {
+            throw "Checksum mismatch: $($_.Name)"
+          }
+        }
+
+    - name: Classify tag
+      id: tag
+      shell: pwsh
+      run: |
+        $isStable = $env:GITHUB_REF_NAME -match '^v[0-9]+\.[0-9]+\.[0-9]+$'
+        $prerelease = (-not $isStable).ToString().ToLowerInvariant()
+        "prerelease=$prerelease" |
+          Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    - name: Publish archive and checksum files
+      uses: softprops/action-gh-release@v3
       with:
         draft: false
-        files: ${{ steps.package.outputs.archive }}
-        prerelease: ${{ steps.check-tag.outputs.rc == 'true' }}
+        files: |
+          dist/*.zip
+          dist/*.sha256
+        fail_on_unmatched_files: true
+        prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
