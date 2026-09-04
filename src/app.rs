@@ -17,7 +17,7 @@ use windows::Win32::{
     Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GetMessageW,
+        CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetMessageW,
         GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
         RegisterWindowMessageW, SetWindowLongPtrW, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
         CW_USEDEFAULT, GWL_STYLE, HICON, HTCLIENT, IDC_ARROW, MSG, WINDOW_STYLE, WM_COMMAND,
@@ -61,10 +61,20 @@ pub struct App {
 impl App {
     pub fn start(config: &Config) -> Result<()> {
         let hwnd = Self::create_window()?;
+        let result = Self::run(hwnd, config);
+        if result.is_err() {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+        }
+        result
+    }
+
+    fn run(hwnd: HWND, config: &Config) -> Result<()> {
         let painter = GdiAAPainter::new(hwnd)?;
 
-        let _foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist)?;
-        let _keyboard_listener = KeyboardListener::init(hwnd, &config.to_hotkeys())?;
+        let foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist)?;
+        let keyboard_listener = KeyboardListener::init(hwnd, &config.to_hotkeys())?;
 
         let trayicon = match config.trayicon {
             true => Some(TrayIcon::create()),
@@ -76,7 +86,7 @@ impl App {
 
         let startup = Startup::init(is_admin)?;
 
-        let mut app = App {
+        let mut app = Box::new(App {
             hwnd,
             is_admin,
             trayicon,
@@ -89,15 +99,24 @@ impl App {
             switch_apps_state: None,
             cached_icons: Default::default(),
             painter,
-        };
+        });
 
         app.set_trayicon();
+        install_app(hwnd, app)?;
 
-        let app_ptr = Box::into_raw(Box::new(app)) as _;
-        check_error(|| set_window_user_data(hwnd, app_ptr))
-            .map_err(|err| anyhow!("Failed to set window ptr, {err}"))?;
+        let eventloop_result = Self::eventloop();
+        drop(keyboard_listener);
+        drop(foreground_watcher);
 
-        Self::eventloop()
+        let cleanup_result = take_app(hwnd).map(|app| drop(app));
+        match (eventloop_result, cleanup_result) {
+            (Err(event_err), Err(cleanup_err)) => Err(anyhow!(
+                "Message loop failed: {event_err}; app cleanup failed: {cleanup_err}"
+            )),
+            (Err(event_err), Ok(())) => Err(event_err),
+            (Ok(()), Err(cleanup_err)) => Err(cleanup_err),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 
     fn eventloop() -> Result<()> {
@@ -209,62 +228,76 @@ impl App {
     fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<LRESULT> {
         match msg {
             WM_USER_TRAYICON => {
-                let app = get_app(hwnd)?;
-                if let Some(trayicon) = app.trayicon.as_mut() {
-                    let keycode = lparam.0 as u32;
-                    if keycode == WM_LBUTTONUP || keycode == WM_RBUTTONUP {
-                        trayicon.show(app.startup.is_enable)?;
+                with_app(hwnd, |app| {
+                    if let Some(trayicon) = app.trayicon.as_mut() {
+                        let keycode = lparam.0 as u32;
+                        if keycode == WM_LBUTTONUP || keycode == WM_RBUTTONUP {
+                            trayicon.show(app.startup.is_enable)?;
+                        }
                     }
-                }
+                    Ok(())
+                })?;
                 return Ok(LRESULT(0));
             }
             WM_USER_SWITCH_APPS => {
                 debug!("message WM_USER_SWITCH_APPS");
-                let app = get_app(hwnd)?;
                 let reverse = lparam.0 == 1;
-                app.switch_apps(reverse)?;
-                if let Some(state) = &app.switch_apps_state {
-                    app.painter.paint(state);
-                }
+                with_app(hwnd, |app| {
+                    app.switch_apps(reverse)?;
+                    if let Some(state) = &app.switch_apps_state {
+                        app.painter.paint(state);
+                    }
+                    Ok(())
+                })?;
             }
             WM_USER_SWITCH_APPS_DONE => {
                 debug!("message WM_USER_SWITCH_APPS_DONE");
-                let app = get_app(hwnd)?;
-                app.do_switch_app();
+                with_app(hwnd, |app| {
+                    app.do_switch_app();
+                    Ok(())
+                })?;
             }
             WM_USER_SWITCH_APPS_CANCEL => {
                 debug!("message WM_USER_SWITCH_APPS_CANCEL");
-                let app = get_app(hwnd)?;
-                app.cancel_switch_app();
+                with_app(hwnd, |app| {
+                    app.cancel_switch_app();
+                    Ok(())
+                })?;
             }
             WM_USER_SWITCH_WINDOWS => {
                 debug!("message WM_USER_SWITCH_WINDOWS");
-                let app = get_app(hwnd)?;
                 let reverse = lparam.0 == 1;
-                let hwnd = app
-                    .switch_apps_state
-                    .as_ref()
-                    .and_then(|state| {
-                        state
-                            .apps
-                            .get(state.index)
-                            .map(|entry| entry.representative_hwnd)
-                    })
-                    .unwrap_or_else(get_foreground_window);
-                app.switch_windows(hwnd, reverse)?;
-                app.cancel_switch_app();
+                with_app(hwnd, |app| {
+                    let target_hwnd = app
+                        .switch_apps_state
+                        .as_ref()
+                        .and_then(|state| {
+                            state
+                                .apps
+                                .get(state.index)
+                                .map(|entry| entry.representative_hwnd)
+                        })
+                        .unwrap_or_else(get_foreground_window);
+                    app.switch_windows(target_hwnd, reverse)?;
+                    app.cancel_switch_app();
+                    Ok(())
+                })?;
             }
             WM_USER_SWITCH_WINDOWS_DONE => {
                 debug!("message WM_USER_SWITCH_WINDOWS_DONE");
-                let app = get_app(hwnd)?;
-                app.switch_windows_state.modifier_released = true;
+                with_app(hwnd, |app| {
+                    app.switch_windows_state.modifier_released = true;
+                    Ok(())
+                })?;
             }
             WM_NCHITTEST => {
                 return Ok(LRESULT(HTCLIENT as _));
             }
             WM_LBUTTONUP => {
-                let app = get_app(hwnd)?;
-                app.click();
+                with_app(hwnd, |app| {
+                    app.click();
+                    Ok(())
+                })?;
             }
             WM_COMMAND => {
                 let value = wparam.0 as u32;
@@ -272,15 +305,9 @@ impl App {
                 let id = value & 0xffff;
                 if kind == 0 {
                     match id {
-                        IDM_EXIT => {
-                            if let Ok(app) = get_app(hwnd) {
-                                unsafe { drop(Box::from_raw(app)) }
-                            }
-                            unsafe { PostQuitMessage(0) }
-                        }
+                        IDM_EXIT => unsafe { PostQuitMessage(0) },
                         IDM_STARTUP => {
-                            let app = get_app(hwnd)?;
-                            app.startup.toggle()?;
+                            with_app(hwnd, |app| app.startup.toggle())?;
                         }
                         IDM_CONFIGURE => {
                             if let Err(err) = edit_config_file() {
@@ -295,8 +322,10 @@ impl App {
                 return Ok(LRESULT(0));
             }
             _ if msg == WM_USER_REGISTER_TRAYICON || unsafe { msg == WM_TASKBARCREATED } => {
-                let app = get_app(hwnd)?;
-                app.set_trayicon();
+                with_app(hwnd, |app| {
+                    app.set_trayicon();
+                    Ok(())
+                })?;
             }
             _ => {}
         }
@@ -488,13 +517,38 @@ impl Drop for App {
     }
 }
 
-fn get_app(hwnd: HWND) -> Result<&'static mut App> {
-    unsafe {
-        let ptr = check_error(|| get_window_user_data(hwnd))
-            .map_err(|err| anyhow!("Failed to get window ptr, {err}"))?;
-        let tx: &mut App = &mut *(ptr as *mut App);
-        Ok(tx)
+fn install_app(hwnd: HWND, app: Box<App>) -> Result<()> {
+    let app_ptr = Box::into_raw(app);
+    if let Err(err) = check_error(|| set_window_user_data(hwnd, app_ptr as _)) {
+        unsafe {
+            drop(Box::from_raw(app_ptr));
+        }
+        return Err(anyhow!("Failed to set window ptr, {err}"));
     }
+    Ok(())
+}
+
+fn take_app(hwnd: HWND) -> Result<Option<Box<App>>> {
+    let ptr = check_error(|| set_window_user_data(hwnd, 0 as _))
+        .map_err(|err| anyhow!("Failed to clear window ptr, {err}"))? as isize;
+    if ptr == 0 {
+        return Ok(None);
+    }
+    Ok(Some(unsafe { Box::from_raw(ptr as *mut App) }))
+}
+
+fn with_app<T>(hwnd: HWND, callback: impl FnOnce(&mut App) -> Result<T>) -> Result<T> {
+    let ptr = check_error(|| get_window_user_data(hwnd))
+        .map_err(|err| anyhow!("Failed to get window ptr, {err}"))? as isize;
+    if ptr == 0 {
+        return Err(anyhow!("Window app pointer is null"));
+    }
+
+    let app = unsafe { &mut *(ptr as *mut App) };
+    if app.hwnd != hwnd {
+        return Err(anyhow!("Window app pointer belongs to another window"));
+    }
+    callback(app)
 }
 
 #[derive(Debug)]
