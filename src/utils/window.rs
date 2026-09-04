@@ -444,20 +444,36 @@ pub fn list_windows(
     only_current_desktop: bool,
     is_admin: bool,
 ) -> Result<IndexMap<String, Vec<(HWND, String)>>> {
+    let mut process_metadata = ProcessMetadataCache::default();
+    list_windows_with_cache(
+        ignore_minimal,
+        only_current_desktop,
+        is_admin,
+        &mut process_metadata,
+    )
+}
+
+pub(crate) fn list_windows_with_cache(
+    ignore_minimal: bool,
+    only_current_desktop: bool,
+    is_admin: bool,
+    process_metadata: &mut ProcessMetadataCache,
+) -> Result<IndexMap<String, Vec<(HWND, String)>>> {
     let mut result: IndexMap<String, Vec<(HWND, String)>> = IndexMap::new();
     let snapshot = WindowSnapshot::collect(ignore_minimal, only_current_desktop)?;
+    process_metadata.reset_if_window_set_changed(&snapshot.window_keys);
     for (hwnd, title) in snapshot.valid_hwnds.into_iter() {
         let mut pid = get_window_pid(hwnd);
-        let mut module_path = get_module_path(pid).unwrap_or_default();
+        let mut module_path = process_metadata.module_path(pid).unwrap_or_default();
         if !is_valid_module_path(&module_path) {
             if let Some(owner_hwnd) = snapshot.owner_to_child.get(&(hwnd.0 as isize)).copied() {
                 pid = get_window_pid(owner_hwnd);
-                module_path = get_module_path(pid).unwrap_or_default();
+                module_path = process_metadata.module_path(pid).unwrap_or_default();
             }
         }
         if is_valid_module_path(&module_path) {
             if !is_admin {
-                if let Some(true) = is_process_elevated(pid) {
+                if let Some(true) = process_metadata.is_elevated(pid) {
                     continue;
                 }
             }
@@ -486,10 +502,47 @@ pub fn list_windows(
     Ok(result)
 }
 
+#[derive(Default)]
+pub(crate) struct ProcessMetadataCache {
+    window_keys: Vec<usize>,
+    module_paths: HashMap<u32, String>,
+    elevations: HashMap<u32, bool>,
+}
+
+impl ProcessMetadataCache {
+    fn reset_if_window_set_changed(&mut self, window_keys: &[usize]) {
+        if self.window_keys != window_keys {
+            self.window_keys.clear();
+            self.window_keys.extend_from_slice(window_keys);
+            self.module_paths.clear();
+            self.elevations.clear();
+        }
+    }
+
+    fn module_path(&mut self, pid: u32) -> Option<String> {
+        if let Some(path) = self.module_paths.get(&pid) {
+            return Some(path.clone());
+        }
+        let path = get_module_path(pid)?;
+        self.module_paths.insert(pid, path.clone());
+        Some(path)
+    }
+
+    fn is_elevated(&mut self, pid: u32) -> Option<bool> {
+        if let Some(elevated) = self.elevations.get(&pid) {
+            return Some(*elevated);
+        }
+        let elevated = is_process_elevated(pid)?;
+        self.elevations.insert(pid, elevated);
+        Some(elevated)
+    }
+}
+
 #[derive(Debug, Default)]
 struct WindowSnapshot {
     valid_hwnds: Vec<(HWND, String)>,
     owner_to_child: HashMap<isize, HWND>,
+    window_keys: Vec<usize>,
 }
 
 impl WindowSnapshot {
@@ -498,9 +551,13 @@ impl WindowSnapshot {
         unsafe { EnumWindows(Some(enum_window), LPARAM(&mut hwnds as *mut _ as isize)) }
             .map_err(|e| anyhow!("Fail to get windows {}", e))?;
 
+        let mut window_keys: Vec<usize> = hwnds.iter().map(|hwnd| hwnd.0 as usize).collect();
+        window_keys.sort_unstable();
+
         let mut snapshot = Self {
             valid_hwnds: Vec::new(),
             owner_to_child: HashMap::with_capacity(hwnds.len()),
+            window_keys,
         };
         for hwnd in hwnds {
             let owner = get_owner_window(hwnd);
@@ -537,4 +594,43 @@ extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let windows: &mut Vec<HWND> = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
     windows.push(hwnd);
     BOOL(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProcessMetadataCache;
+
+    #[test]
+    fn process_metadata_cache_keeps_entries_for_same_window_set() {
+        let mut cache = ProcessMetadataCache {
+            window_keys: vec![1, 2],
+            ..Default::default()
+        };
+        cache.module_paths.insert(10, "app.exe".to_string());
+        cache.elevations.insert(10, false);
+
+        cache.reset_if_window_set_changed(&[1, 2]);
+
+        assert_eq!(
+            cache.module_paths.get(&10).map(String::as_str),
+            Some("app.exe")
+        );
+        assert_eq!(cache.elevations.get(&10).copied(), Some(false));
+    }
+
+    #[test]
+    fn process_metadata_cache_clears_entries_when_window_set_changes() {
+        let mut cache = ProcessMetadataCache {
+            window_keys: vec![1, 2],
+            ..Default::default()
+        };
+        cache.module_paths.insert(10, "app.exe".to_string());
+        cache.elevations.insert(10, false);
+
+        cache.reset_if_window_set_changed(&[1, 3]);
+
+        assert!(cache.module_paths.is_empty());
+        assert!(cache.elevations.is_empty());
+        assert_eq!(cache.window_keys, vec![1, 3]);
+    }
 }

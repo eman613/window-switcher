@@ -6,8 +6,8 @@ use crate::startup::Startup;
 use crate::trayicon::TrayIcon;
 use crate::utils::{
     check_error, get_app_icon, get_foreground_window, get_window_user_data, is_iconic_window,
-    is_running_as_admin, is_window_valid, list_windows, set_foreground_window,
-    set_window_user_data,
+    is_running_as_admin, is_window_valid, list_windows_with_cache, set_foreground_window,
+    set_window_user_data, ProcessMetadataCache,
 };
 
 use anyhow::{anyhow, Result};
@@ -55,6 +55,7 @@ pub struct App {
     config: Config,
     switch_windows_state: SwitchWindowsState,
     switch_apps_state: Option<SwitchAppsState>,
+    process_metadata: ProcessMetadataCache,
     cached_icons: HashMap<String, HICON>,
     painter: GdiAAPainter,
 }
@@ -98,6 +99,7 @@ impl App {
                 modifier_released: true,
             },
             switch_apps_state: None,
+            process_metadata: Default::default(),
             cached_icons: Default::default(),
             painter,
         });
@@ -350,10 +352,11 @@ impl App {
             return Ok(false);
         }
 
-        let windows = list_windows(
+        let windows = list_windows_with_cache(
             self.config.switch_windows_ignore_minimal,
             self.config.switch_windows_only_current_desktop(),
             self.is_admin,
+            &mut self.process_metadata,
         )?;
         debug!(
             "switch windows: hwnd:{hwnd:?} reverse:{reverse} state:{:?}",
@@ -466,10 +469,11 @@ impl App {
             self.switch_apps_state = Some(state);
             return Ok(());
         }
-        let windows = list_windows(
+        let windows = list_windows_with_cache(
             self.config.switch_apps_ignore_minimal,
             self.config.switch_apps_only_current_desktop(),
             self.is_admin,
+            &mut self.process_metadata,
         )?;
         let mut apps = vec![];
         for (module_path, hwnds) in windows.iter() {
