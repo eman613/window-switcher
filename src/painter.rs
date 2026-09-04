@@ -3,26 +3,26 @@ use crate::badge::{
     badge_geometry, badge_label, create_badge_font, draw_badge, BADGE_BACKGROUND_COLOR,
     BADGE_BORDER_COLOR,
 };
-use crate::utils::{check_error, get_moinitor_rect, is_light_theme, is_win11};
+use crate::painter_resources::{
+    gdiplus_status, BitmapGuard, BrushGuard, FontGuard, GpBrushGuard, GpGraphicsGuard,
+    GpImageGuard, GpPathGuard, MemoryDcGuard, RegionGuard, ScreenDcGuard, SelectedObjectGuard,
+};
+use crate::utils::{get_moinitor_rect, is_light_theme, is_win11};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use windows::Win32::{
     Foundation::{COLORREF, HWND, POINT, RECT, SIZE},
     Graphics::{
         Gdi::{
-            CreateCompatibleBitmap, CreateCompatibleDC, CreateRoundRectRgn, CreateSolidBrush,
-            DeleteDC, DeleteObject, FillRect, FillRgn, GetDC, ReleaseDC, SelectObject,
-            SetStretchBltMode, StretchBlt, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HALFTONE,
-            HBITMAP, HDC, HPALETTE, SRCCOPY,
+            CreateCompatibleBitmap, CreateRoundRectRgn, CreateSolidBrush, FillRect, FillRgn,
+            SetStretchBltMode, StretchBlt, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HALFTONE, HDC,
+            SRCCOPY,
         },
         GdiPlus::{
-            FillModeAlternate, GdipAddPathArc, GdipClosePathFigure, GdipCreateBitmapFromHBITMAP,
-            GdipCreateFromHDC, GdipCreatePath, GdipCreatePen1, GdipDeleteBrush, GdipDeleteGraphics,
-            GdipDeletePath, GdipDeletePen, GdipDisposeImage, GdipDrawImageRect, GdipFillPath,
-            GdipFillRectangle, GdipGetPenBrushFill, GdipSetInterpolationMode, GdipSetSmoothingMode,
-            GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBitmap, GpBrush, GpGraphics,
-            GpImage, GpPath, GpPen, InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias,
-            Unit,
+            GdipAddPathArc, GdipClosePathFigure, GdipDrawImageRect, GdipFillPath,
+            GdipFillRectangle, GdipSetInterpolationMode, GdipSetSmoothingMode, GdiplusShutdown,
+            GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics,
+            InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias,
         },
     },
     UI::{
@@ -49,7 +49,7 @@ pub const SCALE_FACTOR: i32 = 6;
 pub struct GdiAAPainter {
     token: usize,
     hwnd: HWND,
-    hdc_screen: HDC,
+    hdc_screen: ScreenDcGuard,
     rounded_corner: bool,
     show: bool,
 }
@@ -61,10 +61,19 @@ impl GdiAAPainter {
             ..Default::default()
         };
         let mut token: usize = 0;
-        check_error(|| unsafe { GdiplusStartup(&mut token, &startup_input, std::ptr::null_mut()) })
-            .context("Failed to initialize GDI+")?;
+        gdiplus_status(
+            unsafe { GdiplusStartup(&mut token, &startup_input, std::ptr::null_mut()) },
+            "GdiplusStartup",
+        )
+        .context("Failed to initialize GDI+")?;
 
-        let hdc_screen = unsafe { GetDC(Some(hwnd)) };
+        let hdc_screen = match ScreenDcGuard::new(hwnd) {
+            Ok(hdc) => hdc,
+            Err(err) => {
+                unsafe { GdiplusShutdown(token) };
+                return Err(err);
+            }
+        };
         let rounded_corner = is_win11();
 
         Ok(Self {
@@ -77,6 +86,16 @@ impl GdiAAPainter {
     }
 
     pub fn paint(&mut self, state: &SwitchAppsState) {
+        if let Err(err) = self.paint_inner(state) {
+            error!("paint failed: {err:#}");
+        }
+    }
+
+    fn paint_inner(&mut self, state: &SwitchAppsState) -> Result<()> {
+        if state.apps.is_empty() {
+            return Err(anyhow!("Cannot paint an empty app state"));
+        }
+
         let dpi_scale = get_dpi_scale(self.hwnd);
         let icon_size_max = (ICON_SIZE_BASE as f64 * dpi_scale) as i32;
         let border_size = (WINDOW_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
@@ -95,6 +114,9 @@ impl GdiAAPainter {
             border_size,
             icon_border,
         );
+        if width <= 0 || height <= 0 || icon_size <= 0 || item_size <= 0 {
+            return Err(anyhow!("Invalid painter dimensions"));
+        }
 
         let corner_radius = if self.rounded_corner {
             item_size / 4
@@ -103,85 +125,93 @@ impl GdiAAPainter {
         };
 
         let hwnd = self.hwnd;
-        let hdc_screen = self.hdc_screen;
+        let hdc_screen = self.hdc_screen.get();
 
         let (fg_color, bg_color) = theme_color(is_light_theme());
 
+        let hdc_mem = MemoryDcGuard::new(hdc_screen)?;
+        let bitmap_mem =
+            BitmapGuard::new(unsafe { CreateCompatibleBitmap(hdc_screen, width, height) })?;
+        let _bitmap_mem_selection =
+            SelectedObjectGuard::new(hdc_mem.get(), bitmap_mem.get().into())?;
+
+        let graphics = GpGraphicsGuard::new(hdc_mem.get())?;
+        gdiplus_status(
+            unsafe { GdipSetSmoothingMode(graphics.get(), SmoothingModeAntiAlias) },
+            "GdipSetSmoothingMode",
+        )?;
+        gdiplus_status(
+            unsafe {
+                GdipSetInterpolationMode(graphics.get(), InterpolationModeHighQualityBicubic)
+            },
+            "GdipSetInterpolationMode",
+        )?;
+
+        let bg_brush = GpBrushGuard::new(ALPHA_MASK | bg_color)?;
+
+        if self.rounded_corner {
+            draw_round_rect(
+                graphics.get(),
+                bg_brush.get(),
+                0.0,
+                0.0,
+                width as f32,
+                height as f32,
+                corner_radius as f32,
+            )?;
+        } else {
+            gdiplus_status(
+                unsafe {
+                    GdipFillRectangle(
+                        graphics.get(),
+                        bg_brush.get(),
+                        0.0,
+                        0.0,
+                        width as f32,
+                        height as f32,
+                    )
+                },
+                "GdipFillRectangle",
+            )?;
+        }
+
+        let icons_width = item_size * state.apps.len() as i32;
+        let icons_height = item_size;
+        let bitmap_icons = draw_icons(
+            state,
+            hdc_screen,
+            icon_size,
+            icon_border,
+            icons_width,
+            icons_height,
+            corner_radius,
+            fg_color,
+            bg_color,
+        )?;
+
+        let image = GpImageGuard::from_hbitmap(bitmap_icons.get())?;
+        gdiplus_status(
+            unsafe {
+                GdipDrawImageRect(
+                    graphics.get(),
+                    image.get(),
+                    border_size as f32,
+                    border_size as f32,
+                    icons_width as f32,
+                    icons_height as f32,
+                )
+            },
+            "GdipDrawImageRect",
+        )?;
+
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as _,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as _,
+            ..Default::default()
+        };
         unsafe {
-            let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-            let bitmap_mem = CreateCompatibleBitmap(hdc_screen, width, height);
-            SelectObject(hdc_mem, bitmap_mem.into());
-
-            let mut graphics = GpGraphics::default();
-            let mut graphics_ptr: *mut GpGraphics = &mut graphics;
-            GdipCreateFromHDC(hdc_mem, &mut graphics_ptr as _);
-            GdipSetSmoothingMode(graphics_ptr, SmoothingModeAntiAlias);
-            GdipSetInterpolationMode(graphics_ptr, InterpolationModeHighQualityBicubic);
-
-            let mut bg_pen = GpPen::default();
-            let mut bg_pen_ptr: *mut GpPen = &mut bg_pen;
-            GdipCreatePen1(ALPHA_MASK | bg_color, 0.0, Unit(0), &mut bg_pen_ptr as _);
-
-            let mut bg_brush = GpBrush::default();
-            let mut bg_brush_ptr: *mut GpBrush = &mut bg_brush;
-            GdipGetPenBrushFill(bg_pen_ptr, &mut bg_brush_ptr as _);
-
-            if self.rounded_corner {
-                draw_round_rect(
-                    graphics_ptr,
-                    bg_brush_ptr,
-                    0.0,
-                    0.0,
-                    width as f32,
-                    height as f32,
-                    corner_radius as f32,
-                );
-            } else {
-                GdipFillRectangle(
-                    graphics_ptr,
-                    bg_brush_ptr,
-                    0.0,
-                    0.0,
-                    width as f32,
-                    height as f32,
-                );
-            }
-
-            let icons_width = item_size * state.apps.len() as i32;
-            let icons_height = item_size;
-            let bitmap_icons = draw_icons(
-                state,
-                hdc_screen,
-                icon_size,
-                icon_border,
-                icons_width,
-                icons_height,
-                corner_radius,
-                fg_color,
-                bg_color,
-            );
-
-            let mut bitmap = GpBitmap::default();
-            let mut bitmap_ptr: *mut GpBitmap = &mut bitmap as _;
-            GdipCreateBitmapFromHBITMAP(bitmap_icons, HPALETTE::default(), &mut bitmap_ptr as _);
-
-            let image_ptr: *mut GpImage = bitmap_ptr as *mut GpImage;
-            GdipDrawImageRect(
-                graphics_ptr,
-                image_ptr,
-                border_size as f32,
-                border_size as f32,
-                icons_width as f32,
-                icons_height as f32,
-            );
-
-            let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as _,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as _,
-                ..Default::default()
-            };
-            let _ = UpdateLayeredWindow(
+            UpdateLayeredWindow(
                 hwnd,
                 Some(hdc_screen),
                 Some(&POINT { x, y }),
@@ -189,31 +219,24 @@ impl GdiAAPainter {
                     cx: width,
                     cy: height,
                 }),
-                Some(hdc_mem),
+                Some(hdc_mem.get()),
                 Some(&POINT::default()),
                 COLORREF(0),
                 Some(&blend),
                 ULW_ALPHA,
-            );
-
-            GdipDisposeImage(image_ptr);
-            GdipDeleteBrush(bg_brush_ptr);
-            GdipDeletePen(bg_pen_ptr);
-            GdipDeleteGraphics(graphics_ptr);
-
-            let _ = DeleteObject(bitmap_icons.into());
-            let _ = DeleteObject(bitmap_mem.into());
-            let _ = DeleteDC(hdc_mem);
+            )
         }
+        .context("UpdateLayeredWindow failed")?;
 
         if self.show {
-            return;
+            return Ok(());
         }
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetFocus(Some(self.hwnd));
         }
         self.show = true;
+        Ok(())
     }
 
     pub fn unpaint(&mut self, _state: SwitchAppsState) {
@@ -260,10 +283,7 @@ impl GdiAAPainter {
 
 impl Drop for GdiAAPainter {
     fn drop(&mut self) {
-        unsafe {
-            ReleaseDC(Some(self.hwnd), self.hdc_screen);
-            GdiplusShutdown(self.token);
-        }
+        unsafe { GdiplusShutdown(self.token) }
     }
 }
 
@@ -274,7 +294,7 @@ const fn theme_color(light_theme: bool) -> (u32, u32) {
     }
 }
 
-unsafe fn draw_round_rect(
+fn draw_round_rect(
     graphic_ptr: *mut GpGraphics,
     brush_ptr: *mut GpBrush,
     left: f32,
@@ -282,51 +302,73 @@ unsafe fn draw_round_rect(
     right: f32,
     bottom: f32,
     corner_radius: f32,
-) {
-    unsafe {
-        let mut path = GpPath::default();
-        let mut path_ptr: *mut GpPath = &mut path;
-        GdipCreatePath(FillModeAlternate, &mut path_ptr as _);
-        GdipAddPathArc(
-            path_ptr,
-            left,
-            top,
-            corner_radius,
-            corner_radius,
-            180.0,
-            90.0,
-        );
-        GdipAddPathArc(
-            path_ptr,
-            right - corner_radius,
-            top,
-            corner_radius,
-            corner_radius,
-            270.0,
-            90.0,
-        );
-        GdipAddPathArc(
-            path_ptr,
-            right - corner_radius,
-            bottom - corner_radius,
-            corner_radius,
-            corner_radius,
-            0.0,
-            90.0,
-        );
-        GdipAddPathArc(
-            path_ptr,
-            left,
-            bottom - corner_radius,
-            corner_radius,
-            corner_radius,
-            90.0,
-            90.0,
-        );
-        GdipClosePathFigure(path_ptr);
-        GdipFillPath(graphic_ptr, brush_ptr, path_ptr);
-        GdipDeletePath(path_ptr);
-    }
+) -> Result<()> {
+    let path = GpPathGuard::new()?;
+    let path_ptr = path.get();
+    gdiplus_status(
+        unsafe {
+            GdipAddPathArc(
+                path_ptr,
+                left,
+                top,
+                corner_radius,
+                corner_radius,
+                180.0,
+                90.0,
+            )
+        },
+        "GdipAddPathArc",
+    )?;
+    gdiplus_status(
+        unsafe {
+            GdipAddPathArc(
+                path_ptr,
+                right - corner_radius,
+                top,
+                corner_radius,
+                corner_radius,
+                270.0,
+                90.0,
+            )
+        },
+        "GdipAddPathArc",
+    )?;
+    gdiplus_status(
+        unsafe {
+            GdipAddPathArc(
+                path_ptr,
+                right - corner_radius,
+                bottom - corner_radius,
+                corner_radius,
+                corner_radius,
+                0.0,
+                90.0,
+            )
+        },
+        "GdipAddPathArc",
+    )?;
+    gdiplus_status(
+        unsafe {
+            GdipAddPathArc(
+                path_ptr,
+                left,
+                bottom - corner_radius,
+                corner_radius,
+                corner_radius,
+                90.0,
+                90.0,
+            )
+        },
+        "GdipAddPathArc",
+    )?;
+    gdiplus_status(
+        unsafe { GdipClosePathFigure(path_ptr) },
+        "GdipClosePathFigure",
+    )?;
+    gdiplus_status(
+        unsafe { GdipFillPath(graphic_ptr, brush_ptr, path_ptr) },
+        "GdipFillPath",
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -340,7 +382,7 @@ fn draw_icons(
     corner_radius: i32,
     fg_color: u32,
     bg_color: u32,
-) -> HBITMAP {
+) -> Result<BitmapGuard> {
     let scaled_width = width * SCALE_FACTOR;
     let scaled_height = height * SCALE_FACTOR;
     let scaled_corner_radius = corner_radius * SCALE_FACTOR;
@@ -348,66 +390,79 @@ fn draw_icons(
     let scaled_icon_inner_size = icon_size * SCALE_FACTOR;
     let scaled_icon_outer_size = scaled_icon_inner_size + scaled_border_size * 2;
 
-    unsafe {
-        let hdc_tmp = CreateCompatibleDC(Some(hdc_screen));
-        let bitmap_tmp = CreateCompatibleBitmap(hdc_screen, width, height);
-        SelectObject(hdc_tmp, bitmap_tmp.into());
+    if width <= 0 || height <= 0 || scaled_width <= 0 || scaled_height <= 0 {
+        return Err(anyhow!("Invalid icon bitmap dimensions"));
+    }
 
-        let hdc_scaled = CreateCompatibleDC(Some(hdc_screen));
-        let bitmap_scaled = CreateCompatibleBitmap(hdc_screen, scaled_width, scaled_height);
-        SelectObject(hdc_scaled, bitmap_scaled.into());
+    let hdc_tmp = MemoryDcGuard::new(hdc_screen)?;
+    let bitmap_tmp =
+        BitmapGuard::new(unsafe { CreateCompatibleBitmap(hdc_screen, width, height) })?;
+    let _bitmap_tmp_selection = SelectedObjectGuard::new(hdc_tmp.get(), bitmap_tmp.get().into())?;
 
-        let fg_brush = CreateSolidBrush(COLORREF(fg_color));
-        let bg_brush = CreateSolidBrush(COLORREF(bg_color));
-        let has_badges = state.apps.iter().any(|entry| entry.window_count > 1);
-        let badge_border_brush = if has_badges {
-            CreateSolidBrush(COLORREF(BADGE_BORDER_COLOR))
-        } else {
-            Default::default()
-        };
-        let badge_background_brush = if has_badges {
-            CreateSolidBrush(COLORREF(BADGE_BACKGROUND_COLOR))
-        } else {
-            Default::default()
-        };
-        let badge_font = if has_badges {
-            badge_geometry("2", icon_size, height)
-                .and_then(|geometry| create_badge_font(geometry.height, SCALE_FACTOR))
-        } else {
-            None
-        };
+    let hdc_scaled = MemoryDcGuard::new(hdc_screen)?;
+    let bitmap_scaled = BitmapGuard::new(unsafe {
+        CreateCompatibleBitmap(hdc_screen, scaled_width, scaled_height)
+    })?;
+    let _bitmap_scaled_selection =
+        SelectedObjectGuard::new(hdc_scaled.get(), bitmap_scaled.get().into())?;
 
-        let rect = RECT {
-            left: 0,
-            top: 0,
-            right: scaled_width,
-            bottom: scaled_height,
-        };
+    let fg_brush = BrushGuard::new(unsafe { CreateSolidBrush(COLORREF(fg_color)) })?;
+    let bg_brush = BrushGuard::new(unsafe { CreateSolidBrush(COLORREF(bg_color)) })?;
+    let has_badges = state.apps.iter().any(|entry| entry.window_count > 1);
+    let badge_border_brush = has_badges
+        .then(|| unsafe { CreateSolidBrush(COLORREF(BADGE_BORDER_COLOR)) })
+        .map(BrushGuard::new)
+        .transpose()?;
+    let badge_background_brush = has_badges
+        .then(|| unsafe { CreateSolidBrush(COLORREF(BADGE_BACKGROUND_COLOR)) })
+        .map(BrushGuard::new)
+        .transpose()?;
+    let badge_font = if has_badges {
+        badge_geometry("2", icon_size, height)
+            .and_then(|geometry| create_badge_font(geometry.height, SCALE_FACTOR))
+            .map(FontGuard::new)
+            .transpose()?
+    } else {
+        None
+    };
 
-        FillRect(hdc_scaled, &rect, bg_brush);
+    let rect = RECT {
+        left: 0,
+        top: 0,
+        right: scaled_width,
+        bottom: scaled_height,
+    };
 
-        for (i, entry) in state.apps.iter().enumerate() {
-            // draw the box for selected icon
-            if i == state.index {
-                let left = scaled_icon_outer_size * (i as i32);
-                let top = 0;
-                let right = left + scaled_icon_outer_size;
-                let bottom = top + scaled_icon_outer_size;
-                let rgn = CreateRoundRectRgn(
+    if unsafe { FillRect(hdc_scaled.get(), &rect, bg_brush.get()) } == 0 {
+        return Err(anyhow!("FillRect failed"));
+    }
+
+    for (i, entry) in state.apps.iter().enumerate() {
+        // draw the box for selected icon
+        if i == state.index {
+            let left = scaled_icon_outer_size * (i as i32);
+            let top = 0;
+            let right = left + scaled_icon_outer_size;
+            let bottom = top + scaled_icon_outer_size;
+            let region = RegionGuard::new(unsafe {
+                CreateRoundRectRgn(
                     left,
                     top,
                     right,
                     bottom,
                     scaled_corner_radius,
                     scaled_corner_radius,
-                );
-                let _ = FillRgn(hdc_scaled, rgn, fg_brush);
-                let _ = DeleteObject(rgn.into());
-            }
+                )
+            })?;
+            unsafe { FillRgn(hdc_scaled.get(), region.get(), fg_brush.get()) }
+                .ok()
+                .map_err(|err| anyhow!("FillRgn failed, {err}"))?;
+        }
 
-            let cx = scaled_border_size + scaled_icon_outer_size * (i as i32);
-            let _ = DrawIconEx(
-                hdc_scaled,
+        let cx = scaled_border_size + scaled_icon_outer_size * (i as i32);
+        unsafe {
+            DrawIconEx(
+                hdc_scaled.get(),
                 cx,
                 scaled_border_size,
                 entry.icon,
@@ -416,60 +471,62 @@ fn draw_icons(
                 0,
                 None,
                 DI_NORMAL,
-            );
+            )
+        }
+        .map_err(|err| anyhow!("DrawIconEx failed, {err}"))?;
 
-            if let Some(label) = badge_label(entry.window_count) {
-                if let Some(geometry) = badge_geometry(&label, icon_size, height) {
-                    let scaled_offset = geometry.offset * SCALE_FACTOR;
-                    let scaled_width = geometry.width * SCALE_FACTOR;
-                    let scaled_height = geometry.height * SCALE_FACTOR;
-                    let item_left = scaled_icon_outer_size * (i as i32);
-                    let right = item_left + scaled_icon_outer_size - scaled_offset;
-                    let left = right - scaled_width;
-                    draw_badge(
-                        hdc_scaled,
-                        &label,
-                        left,
-                        scaled_offset,
-                        scaled_width,
-                        scaled_height,
-                        SCALE_FACTOR,
-                        badge_border_brush,
-                        badge_background_brush,
-                        badge_font,
-                    );
-                }
+        if let Some(label) = badge_label(entry.window_count) {
+            if let Some(geometry) = badge_geometry(&label, icon_size, height) {
+                let scaled_offset = geometry.offset * SCALE_FACTOR;
+                let scaled_width = geometry.width * SCALE_FACTOR;
+                let scaled_height = geometry.height * SCALE_FACTOR;
+                let item_left = scaled_icon_outer_size * (i as i32);
+                let right = item_left + scaled_icon_outer_size - scaled_offset;
+                let left = right - scaled_width;
+                draw_badge(
+                    hdc_scaled.get(),
+                    &label,
+                    left,
+                    scaled_offset,
+                    scaled_width,
+                    scaled_height,
+                    SCALE_FACTOR,
+                    badge_border_brush
+                        .as_ref()
+                        .map(BrushGuard::get)
+                        .unwrap_or_default(),
+                    badge_background_brush
+                        .as_ref()
+                        .map(BrushGuard::get)
+                        .unwrap_or_default(),
+                    badge_font.as_ref().map(FontGuard::get),
+                );
             }
         }
+    }
 
-        SetStretchBltMode(hdc_tmp, HALFTONE);
-        let _ = StretchBlt(
-            hdc_tmp,
+    if unsafe { SetStretchBltMode(hdc_tmp.get(), HALFTONE) } == 0 {
+        return Err(anyhow!("SetStretchBltMode failed"));
+    }
+    unsafe {
+        StretchBlt(
+            hdc_tmp.get(),
             0,
             0,
             width,
             height,
-            Some(hdc_scaled),
+            Some(hdc_scaled.get()),
             0,
             0,
             scaled_width,
             scaled_height,
             SRCCOPY,
-        );
-
-        let _ = DeleteObject(fg_brush.into());
-        let _ = DeleteObject(bg_brush.into());
-        let _ = DeleteObject(badge_border_brush.into());
-        let _ = DeleteObject(badge_background_brush.into());
-        if let Some(font) = badge_font {
-            let _ = DeleteObject(font.into());
-        }
-        let _ = DeleteObject(bitmap_scaled.into());
-        let _ = DeleteDC(hdc_scaled);
-        let _ = DeleteDC(hdc_tmp);
-
-        bitmap_tmp
+        )
     }
+    .ok()
+    .map_err(|err| anyhow!("StretchBlt failed, {err}"))?;
+
+    Ok(bitmap_tmp)
 }
 
 fn get_dpi_scale(hwnd: HWND) -> f64 {

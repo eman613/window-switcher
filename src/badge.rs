@@ -5,7 +5,7 @@ use windows::Win32::{
         CreateFontW, CreateRoundRectRgn, DeleteObject, DrawTextW, FillRgn, SelectObject, SetBkMode,
         SetTextColor, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
         DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, HBRUSH, HDC,
-        HFONT, OUT_DEFAULT_PRECIS, TRANSPARENT,
+        HFONT, HGDIOBJ, HRGN, OUT_DEFAULT_PRECIS, TRANSPARENT,
     },
 };
 
@@ -126,14 +126,14 @@ pub(crate) fn draw_badge(
     }
 
     unsafe {
-        let outer_region = CreateRoundRectRgn(left, top, right, bottom, height, height);
-        if outer_region.is_invalid() {
+        let Some(outer_region) =
+            RegionGuard::new(CreateRoundRectRgn(left, top, right, bottom, height, height))
+        else {
             return;
-        }
+        };
         if !border_brush.is_invalid() {
-            let _ = FillRgn(hdc, outer_region, border_brush);
+            let _ = FillRgn(hdc, outer_region.get(), border_brush);
         }
-        let _ = DeleteObject(outer_region.into());
 
         let inset = (BADGE_BORDER_SIZE * scale_factor)
             .min(width.saturating_div(4))
@@ -148,19 +148,18 @@ pub(crate) fn draw_badge(
         let inner_top = top + inset;
         let inner_right = inner_left + inner_width;
         let inner_bottom = inner_top + inner_height;
-        let inner_region = CreateRoundRectRgn(
+        let inner_region = RegionGuard::new(CreateRoundRectRgn(
             inner_left,
             inner_top,
             inner_right,
             inner_bottom,
             inner_height,
             inner_height,
-        );
-        if !inner_region.is_invalid() {
+        ));
+        if let Some(inner_region) = inner_region {
             if !background_brush.is_invalid() {
-                let _ = FillRgn(hdc, inner_region, background_brush);
+                let _ = FillRgn(hdc, inner_region.get(), background_brush);
             }
-            let _ = DeleteObject(inner_region.into());
         }
 
         let Some(font) = font else {
@@ -174,7 +173,9 @@ pub(crate) fn draw_badge(
             right: inner_right,
             bottom: inner_bottom,
         };
-        let old_font = SelectObject(hdc, font.into());
+        let Some(_font_selection) = SelectedObjectGuard::new(hdc, font.into()) else {
+            return;
+        };
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF(BADGE_TEXT_COLOR));
         let _ = DrawTextW(
@@ -183,7 +184,46 @@ pub(crate) fn draw_badge(
             &mut text_rect,
             DT_CENTER | DT_NOPREFIX | DT_SINGLELINE | DT_VCENTER,
         );
-        let _ = SelectObject(hdc, old_font);
+    }
+}
+
+struct RegionGuard(HRGN);
+
+impl RegionGuard {
+    fn new(handle: HRGN) -> Option<Self> {
+        (!handle.is_invalid()).then_some(Self(handle))
+    }
+
+    fn get(&self) -> HRGN {
+        self.0
+    }
+}
+
+impl Drop for RegionGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteObject(self.0.into());
+        }
+    }
+}
+
+struct SelectedObjectGuard {
+    hdc: HDC,
+    previous: HGDIOBJ,
+}
+
+impl SelectedObjectGuard {
+    fn new(hdc: HDC, object: HGDIOBJ) -> Option<Self> {
+        let previous = unsafe { SelectObject(hdc, object) };
+        (!previous.is_invalid()).then_some(Self { hdc, previous })
+    }
+}
+
+impl Drop for SelectedObjectGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = SelectObject(self.hdc, self.previous);
+        }
     }
 }
 

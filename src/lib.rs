@@ -10,6 +10,7 @@ mod config;
 mod foreground;
 mod keyboard;
 mod painter;
+mod painter_resources;
 mod startup;
 mod trayicon;
 
