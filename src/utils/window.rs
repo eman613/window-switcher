@@ -2,7 +2,7 @@ use crate::utils::{is_process_elevated, HandleWrapper};
 
 use anyhow::{anyhow, Result};
 use indexmap::IndexMap;
-use std::{ffi::c_void, mem::size_of, path::PathBuf};
+use std::{collections::HashMap, ffi::c_void, mem::size_of, path::PathBuf};
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::{
     Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HWND, LPARAM, MAX_PATH, POINT, RECT},
@@ -445,33 +445,13 @@ pub fn list_windows(
     is_admin: bool,
 ) -> Result<IndexMap<String, Vec<(HWND, String)>>> {
     let mut result: IndexMap<String, Vec<(HWND, String)>> = IndexMap::new();
-    let mut hwnds: Vec<HWND> = Default::default();
-    unsafe { EnumWindows(Some(enum_window), LPARAM(&mut hwnds as *mut _ as isize)) }
-        .map_err(|e| anyhow!("Fail to get windows {}", e))?;
-    let mut valid_hwnds = vec![];
-    let mut owner_hwnds = vec![];
-    for hwnd in hwnds.iter().cloned() {
-        let (is_visible, is_iconic, is_tool, is_topmost) = get_window_state(hwnd);
-        let ok = is_visible
-            && (if ignore_minimal { !is_iconic } else { true })
-            && !is_tool
-            && !is_topmost
-            && !is_cloaked_window(hwnd, only_current_desktop)
-            && !is_small_window(hwnd);
-        if ok {
-            let title = get_window_title(hwnd);
-            if !title.is_empty() && title != "Windows Input Experience" {
-                valid_hwnds.push((hwnd, title));
-            }
-        }
-        owner_hwnds.push(get_owner_window(hwnd))
-    }
-    for (hwnd, title) in valid_hwnds.into_iter() {
+    let snapshot = WindowSnapshot::collect(ignore_minimal, only_current_desktop)?;
+    for (hwnd, title) in snapshot.valid_hwnds.into_iter() {
         let mut pid = get_window_pid(hwnd);
         let mut module_path = get_module_path(pid).unwrap_or_default();
         if !is_valid_module_path(&module_path) {
-            if let Some((i, _)) = owner_hwnds.iter().enumerate().find(|(_, v)| **v == hwnd) {
-                pid = get_window_pid(hwnds[i]);
+            if let Some(owner_hwnd) = snapshot.owner_to_child.get(&(hwnd.0 as isize)).copied() {
+                pid = get_window_pid(owner_hwnd);
                 module_path = get_module_path(pid).unwrap_or_default();
             }
         }
@@ -504,6 +484,49 @@ pub fn list_windows(
     }
     debug!("list windows {result:?}");
     Ok(result)
+}
+
+#[derive(Debug, Default)]
+struct WindowSnapshot {
+    valid_hwnds: Vec<(HWND, String)>,
+    owner_to_child: HashMap<isize, HWND>,
+}
+
+impl WindowSnapshot {
+    fn collect(ignore_minimal: bool, only_current_desktop: bool) -> Result<Self> {
+        let mut hwnds: Vec<HWND> = Default::default();
+        unsafe { EnumWindows(Some(enum_window), LPARAM(&mut hwnds as *mut _ as isize)) }
+            .map_err(|e| anyhow!("Fail to get windows {}", e))?;
+
+        let mut snapshot = Self {
+            valid_hwnds: Vec::new(),
+            owner_to_child: HashMap::with_capacity(hwnds.len()),
+        };
+        for hwnd in hwnds {
+            let owner = get_owner_window(hwnd);
+            if owner != HWND::default() {
+                snapshot
+                    .owner_to_child
+                    .entry(owner.0 as isize)
+                    .or_insert(hwnd);
+            }
+
+            let (is_visible, is_iconic, is_tool, is_topmost) = get_window_state(hwnd);
+            let ok = is_visible
+                && (if ignore_minimal { !is_iconic } else { true })
+                && !is_tool
+                && !is_topmost
+                && !is_cloaked_window(hwnd, only_current_desktop)
+                && !is_small_window(hwnd);
+            if ok {
+                let title = get_window_title(hwnd);
+                if !title.is_empty() && title != "Windows Input Experience" {
+                    snapshot.valid_hwnds.push((hwnd, title));
+                }
+            }
+        }
+        Ok(snapshot)
+    }
 }
 
 fn is_valid_module_path(module_path: &str) -> bool {
