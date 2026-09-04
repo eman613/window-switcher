@@ -23,8 +23,10 @@ pub fn is_running_as_admin() -> Result<bool> {
 }
 
 pub fn is_process_elevated(pid: u32) -> Option<bool> {
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-    get_process_elevation_info(process).ok()
+    let process = HandleWrapper::new(
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?,
+    );
+    get_process_elevation_info(process.get_handle()).ok()
 }
 
 fn get_process_elevation_info(process: HANDLE) -> Result<bool> {
