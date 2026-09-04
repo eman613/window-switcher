@@ -8,10 +8,6 @@ on:
     branches:
     - main
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
   all:
     name: All
@@ -36,14 +32,26 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: ${{ matrix.target }}
+        components: clippy, rustfmt
 
     - uses: Swatinem/rust-cache@v2
 
     - name: Test
-      run: cargo test --target=${{ matrix.target }} --all
+      run: cargo test --locked --target=${{ matrix.target }} --workspace --all-targets
 
     - name: Clippy
-      run: cargo clippy --all --all-targets
+      run: cargo clippy --locked --target=${{ matrix.target }} --workspace --all-targets -- -D warnings
 
     - name: Format
       run: cargo fmt --all --check
+
+    - name: Build release
+      run: cargo build --locked --release --package window-switcher
+
+    - name: Report release size
+      shell: pwsh
+      run: |
+        $artifact = 'target/release/window-switcher.exe'
+        $size = (Get-Item -LiteralPath $artifact).Length
+        "### Release size`n`n- ``window-switcher.exe``: $size bytes" |
+          Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

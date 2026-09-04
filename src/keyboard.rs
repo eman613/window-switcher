@@ -203,7 +203,6 @@ unsafe extern "system" fn keyboard_proc(code: i32, w_param: WPARAM, l_param: LPA
     let Some(kbd_data) = (l_param.0 as *const KBDLLHOOKSTRUCT).as_ref() else {
         return CallNextHookEx(None, code, w_param, l_param);
     };
-    debug!("keyboard {kbd_data:?}");
     let mut is_modifier = false;
     let scan_code = kbd_data.scanCode;
     let is_key_pressed = || kbd_data.flags.0 & LLKHF_UP.0 == 0;

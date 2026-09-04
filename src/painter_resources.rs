@@ -3,8 +3,8 @@ use windows::Win32::{
     Foundation::HWND,
     Graphics::{
         Gdi::{
-            CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject, HBITMAP,
-            HBRUSH, HDC, HFONT, HGDIOBJ, HPALETTE, HRGN,
+            CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+            SelectObject, HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, HPALETTE, HRGN,
         },
         GdiPlus::{
             FillModeAlternate, GdipCreateBitmapFromHBITMAP, GdipCreateFromHDC, GdipCreatePath,
@@ -187,6 +187,48 @@ impl Drop for SelectedObjectGuard {
         unsafe {
             let _ = SelectObject(self.dc, self.previous);
         }
+    }
+}
+
+/// Reusable memory DC with a selected compatible bitmap.
+///
+/// Field order is intentional: the selected object is restored before the
+/// bitmap and the DC are destroyed.
+pub(super) struct BitmapSurface {
+    _selection: SelectedObjectGuard,
+    bitmap: BitmapGuard,
+    dc: MemoryDcGuard,
+    width: i32,
+    height: i32,
+}
+
+impl BitmapSurface {
+    pub(super) fn new(reference: HDC, width: i32, height: i32) -> Result<Self> {
+        if width <= 0 || height <= 0 {
+            return Err(anyhow!("Invalid bitmap surface dimensions"));
+        }
+        let dc = MemoryDcGuard::new(reference)?;
+        let bitmap = BitmapGuard::new(unsafe { CreateCompatibleBitmap(reference, width, height) })?;
+        let selection = SelectedObjectGuard::new(dc.get(), bitmap.get().into())?;
+        Ok(Self {
+            _selection: selection,
+            bitmap,
+            dc,
+            width,
+            height,
+        })
+    }
+
+    pub(super) fn matches(&self, width: i32, height: i32) -> bool {
+        self.width == width && self.height == height
+    }
+
+    pub(super) fn dc(&self) -> HDC {
+        self.dc.get()
+    }
+
+    pub(super) fn bitmap(&self) -> HBITMAP {
+        self.bitmap.get()
     }
 }
 

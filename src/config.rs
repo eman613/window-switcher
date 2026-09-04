@@ -99,11 +99,13 @@ impl Config {
                 }
             }
 
-            if let Some(v) = section
-                .get("blacklist")
-                .map(normalize_path_value)
-                .map(|v| v.split(',').map(|v| v.trim().to_string()).collect())
-            {
+            if let Some(v) = section.get("blacklist").map(normalize_path_value).map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }) {
                 conf.switch_windows_blacklist = v;
             }
             if let Some(v) = section.get("ignore_minimal").and_then(Config::to_bool) {
@@ -324,6 +326,7 @@ impl Hotkey {
 }
 
 pub fn load_config() -> Result<Config> {
+    let _timer = crate::metrics::StageTimer::new("config_load");
     let filepath = get_config_path()?;
     if !filepath.exists() {
         return Ok(Config::default());
@@ -421,5 +424,15 @@ mod tests {
 
         let ini = Ini::load_from_str("[startup]\nrun_as_admin = no\n").unwrap();
         assert!(!Config::load(&ini).unwrap().run_as_admin);
+    }
+
+    #[test]
+    fn empty_blacklist_does_not_enable_foreground_monitoring() {
+        let ini = Ini::load_from_str("[switch-windows]\nblacklist =\n").unwrap();
+
+        assert!(Config::load(&ini)
+            .unwrap()
+            .switch_windows_blacklist
+            .is_empty());
     }
 }

@@ -3,25 +3,26 @@ use crate::badge::{
     badge_geometry, badge_label, create_badge_font, draw_badge, BADGE_BACKGROUND_COLOR,
     BADGE_BORDER_COLOR,
 };
+use crate::metrics::StageTimer;
 use crate::painter_resources::{
-    gdiplus_status, BitmapGuard, BrushGuard, FontGuard, GpBrushGuard, GpGraphicsGuard,
-    GpImageGuard, GpPathGuard, MemoryDcGuard, RegionGuard, ScreenDcGuard, SelectedObjectGuard,
+    gdiplus_status, BitmapSurface, BrushGuard, FontGuard, GpBrushGuard, GpGraphicsGuard,
+    GpImageGuard, GpPathGuard, RegionGuard, ScreenDcGuard,
 };
 use crate::utils::{get_moinitor_rect, is_light_theme, is_win11};
 
 use anyhow::{anyhow, Context, Result};
+use std::time::{Duration, Instant};
 use windows::Win32::{
     Foundation::{COLORREF, HWND, POINT, RECT, SIZE},
     Graphics::{
         Gdi::{
-            CreateCompatibleBitmap, CreateRoundRectRgn, CreateSolidBrush, FillRect, FillRgn,
-            SetStretchBltMode, StretchBlt, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HALFTONE, HDC,
-            SRCCOPY,
+            BitBlt, CreateRoundRectRgn, CreateSolidBrush, FillRect, FillRgn, SetStretchBltMode,
+            StretchBlt, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HALFTONE, HBITMAP, HDC, SRCCOPY,
         },
         GdiPlus::{
             GdipAddPathArc, GdipClosePathFigure, GdipDrawImageRect, GdipFillPath,
-            GdipFillRectangle, GdipSetInterpolationMode, GdipSetSmoothingMode, GdiplusShutdown,
-            GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics,
+            GdipFillRectangle, GdipGraphicsClear, GdipSetInterpolationMode, GdipSetSmoothingMode,
+            GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics,
             InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias,
         },
     },
@@ -44,6 +45,7 @@ pub const ICON_SIZE_BASE: i32 = 64;
 pub const WINDOW_BORDER_SIZE_BASE: i32 = 10;
 pub const ICON_BORDER_SIZE_BASE: i32 = 4;
 pub const SCALE_FACTOR: i32 = 6;
+const THEME_CACHE_TTL: Duration = Duration::from_secs(1);
 
 // GDI Antialiasing Painter
 pub struct GdiAAPainter {
@@ -52,6 +54,14 @@ pub struct GdiAAPainter {
     hdc_screen: ScreenDcGuard,
     rounded_corner: bool,
     show: bool,
+    dpi_scale: Option<f64>,
+    theme_cache: Option<(bool, Instant)>,
+    last_coordinate: Option<(usize, Coordinate)>,
+    panel_surface: Option<BitmapSurface>,
+    icon_surface: Option<BitmapSurface>,
+    frame_icon_surface: Option<BitmapSurface>,
+    scaled_icon_surface: Option<BitmapSurface>,
+    icon_layer_key: Option<IconLayerKey>,
 }
 
 impl GdiAAPainter {
@@ -82,6 +92,14 @@ impl GdiAAPainter {
             hdc_screen,
             rounded_corner,
             show: false,
+            dpi_scale: None,
+            theme_cache: None,
+            last_coordinate: None,
+            panel_surface: None,
+            icon_surface: None,
+            frame_icon_surface: None,
+            scaled_icon_surface: None,
+            icon_layer_key: None,
         })
     }
 
@@ -92,15 +110,24 @@ impl GdiAAPainter {
     }
 
     fn paint_inner(&mut self, state: &SwitchAppsState) -> Result<()> {
+        let _paint_timer = StageTimer::new(if self.show { "paint" } else { "first_frame" });
         if state.apps.is_empty() {
             return Err(anyhow!("Cannot paint an empty app state"));
         }
 
-        let dpi_scale = get_dpi_scale(self.hwnd);
+        let layout_timer = StageTimer::new("layout");
+        let hwnd = self.hwnd;
+        let dpi_scale = *self.dpi_scale.get_or_insert_with(|| get_dpi_scale(hwnd));
         let icon_size_max = (ICON_SIZE_BASE as f64 * dpi_scale) as i32;
         let border_size = (WINDOW_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
         let icon_border = (ICON_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
 
+        let coordinate = Coordinate::new(
+            state.apps.len() as i32,
+            icon_size_max,
+            border_size,
+            icon_border,
+        );
         let Coordinate {
             x,
             y,
@@ -108,15 +135,11 @@ impl GdiAAPainter {
             height,
             icon_size,
             item_size,
-        } = Coordinate::new(
-            state.apps.len() as i32,
-            icon_size_max,
-            border_size,
-            icon_border,
-        );
+        } = coordinate;
         if width <= 0 || height <= 0 || icon_size <= 0 || item_size <= 0 {
             return Err(anyhow!("Invalid painter dimensions"));
         }
+        layout_timer.finish();
 
         let corner_radius = if self.rounded_corner {
             item_size / 4
@@ -124,18 +147,28 @@ impl GdiAAPainter {
             0
         };
 
-        let hwnd = self.hwnd;
         let hdc_screen = self.hdc_screen.get();
 
-        let (fg_color, bg_color) = theme_color(is_light_theme());
+        let light_theme = match self.theme_cache {
+            Some((light_theme, checked_at)) if checked_at.elapsed() < THEME_CACHE_TTL => {
+                light_theme
+            }
+            _ => {
+                let light_theme = is_light_theme();
+                self.theme_cache = Some((light_theme, Instant::now()));
+                light_theme
+            }
+        };
+        let (fg_color, bg_color) = theme_color(light_theme);
 
-        let hdc_mem = MemoryDcGuard::new(hdc_screen)?;
-        let bitmap_mem =
-            BitmapGuard::new(unsafe { CreateCompatibleBitmap(hdc_screen, width, height) })?;
-        let _bitmap_mem_selection =
-            SelectedObjectGuard::new(hdc_mem.get(), bitmap_mem.get().into())?;
+        let hdc_mem = ensure_surface(&mut self.panel_surface, hdc_screen, width, height)?.dc();
 
-        let graphics = GpGraphicsGuard::new(hdc_mem.get())?;
+        let render_timer = StageTimer::new("render");
+        let graphics = GpGraphicsGuard::new(hdc_mem)?;
+        gdiplus_status(
+            unsafe { GdipGraphicsClear(graphics.get(), 0) },
+            "GdipGraphicsClear",
+        )?;
         gdiplus_status(
             unsafe { GdipSetSmoothingMode(graphics.get(), SmoothingModeAntiAlias) },
             "GdipSetSmoothingMode",
@@ -187,9 +220,13 @@ impl GdiAAPainter {
             corner_radius,
             fg_color,
             bg_color,
+            &mut self.icon_surface,
+            &mut self.frame_icon_surface,
+            &mut self.scaled_icon_surface,
+            &mut self.icon_layer_key,
         )?;
 
-        let image = GpImageGuard::from_hbitmap(bitmap_icons.get())?;
+        let image = GpImageGuard::from_hbitmap(bitmap_icons)?;
         gdiplus_status(
             unsafe {
                 GdipDrawImageRect(
@@ -203,6 +240,7 @@ impl GdiAAPainter {
             },
             "GdipDrawImageRect",
         )?;
+        render_timer.finish();
 
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as _,
@@ -210,6 +248,7 @@ impl GdiAAPainter {
             AlphaFormat: AC_SRC_ALPHA as _,
             ..Default::default()
         };
+        let update_timer = StageTimer::new("update_layered_window");
         unsafe {
             UpdateLayeredWindow(
                 hwnd,
@@ -219,7 +258,7 @@ impl GdiAAPainter {
                     cx: width,
                     cy: height,
                 }),
-                Some(hdc_mem.get()),
+                Some(hdc_mem),
                 Some(&POINT::default()),
                 COLORREF(0),
                 Some(&blend),
@@ -227,14 +266,18 @@ impl GdiAAPainter {
             )
         }
         .context("UpdateLayeredWindow failed")?;
+        update_timer.finish();
+        self.last_coordinate = Some((state.apps.len(), coordinate));
 
         if self.show {
             return Ok(());
         }
+        let show_timer = StageTimer::new("show_window");
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetFocus(Some(self.hwnd));
         }
+        show_timer.finish();
         self.show = true;
         Ok(())
     }
@@ -244,6 +287,12 @@ impl GdiAAPainter {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         self.show = false;
+        self.last_coordinate = None;
+        self.scaled_icon_surface = None;
+        self.frame_icon_surface = None;
+        self.icon_surface = None;
+        self.icon_layer_key = None;
+        self.panel_surface = None;
     }
 
     pub fn find_clicked_app_index(&self, state: &SwitchAppsState) -> Option<usize> {
@@ -253,19 +302,14 @@ impl GdiAAPainter {
             pos
         };
 
-        let dpi_scale = get_dpi_scale(self.hwnd);
-        let icon_size_max = (ICON_SIZE_BASE as f64 * dpi_scale) as i32;
-        let border_size = (WINDOW_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
-        let icon_border = (ICON_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
-
+        let (app_count, coordinate) = self.last_coordinate?;
+        if app_count != state.apps.len() {
+            return None;
+        }
         let Coordinate {
             x, y, item_size, ..
-        } = Coordinate::new(
-            state.apps.len() as i32,
-            icon_size_max,
-            border_size,
-            icon_border,
-        );
+        } = coordinate;
+        let border_size = (coordinate.width - coordinate.item_size * app_count as i32) / 2;
 
         let xpos = cursor_pos.x - x;
         let ypos = cursor_pos.y - y;
@@ -382,29 +426,40 @@ fn draw_icons(
     corner_radius: i32,
     fg_color: u32,
     bg_color: u32,
-) -> Result<BitmapGuard> {
-    let scaled_width = width * SCALE_FACTOR;
-    let scaled_height = height * SCALE_FACTOR;
+    icon_surface: &mut Option<BitmapSurface>,
+    frame_icon_surface: &mut Option<BitmapSurface>,
+    scaled_icon_surface: &mut Option<BitmapSurface>,
+    icon_layer_key: &mut Option<IconLayerKey>,
+) -> Result<HBITMAP> {
+    let item_size = icon_size
+        .checked_add(
+            icon_border
+                .checked_mul(2)
+                .ok_or_else(|| anyhow!("Icon border size overflow"))?,
+        )
+        .ok_or_else(|| anyhow!("Icon item size overflow"))?;
+    let scaled_item_size = item_size
+        .checked_mul(SCALE_FACTOR)
+        .ok_or_else(|| anyhow!("Scaled icon item size overflow"))?;
     let scaled_corner_radius = corner_radius * SCALE_FACTOR;
     let scaled_border_size = icon_border * SCALE_FACTOR;
     let scaled_icon_inner_size = icon_size * SCALE_FACTOR;
-    let scaled_icon_outer_size = scaled_icon_inner_size + scaled_border_size * 2;
 
-    if width <= 0 || height <= 0 || scaled_width <= 0 || scaled_height <= 0 {
+    if width <= 0 || height <= 0 || item_size != height || scaled_item_size <= 0 {
         return Err(anyhow!("Invalid icon bitmap dimensions"));
     }
 
-    let hdc_tmp = MemoryDcGuard::new(hdc_screen)?;
-    let bitmap_tmp =
-        BitmapGuard::new(unsafe { CreateCompatibleBitmap(hdc_screen, width, height) })?;
-    let _bitmap_tmp_selection = SelectedObjectGuard::new(hdc_tmp.get(), bitmap_tmp.get().into())?;
-
-    let hdc_scaled = MemoryDcGuard::new(hdc_screen)?;
-    let bitmap_scaled = BitmapGuard::new(unsafe {
-        CreateCompatibleBitmap(hdc_screen, scaled_width, scaled_height)
-    })?;
-    let _bitmap_scaled_selection =
-        SelectedObjectGuard::new(hdc_scaled.get(), bitmap_scaled.get().into())?;
+    let hdc_static = ensure_surface(icon_surface, hdc_screen, width, height)?.dc();
+    let frame_surface = ensure_surface(frame_icon_surface, hdc_screen, width, height)?;
+    let hdc_frame = frame_surface.dc();
+    let bitmap_frame = frame_surface.bitmap();
+    let hdc_scaled = ensure_surface(
+        scaled_icon_surface,
+        hdc_screen,
+        scaled_item_size,
+        scaled_item_size,
+    )?
+    .dc();
 
     let fg_brush = BrushGuard::new(unsafe { CreateSolidBrush(COLORREF(fg_color)) })?;
     let bg_brush = BrushGuard::new(unsafe { CreateSolidBrush(COLORREF(bg_color)) })?;
@@ -429,41 +484,34 @@ fn draw_icons(
     let rect = RECT {
         left: 0,
         top: 0,
-        right: scaled_width,
-        bottom: scaled_height,
+        right: scaled_item_size,
+        bottom: scaled_item_size,
     };
 
-    if unsafe { FillRect(hdc_scaled.get(), &rect, bg_brush.get()) } == 0 {
-        return Err(anyhow!("FillRect failed"));
-    }
-
-    for (i, entry) in state.apps.iter().enumerate() {
-        // draw the box for selected icon
-        if i == state.index {
-            let left = scaled_icon_outer_size * (i as i32);
-            let top = 0;
-            let right = left + scaled_icon_outer_size;
-            let bottom = top + scaled_icon_outer_size;
+    let draw_item = |entry: &crate::app::AppEntry, selected: bool| -> Result<()> {
+        if unsafe { FillRect(hdc_scaled, &rect, bg_brush.get()) } == 0 {
+            return Err(anyhow!("FillRect failed"));
+        }
+        if selected {
             let region = RegionGuard::new(unsafe {
                 CreateRoundRectRgn(
-                    left,
-                    top,
-                    right,
-                    bottom,
+                    0,
+                    0,
+                    scaled_item_size,
+                    scaled_item_size,
                     scaled_corner_radius,
                     scaled_corner_radius,
                 )
             })?;
-            unsafe { FillRgn(hdc_scaled.get(), region.get(), fg_brush.get()) }
+            unsafe { FillRgn(hdc_scaled, region.get(), fg_brush.get()) }
                 .ok()
                 .map_err(|err| anyhow!("FillRgn failed, {err}"))?;
         }
 
-        let cx = scaled_border_size + scaled_icon_outer_size * (i as i32);
         unsafe {
             DrawIconEx(
-                hdc_scaled.get(),
-                cx,
+                hdc_scaled,
+                scaled_border_size,
                 scaled_border_size,
                 entry.icon,
                 scaled_icon_inner_size,
@@ -480,11 +528,10 @@ fn draw_icons(
                 let scaled_offset = geometry.offset * SCALE_FACTOR;
                 let scaled_width = geometry.width * SCALE_FACTOR;
                 let scaled_height = geometry.height * SCALE_FACTOR;
-                let item_left = scaled_icon_outer_size * (i as i32);
-                let right = item_left + scaled_icon_outer_size - scaled_offset;
+                let right = scaled_item_size - scaled_offset;
                 let left = right - scaled_width;
                 draw_badge(
-                    hdc_scaled.get(),
+                    hdc_scaled,
                     &label,
                     left,
                     scaled_offset,
@@ -503,30 +550,111 @@ fn draw_icons(
                 );
             }
         }
-    }
+        Ok(())
+    };
 
-    if unsafe { SetStretchBltMode(hdc_tmp.get(), HALFTONE) } == 0 {
+    if unsafe { SetStretchBltMode(hdc_static, HALFTONE) } == 0
+        || unsafe { SetStretchBltMode(hdc_frame, HALFTONE) } == 0
+    {
         return Err(anyhow!("SetStretchBltMode failed"));
     }
+
+    let next_layer_key = IconLayerKey {
+        width,
+        height,
+        icon_size,
+        icon_border,
+        bg_color,
+        entries: state
+            .apps
+            .iter()
+            .map(|entry| (entry.icon.0 as isize, entry.window_count))
+            .collect(),
+    };
+    if icon_layer_key.as_ref() != Some(&next_layer_key) {
+        let static_layer_timer = StageTimer::new("static_icon_layer");
+        for (index, entry) in state.apps.iter().enumerate() {
+            draw_item(entry, false)?;
+            unsafe {
+                StretchBlt(
+                    hdc_static,
+                    item_size * index as i32,
+                    0,
+                    item_size,
+                    item_size,
+                    Some(hdc_scaled),
+                    0,
+                    0,
+                    scaled_item_size,
+                    scaled_item_size,
+                    SRCCOPY,
+                )
+            }
+            .ok()
+            .map_err(|err| anyhow!("StretchBlt static icon failed, {err}"))?;
+        }
+        *icon_layer_key = Some(next_layer_key);
+        static_layer_timer.finish();
+    }
+
     unsafe {
-        StretchBlt(
-            hdc_tmp.get(),
+        BitBlt(
+            hdc_frame,
             0,
             0,
             width,
             height,
-            Some(hdc_scaled.get()),
+            Some(hdc_static),
             0,
             0,
-            scaled_width,
-            scaled_height,
+            SRCCOPY,
+        )
+    }
+    .map_err(|err| anyhow!("BitBlt icon layer failed, {err}"))?;
+
+    let selected = state
+        .apps
+        .get(state.index)
+        .ok_or_else(|| anyhow!("Selected app index is out of range"))?;
+    draw_item(selected, true)?;
+    unsafe {
+        StretchBlt(
+            hdc_frame,
+            item_size * state.index as i32,
+            0,
+            item_size,
+            item_size,
+            Some(hdc_scaled),
+            0,
+            0,
+            scaled_item_size,
+            scaled_item_size,
             SRCCOPY,
         )
     }
     .ok()
-    .map_err(|err| anyhow!("StretchBlt failed, {err}"))?;
+    .map_err(|err| anyhow!("StretchBlt selected icon failed, {err}"))?;
 
-    Ok(bitmap_tmp)
+    Ok(bitmap_frame)
+}
+
+fn ensure_surface(
+    surface: &mut Option<BitmapSurface>,
+    reference: HDC,
+    width: i32,
+    height: i32,
+) -> Result<&BitmapSurface> {
+    let recreate = surface
+        .as_ref()
+        .map(|surface| !surface.matches(width, height))
+        .unwrap_or(true);
+    if recreate {
+        let replacement = BitmapSurface::new(reference, width, height)?;
+        *surface = Some(replacement);
+    }
+    surface
+        .as_ref()
+        .ok_or_else(|| anyhow!("Bitmap surface was not initialized"))
 }
 
 fn get_dpi_scale(hwnd: HWND) -> f64 {
@@ -540,6 +668,17 @@ fn get_dpi_scale(hwnd: HWND) -> f64 {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct IconLayerKey {
+    width: i32,
+    height: i32,
+    icon_size: i32,
+    icon_border: i32,
+    bg_color: u32,
+    entries: Vec<(isize, usize)>,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct Coordinate {
     x: i32,
     y: i32,
