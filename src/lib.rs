@@ -5,6 +5,7 @@ pub mod macros;
 extern crate log;
 
 mod app;
+mod backdrop;
 mod badge;
 mod config;
 mod foreground;
@@ -19,4 +20,7 @@ mod startup;
 mod trayicon;
 
 pub use crate::app::start;
-pub use crate::config::{load_config, AppearanceConfig, Config, LayoutMode, MonitorTarget};
+pub use crate::config::{
+    load_config, AppearanceConfig, BackdropFallback, BackdropMode, BackgroundColor, Config,
+    LayoutMode, MonitorTarget,
+};

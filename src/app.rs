@@ -368,8 +368,13 @@ impl App {
                 return Ok(LRESULT(0));
             }
             WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+                let environment_changed = msg == WM_SETTINGCHANGE;
                 with_app(hwnd, |app| {
-                    app.painter.invalidate_layout();
+                    if environment_changed {
+                        app.painter.invalidate_environment();
+                    } else {
+                        app.painter.invalidate_layout();
+                    }
                     if let Some(state) = app.switch_apps_state.as_ref() {
                         app.painter.paint(state);
                     }

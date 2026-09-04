@@ -7,9 +7,11 @@ use windows::Win32::{
             SelectObject, HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, HPALETTE, HRGN,
         },
         GdiPlus::{
-            FillModeAlternate, GdipCreateBitmapFromHBITMAP, GdipCreateFromHDC, GdipCreatePath,
-            GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
-            GdipDisposeImage, GpBitmap, GpBrush, GpGraphics, GpImage, GpPath, GpSolidFill, Status,
+            ColorAdjustTypeBitmap, FillModeAlternate, GdipCreateBitmapFromHBITMAP,
+            GdipCreateFromHDC, GdipCreateImageAttributes, GdipCreatePath, GdipCreateSolidFill,
+            GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath, GdipDisposeImage,
+            GdipDisposeImageAttributes, GdipSetImageAttributesColorKeys, GpBitmap, GpBrush,
+            GpGraphics, GpImage, GpImageAttributes, GpPath, GpSolidFill, Status,
         },
     },
 };
@@ -349,6 +351,50 @@ impl Drop for GpImageGuard {
         if !self.0.is_null() {
             unsafe {
                 let _ = GdipDisposeImage(self.0);
+            }
+        }
+    }
+}
+
+pub(super) struct GpImageAttributesGuard(*mut GpImageAttributes);
+
+impl GpImageAttributesGuard {
+    pub(super) fn with_color_key(argb: u32) -> Result<Self> {
+        let mut ptr = std::ptr::null_mut();
+        gdiplus_status(
+            unsafe { GdipCreateImageAttributes(&mut ptr) },
+            "GdipCreateImageAttributes",
+        )?;
+        if ptr.is_null() {
+            return Err(anyhow!("GdipCreateImageAttributes returned a null pointer"));
+        }
+
+        let attributes = Self(ptr);
+        gdiplus_status(
+            unsafe {
+                GdipSetImageAttributesColorKeys(
+                    attributes.get(),
+                    ColorAdjustTypeBitmap,
+                    true,
+                    argb,
+                    argb,
+                )
+            },
+            "GdipSetImageAttributesColorKeys",
+        )?;
+        Ok(attributes)
+    }
+
+    pub(super) fn get(&self) -> *mut GpImageAttributes {
+        self.0
+    }
+}
+
+impl Drop for GpImageAttributesGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = GdipDisposeImageAttributes(self.0);
             }
         }
     }

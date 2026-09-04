@@ -1,14 +1,15 @@
 use crate::app::SwitchAppsState;
+use crate::backdrop::BackdropController;
 use crate::badge::{
     badge_geometry, badge_label, create_badge_font, draw_badge, BADGE_BACKGROUND_COLOR,
     BADGE_BORDER_COLOR,
 };
-use crate::config::AppearanceConfig;
+use crate::config::{AppearanceConfig, BackgroundColor};
 use crate::layout::LayoutSnapshot;
 use crate::metrics::StageTimer;
 use crate::painter_resources::{
     gdiplus_status, BitmapSurface, BrushGuard, FontGuard, GpBrushGuard, GpGraphicsGuard,
-    GpImageGuard, GpPathGuard, RegionGuard, ScreenDcGuard,
+    GpImageAttributesGuard, GpImageGuard, GpPathGuard, RegionGuard, ScreenDcGuard,
 };
 use crate::utils::{get_monitor_context, is_light_theme, is_win11};
 
@@ -22,10 +23,10 @@ use windows::Win32::{
             StretchBlt, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HALFTONE, HBITMAP, HDC, SRCCOPY,
         },
         GdiPlus::{
-            GdipAddPathArc, GdipClosePathFigure, GdipDrawImageRect, GdipFillPath,
-            GdipFillRectangle, GdipGraphicsClear, GdipSetInterpolationMode, GdipSetSmoothingMode,
-            GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics,
-            InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias,
+            GdipAddPathArc, GdipClosePathFigure, GdipDrawImageRect, GdipDrawImageRectRectI,
+            GdipFillPath, GdipFillRectangle, GdipGraphicsClear, GdipSetInterpolationMode,
+            GdipSetSmoothingMode, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBrush,
+            GpGraphics, InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias, UnitPixel,
         },
     },
     UI::{
@@ -41,7 +42,6 @@ pub const BG_DARK_COLOR: u32 = 0x4c4c4c;
 pub const FG_DARK_COLOR: u32 = 0x3b3b3b;
 pub const BG_LIGHT_COLOR: u32 = 0xe0e0e0;
 pub const FG_LIGHT_COLOR: u32 = 0xf2f2f2;
-pub const ALPHA_MASK: u32 = 0xff000000;
 pub const SCALE_FACTOR: i32 = 6;
 const THEME_CACHE_TTL: Duration = Duration::from_secs(1);
 
@@ -53,6 +53,7 @@ pub struct GdiAAPainter {
     rounded_corner: bool,
     show: bool,
     appearance: AppearanceConfig,
+    backdrop: BackdropController,
     theme_cache: Option<(bool, Instant)>,
     last_layout: Option<LayoutSnapshot>,
     panel_surface: Option<BitmapSurface>,
@@ -83,6 +84,16 @@ impl GdiAAPainter {
             }
         };
         let rounded_corner = is_win11();
+        let light_theme = is_light_theme();
+        let (_, default_bg_color) = theme_color(light_theme);
+        let bg_color = resolve_background_color(appearance.background_color, default_bg_color);
+        let backdrop = BackdropController::new(
+            hwnd,
+            appearance.backdrop,
+            appearance.backdrop_fallback,
+            bg_color,
+            appearance.background_opacity,
+        );
 
         Ok(Self {
             token,
@@ -91,7 +102,8 @@ impl GdiAAPainter {
             rounded_corner,
             show: false,
             appearance: appearance.clone(),
-            theme_cache: None,
+            backdrop,
+            theme_cache: Some((light_theme, Instant::now())),
             last_layout: None,
             panel_surface: None,
             icon_surface: None,
@@ -142,7 +154,15 @@ impl GdiAAPainter {
                 light_theme
             }
         };
-        let (fg_color, bg_color) = theme_color(light_theme);
+        let (fg_rgb, default_bg_rgb) = theme_color(light_theme);
+        let bg_rgb = resolve_background_color(self.appearance.background_color, default_bg_rgb);
+        self.backdrop
+            .update_tint(bg_rgb, self.appearance.background_opacity);
+        let background_alpha = self
+            .backdrop
+            .background_alpha(self.appearance.background_opacity);
+        let fg_color = rgb_to_colorref(fg_rgb);
+        let bg_color = rgb_to_colorref(bg_rgb);
 
         let hdc_mem = ensure_surface(&mut self.panel_surface, hdc_screen, width, height)?.dc();
 
@@ -163,7 +183,7 @@ impl GdiAAPainter {
             "GdipSetInterpolationMode",
         )?;
 
-        let bg_brush = GpBrushGuard::new(ALPHA_MASK | bg_color)?;
+        let bg_brush = GpBrushGuard::new(argb(background_alpha, bg_rgb))?;
 
         if self.rounded_corner {
             draw_round_rect(
@@ -207,19 +227,44 @@ impl GdiAAPainter {
         )?;
 
         let image = GpImageGuard::from_hbitmap(bitmap_icons)?;
-        gdiplus_status(
-            unsafe {
-                GdipDrawImageRect(
-                    graphics.get(),
-                    image.get(),
-                    layout.panel_padding as f32,
-                    layout.panel_padding as f32,
-                    layout.content_width as f32,
-                    layout.content_height as f32,
-                )
-            },
-            "GdipDrawImageRect",
-        )?;
+        if background_alpha == u8::MAX {
+            gdiplus_status(
+                unsafe {
+                    GdipDrawImageRect(
+                        graphics.get(),
+                        image.get(),
+                        layout.panel_padding as f32,
+                        layout.panel_padding as f32,
+                        layout.content_width as f32,
+                        layout.content_height as f32,
+                    )
+                },
+                "GdipDrawImageRect",
+            )?;
+        } else {
+            let image_attributes = GpImageAttributesGuard::with_color_key(argb(u8::MAX, bg_rgb))?;
+            gdiplus_status(
+                unsafe {
+                    GdipDrawImageRectRectI(
+                        graphics.get(),
+                        image.get(),
+                        layout.panel_padding,
+                        layout.panel_padding,
+                        layout.content_width,
+                        layout.content_height,
+                        0,
+                        0,
+                        layout.content_width,
+                        layout.content_height,
+                        UnitPixel,
+                        image_attributes.get(),
+                        0,
+                        std::ptr::null_mut(),
+                    )
+                },
+                "GdipDrawImageRectRectI",
+            )?;
+        }
         render_timer.finish();
 
         let blend = BLENDFUNCTION {
@@ -279,6 +324,11 @@ impl GdiAAPainter {
         self.release_surfaces();
     }
 
+    pub fn invalidate_environment(&mut self) {
+        self.theme_cache = None;
+        self.invalidate_layout();
+    }
+
     fn release_surfaces(&mut self) {
         self.scaled_icon_surface = None;
         self.frame_icon_surface = None;
@@ -314,6 +364,23 @@ const fn theme_color(light_theme: bool) -> (u32, u32) {
         true => (FG_LIGHT_COLOR, BG_LIGHT_COLOR),
         false => (FG_DARK_COLOR, BG_DARK_COLOR),
     }
+}
+
+const fn resolve_background_color(color: BackgroundColor, automatic: u32) -> u32 {
+    match color {
+        BackgroundColor::Auto => automatic,
+        BackgroundColor::Rgb { red, green, blue } => {
+            ((red as u32) << 16) | ((green as u32) << 8) | blue as u32
+        }
+    }
+}
+
+const fn rgb_to_colorref(rgb: u32) -> u32 {
+    ((rgb & 0xff) << 16) | (rgb & 0x00_ff_00) | ((rgb >> 16) & 0xff)
+}
+
+const fn argb(alpha: u8, rgb: u32) -> u32 {
+    ((alpha as u32) << 24) | (rgb & 0x00ff_ffff)
 }
 
 fn draw_round_rect(
@@ -694,4 +761,25 @@ struct IconLayerKey {
     show_badge: bool,
     badge_max: usize,
     entries: Vec<(usize, isize, usize, i32, i32)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_background_color_uses_argb_and_colorref_byte_order() {
+        let rgb = resolve_background_color(
+            BackgroundColor::Rgb {
+                red: 0x12,
+                green: 0x34,
+                blue: 0x56,
+            },
+            0,
+        );
+
+        assert_eq!(rgb, 0x12_34_56);
+        assert_eq!(argb(0x80, rgb), 0x80_12_34_56);
+        assert_eq!(rgb_to_colorref(rgb), 0x56_34_12);
+    }
 }

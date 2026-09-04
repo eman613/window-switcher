@@ -19,7 +19,23 @@ param(
 
     [Parameter()]
     [ValidateRange(0, 10000)]
-    [int] $AutomatedSwitchCount = 0
+    [int] $AutomatedSwitchCount = 0,
+
+    [Parameter()]
+    [ValidateSet('none', 'alpha', 'blur', 'acrylic', 'mica', 'auto')]
+    [string] $Backdrop = 'none',
+
+    [Parameter()]
+    [ValidateRange(0, 100)]
+    [int] $BackgroundOpacity = 100,
+
+    [Parameter()]
+    [ValidatePattern('^(?:auto|#[0-9A-Fa-f]{6})$')]
+    [string] $BackgroundColor = 'auto',
+
+    [Parameter()]
+    [ValidateSet('alpha', 'solid')]
+    [string] $BackdropFallback = 'alpha'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -123,6 +139,12 @@ try {
         ''
         '[startup]'
         'run_as_admin = no'
+        ''
+        '[appearance]'
+        "background_color = $BackgroundColor"
+        "background_opacity = $BackgroundOpacity"
+        "backdrop = $Backdrop"
+        "backdrop_fallback = $BackdropFallback"
         ''
         '[switch-windows]'
         'hotkey = alt+`'

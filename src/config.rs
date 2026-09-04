@@ -20,6 +20,7 @@ const PANEL_EXTENT_MAX: i32 = 32_768;
 const GRID_EXTENT_MAX: usize = 256;
 const BADGE_MAX_MIN: usize = 2;
 const BADGE_MAX_MAX: usize = 9_999;
+const BACKGROUND_OPACITY_MAX: u8 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MonitorTarget {
@@ -63,6 +64,85 @@ impl FromStr for LayoutMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundColor {
+    #[default]
+    Auto,
+    Rgb {
+        red: u8,
+        green: u8,
+        blue: u8,
+    },
+}
+
+impl FromStr for BackgroundColor {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+
+        let hex = value.strip_prefix('#').ok_or(())?;
+        if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(());
+        }
+        let rgb = u32::from_str_radix(hex, 16).map_err(|_| ())?;
+        Ok(Self::Rgb {
+            red: ((rgb >> 16) & 0xff) as u8,
+            green: ((rgb >> 8) & 0xff) as u8,
+            blue: (rgb & 0xff) as u8,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackdropMode {
+    #[default]
+    None,
+    Alpha,
+    Blur,
+    Acrylic,
+    Mica,
+    Auto,
+}
+
+impl FromStr for BackdropMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "alpha" => Ok(Self::Alpha),
+            "blur" => Ok(Self::Blur),
+            "acrylic" => Ok(Self::Acrylic),
+            "mica" => Ok(Self::Mica),
+            "auto" => Ok(Self::Auto),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackdropFallback {
+    Solid,
+    #[default]
+    Alpha,
+}
+
+impl FromStr for BackdropFallback {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" | "solid" => Ok(Self::Solid),
+            "alpha" => Ok(Self::Alpha),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppearanceConfig {
     pub monitor: MonitorTarget,
@@ -76,6 +156,10 @@ pub struct AppearanceConfig {
     pub layout: LayoutMode,
     pub max_columns: usize,
     pub max_rows: usize,
+    pub background_color: BackgroundColor,
+    pub background_opacity: u8,
+    pub backdrop: BackdropMode,
+    pub backdrop_fallback: BackdropFallback,
     pub show_badge: bool,
     pub badge_max: usize,
 }
@@ -94,6 +178,10 @@ impl Default for AppearanceConfig {
             layout: LayoutMode::SingleRow,
             max_columns: 0,
             max_rows: 0,
+            background_color: BackgroundColor::Auto,
+            background_opacity: 100,
+            backdrop: BackdropMode::None,
+            backdrop_fallback: BackdropFallback::Alpha,
             show_badge: true,
             badge_max: 99,
         }
@@ -250,6 +338,33 @@ impl Config {
                     0,
                     GRID_EXTENT_MAX,
                     conf.appearance.max_rows,
+                );
+            }
+            if let Some(value) = section.get("background_color") {
+                conf.appearance.background_color = parse_enum_or_default(
+                    "appearance.background_color",
+                    value,
+                    conf.appearance.background_color,
+                );
+            }
+            if let Some(value) = section.get("background_opacity") {
+                conf.appearance.background_opacity = parse_u8_or_default(
+                    "appearance.background_opacity",
+                    value,
+                    0,
+                    BACKGROUND_OPACITY_MAX,
+                    conf.appearance.background_opacity,
+                );
+            }
+            if let Some(value) = section.get("backdrop") {
+                conf.appearance.backdrop =
+                    parse_enum_or_default("appearance.backdrop", value, conf.appearance.backdrop);
+            }
+            if let Some(value) = section.get("backdrop_fallback") {
+                conf.appearance.backdrop_fallback = parse_enum_or_default(
+                    "appearance.backdrop_fallback",
+                    value,
+                    conf.appearance.backdrop_fallback,
                 );
             }
             if let Some(value) = section.get("show_badge") {
@@ -604,6 +719,16 @@ fn parse_i32_or_default(name: &str, value: &str, min: i32, max: i32, default: i3
     }
 }
 
+fn parse_u8_or_default(name: &str, value: &str, min: u8, max: u8, default: u8) -> u8 {
+    match value.trim().parse::<u8>() {
+        Ok(parsed) if (min..=max).contains(&parsed) => parsed,
+        _ => {
+            warn!("invalid {name}={value:?}; expected {min}..={max}, using default {default}");
+            default
+        }
+    }
+}
+
 fn parse_usize_or_default(
     name: &str,
     value: &str,
@@ -683,7 +808,7 @@ mod tests {
     #[test]
     fn appearance_settings_are_loaded() {
         let ini = Ini::load_from_str(
-            "[appearance]\nmonitor = foreground\nuse_work_area = no\nicon_size = 80\nicon_padding = 6\nitem_gap = 12\npanel_padding = 16\nmax_width = 1200\nmax_height = 800\nlayout = grid\nmax_columns = 8\nmax_rows = 3\nshow_badge = no\nbadge_max = 999\n",
+            "[appearance]\nmonitor = foreground\nuse_work_area = no\nicon_size = 80\nicon_padding = 6\nitem_gap = 12\npanel_padding = 16\nmax_width = 1200\nmax_height = 800\nlayout = grid\nmax_columns = 8\nmax_rows = 3\nbackground_color = #123abc\nbackground_opacity = 72\nbackdrop = acrylic\nbackdrop_fallback = solid\nshow_badge = no\nbadge_max = 999\n",
         )
         .unwrap();
 
@@ -701,6 +826,14 @@ mod tests {
                 layout: LayoutMode::Grid,
                 max_columns: 8,
                 max_rows: 3,
+                background_color: BackgroundColor::Rgb {
+                    red: 0x12,
+                    green: 0x3a,
+                    blue: 0xbc,
+                },
+                background_opacity: 72,
+                backdrop: BackdropMode::Acrylic,
+                backdrop_fallback: BackdropFallback::Solid,
                 show_badge: false,
                 badge_max: 999,
             }
@@ -710,7 +843,7 @@ mod tests {
     #[test]
     fn invalid_appearance_settings_keep_safe_defaults() {
         let ini = Ini::load_from_str(
-            "[appearance]\nmonitor = elsewhere\nicon_size = 0\nitem_gap = -1\nlayout = diagonal\nmax_columns = 999\nbadge_max = 1\n",
+            "[appearance]\nmonitor = elsewhere\nicon_size = 0\nitem_gap = -1\nlayout = diagonal\nmax_columns = 999\nbackground_color = red\nbackground_opacity = 101\nbackdrop = glass\nbackdrop_fallback = blur\nbadge_max = 1\n",
         )
         .unwrap();
 
