@@ -6,7 +6,10 @@ use std::{
     path::Path,
 };
 
-use window_switcher::{alert, load_config, start, utils::SingleInstance};
+use window_switcher::{
+    alert, load_config, start,
+    utils::{is_running_as_admin, relaunch_as_admin, SingleInstance},
+};
 
 fn main() {
     if let Err(err) = run() {
@@ -23,6 +26,11 @@ fn run() -> Result<()> {
     }
 
     let config = load_config().unwrap_or_default();
+    if config.run_as_admin && !is_running_as_admin()? {
+        relaunch_as_admin()?;
+        return Ok(());
+    }
+
     if let Some(log_file) = &config.log_file {
         let file = prepare_log_file(log_file).map_err(|err| {
             anyhow!(

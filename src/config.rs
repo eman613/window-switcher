@@ -16,6 +16,7 @@ const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub trayicon: bool,
+    pub run_as_admin: bool,
     pub log_level: LevelFilter,
     pub log_file: Option<PathBuf>,
     pub switch_windows_hotkey: Vec<Hotkey>,
@@ -33,6 +34,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             trayicon: true,
+            run_as_admin: false,
             log_level: LevelFilter::Info,
             log_file: None,
             switch_windows_hotkey: vec![Hotkey::create(
@@ -64,6 +66,12 @@ impl Config {
         if let Some(section) = ini_conf.section(None::<String>) {
             if let Some(v) = section.get("trayicon").and_then(Config::to_bool) {
                 conf.trayicon = v;
+            }
+        }
+
+        if let Some(section) = ini_conf.section(Some("startup")) {
+            if let Some(v) = section.get("run_as_admin").and_then(Config::to_bool) {
+                conf.run_as_admin = v;
             }
         }
 
@@ -401,5 +409,14 @@ mod tests {
         assert_eq!(hotkeys.len(), 1);
         assert_eq!(hotkeys[0].modifier, [0x38, 0x38]);
         assert_eq!(hotkeys[0].code, 0x29);
+    }
+
+    #[test]
+    fn test_run_as_admin_config() {
+        let ini = Ini::load_from_str("[startup]\nrun_as_admin = yes\n").unwrap();
+        assert!(Config::load(&ini).unwrap().run_as_admin);
+
+        let ini = Ini::load_from_str("[startup]\nrun_as_admin = no\n").unwrap();
+        assert!(!Config::load(&ini).unwrap().run_as_admin);
     }
 }

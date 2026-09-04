@@ -1,6 +1,8 @@
 use super::HandleWrapper;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
+use std::path::Path;
+use windows::core::{w, PCWSTR};
 use windows::Win32::{
     Foundation::HANDLE,
     Security::{
@@ -11,6 +13,7 @@ use windows::Win32::{
     System::Threading::{
         GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
     },
+    UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
 };
 
 const SECURITY_MANDATORY_HIGH_RID: u32 = 0x00003000;
@@ -27,6 +30,32 @@ pub fn is_process_elevated(pid: u32) -> Option<bool> {
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?,
     );
     get_process_elevation_info(process.get_handle()).ok()
+}
+
+pub fn relaunch_as_admin() -> Result<()> {
+    let exe_path = std::env::current_exe()
+        .map_err(|err| anyhow!("Failed to get executable path for elevation, {err}"))?;
+    let exe_path_string = exe_path.to_string_lossy();
+    let exe_path_wide = super::to_wstring(&exe_path_string);
+    let directory = exe_path.parent().unwrap_or_else(|| Path::new("."));
+    let directory_string = directory.to_string_lossy();
+    let directory_wide = super::to_wstring(&directory_string);
+
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("runas"),
+            PCWSTR(exe_path_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR(directory_wide.as_ptr()),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result.0 as isize;
+    if code <= 32 {
+        bail!("Failed to relaunch as administrator, ShellExecuteW code {code}");
+    }
+    Ok(())
 }
 
 fn get_process_elevation_info(process: HANDLE) -> Result<bool> {
