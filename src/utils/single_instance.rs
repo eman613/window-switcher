@@ -12,21 +12,20 @@ pub struct SingleInstance {
     handle: Option<HANDLE>,
 }
 
-unsafe impl Send for SingleInstance {}
-unsafe impl Sync for SingleInstance {}
-
 impl SingleInstance {
     /// Returns a new SingleInstance object.
     pub fn create(name: &str) -> Result<Self> {
         let name = to_wstring(name);
         let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }
             .map_err(|err| anyhow!("Fail to setup single instance, {err}"))?;
-        let handle =
-            if windows::core::Error::from_win32().code() == ERROR_ALREADY_EXISTS.to_hresult() {
-                None
-            } else {
-                Some(handle)
-            };
+        if windows::core::Error::from_win32().code() == ERROR_ALREADY_EXISTS.to_hresult() {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Ok(Self { handle: None });
+        }
+
+        let handle = Some(handle);
         Ok(SingleInstance { handle })
     }
 

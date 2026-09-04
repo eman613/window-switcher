@@ -10,8 +10,8 @@ use windows::Win32::{
             NOTIFYICONDATAW,
         },
         WindowsAndMessaging::{
-            AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, GetCursorPos,
-            LookupIconIdFromDirectoryEx, SetForegroundWindow, TrackPopupMenu, HMENU,
+            AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, DestroyIcon, DestroyMenu,
+            GetCursorPos, LookupIconIdFromDirectoryEx, SetForegroundWindow, TrackPopupMenu, HMENU,
             LR_DEFAULTCOLOR, MF_CHECKED, MF_STRING, MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
         },
     },
@@ -51,11 +51,11 @@ impl TrayIcon {
                 .ok()
                 .map_err(|e| anyhow!("Fail to set foreground window, {}", e))?;
             GetCursorPos(&mut cursor).map_err(|e| anyhow!("Fail to get cursor pos, {}", e))?;
-            let hmenu = self
+            let menu = self
                 .create_menu(startup)
                 .map_err(|e| anyhow!("Fail to create menu, {}", e))?;
             TrackPopupMenu(
-                hmenu,
+                menu.get(),
                 TPM_LEFTALIGN | TPM_BOTTOMALIGN,
                 cursor.x,
                 cursor.y,
@@ -92,14 +92,49 @@ impl TrayIcon {
         }
     }
 
-    fn create_menu(&mut self, startup: bool) -> Result<HMENU> {
+    fn create_menu(&mut self, startup: bool) -> Result<PopupMenuGuard> {
         let startup_flags = if startup { MF_CHECKED } else { MF_UNCHECKED };
         unsafe {
-            let hmenu = CreatePopupMenu().map_err(|err| anyhow!("Failed to create menu, {err}"))?;
-            AppendMenuW(hmenu, MF_STRING, IDM_CONFIGURE as usize, TEXT_CONFIGURE)?;
-            AppendMenuW(hmenu, startup_flags, IDM_STARTUP as usize, TEXT_STARTUP)?;
-            AppendMenuW(hmenu, MF_STRING, IDM_EXIT as usize, TEXT_EXIT)?;
-            Ok(hmenu)
+            let menu = PopupMenuGuard::new(
+                CreatePopupMenu().map_err(|err| anyhow!("Failed to create menu, {err}"))?,
+            )?;
+            AppendMenuW(
+                menu.get(),
+                MF_STRING,
+                IDM_CONFIGURE as usize,
+                TEXT_CONFIGURE,
+            )?;
+            AppendMenuW(
+                menu.get(),
+                startup_flags,
+                IDM_STARTUP as usize,
+                TEXT_STARTUP,
+            )?;
+            AppendMenuW(menu.get(), MF_STRING, IDM_EXIT as usize, TEXT_EXIT)?;
+            Ok(menu)
+        }
+    }
+}
+
+struct PopupMenuGuard(HMENU);
+
+impl PopupMenuGuard {
+    fn new(menu: HMENU) -> Result<Self> {
+        if menu.is_invalid() {
+            return Err(anyhow!("CreatePopupMenu returned an invalid handle"));
+        }
+        Ok(Self(menu))
+    }
+
+    fn get(&self) -> HMENU {
+        self.0
+    }
+}
+
+impl Drop for PopupMenuGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyMenu(self.0);
         }
     }
 }
@@ -109,6 +144,9 @@ impl Drop for TrayIcon {
         debug!("trayicon destroyed");
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.data);
+            if !self.data.hIcon.is_invalid() {
+                let _ = DestroyIcon(self.data.hIcon);
+            }
         }
     }
 }
