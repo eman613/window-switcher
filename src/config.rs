@@ -1,26 +1,31 @@
-use std::{collections::HashSet, fs, path::PathBuf, process::Command, str::FromStr};
+use std::{collections::HashSet, path::PathBuf, str::FromStr};
 
 use anyhow::{anyhow, Result};
 use indexmap::IndexMap;
-use ini::{Ini, ParseOption};
+use ini::Ini;
 use log::LevelFilter;
 use windows::core::w;
 
-use crate::utils::{get_exe_folder, RegKey};
+use crate::{
+    localization::Language,
+    utils::{get_exe_folder, RegKey},
+};
 
 pub const SWITCH_WINDOWS_HOTKEY_ID: u32 = 1;
 pub const SWITCH_APPS_HOTKEY_ID: u32 = 2;
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
 
-const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
-
-const ICON_SIZE_MIN: i32 = 24;
-const ICON_SIZE_MAX: i32 = 256;
-const SPACING_MAX: i32 = 256;
-const PANEL_EXTENT_MAX: i32 = 32_768;
-const GRID_EXTENT_MAX: usize = 256;
-const BADGE_MAX_MIN: usize = 2;
-const BADGE_MAX_MAX: usize = 9_999;
-const BACKGROUND_OPACITY_MAX: u8 = 100;
+pub(crate) const ICON_SIZE_MIN: i32 = 24;
+pub(crate) const ICON_SIZE_MAX: i32 = 256;
+pub(crate) const SPACING_MAX: i32 = 256;
+pub(crate) const PANEL_EXTENT_MAX: i32 = 32_768;
+pub(crate) const GRID_EXTENT_MAX: usize = 256;
+pub(crate) const BADGE_MAX_MIN: usize = 2;
+pub(crate) const BADGE_MAX_MAX: usize = 9_999;
+pub(crate) const BACKGROUND_OPACITY_MAX: u8 = 100;
+pub(crate) const ICON_CACHE_LIMIT_MIN: usize = 16;
+pub(crate) const ICON_CACHE_LIMIT_MAX: usize = 256;
+pub(crate) const DEFAULT_RENDER_SCALE: i32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MonitorTarget {
@@ -143,6 +148,75 @@ impl FromStr for BackdropFallback {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigReloadMode {
+    Restart,
+    #[default]
+    OnOpen,
+    Watch,
+}
+
+impl FromStr for ConfigReloadMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "restart" => Ok(Self::Restart),
+            "on-open" => Ok(Self::OnOpen),
+            "watch" => Ok(Self::Watch),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderScale {
+    #[default]
+    Auto,
+    Factor(i32),
+}
+
+impl RenderScale {
+    pub const fn factor(self) -> i32 {
+        match self {
+            Self::Auto => DEFAULT_RENDER_SCALE,
+            Self::Factor(value) => value,
+        }
+    }
+}
+
+impl FromStr for RenderScale {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "1" => Ok(Self::Factor(1)),
+            "2" => Ok(Self::Factor(2)),
+            "4" => Ok(Self::Factor(4)),
+            "6" => Ok(Self::Factor(6)),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerformanceConfig {
+    pub icon_cache_limit: usize,
+    pub render_scale: RenderScale,
+    pub config_reload: ConfigReloadMode,
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            icon_cache_limit: ICON_CACHE_LIMIT_MAX,
+            render_scale: RenderScale::Auto,
+            config_reload: ConfigReloadMode::OnOpen,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppearanceConfig {
     pub monitor: MonitorTarget,
@@ -190,9 +264,12 @@ impl Default for AppearanceConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
+    pub config_version: u32,
     pub trayicon: bool,
     pub run_as_admin: bool,
     pub appearance: AppearanceConfig,
+    pub language: Language,
+    pub performance: PerformanceConfig,
     pub log_level: LevelFilter,
     pub log_file: Option<PathBuf>,
     pub switch_windows_hotkey: Vec<Hotkey>,
@@ -209,9 +286,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             trayicon: true,
             run_as_admin: false,
             appearance: AppearanceConfig::default(),
+            language: Language::Auto,
+            performance: PerformanceConfig::default(),
             log_level: LevelFilter::Info,
             log_file: None,
             switch_windows_hotkey: vec![Hotkey::create(
@@ -241,6 +321,10 @@ impl Config {
     pub fn load(ini_conf: &Ini) -> Result<Self> {
         let mut conf = Config::default();
         if let Some(section) = ini_conf.section(None::<String>) {
+            if let Some(value) = section.get("config_version") {
+                conf.config_version =
+                    parse_enum_or_default("config_version", value, conf.config_version);
+            }
             if let Some(v) = section.get("trayicon").and_then(Config::to_bool) {
                 conf.trayicon = v;
             }
@@ -385,11 +469,48 @@ impl Config {
             }
         }
 
+        if let Some(section) = ini_conf.section(Some("localization")) {
+            if let Some(value) = section.get("language") {
+                conf.language =
+                    parse_enum_or_default("localization.language", value, conf.language);
+            }
+        }
+
+        if let Some(section) = ini_conf.section(Some("performance")) {
+            if let Some(value) = section.get("icon_cache_limit") {
+                conf.performance.icon_cache_limit = parse_usize_or_default(
+                    "performance.icon_cache_limit",
+                    value,
+                    ICON_CACHE_LIMIT_MIN,
+                    ICON_CACHE_LIMIT_MAX,
+                    conf.performance.icon_cache_limit,
+                );
+            }
+            if let Some(value) = section.get("render_scale") {
+                conf.performance.render_scale = parse_enum_or_default(
+                    "performance.render_scale",
+                    value,
+                    conf.performance.render_scale,
+                );
+            }
+            if let Some(value) = section.get("config_reload") {
+                conf.performance.config_reload = parse_enum_or_default(
+                    "performance.config_reload",
+                    value,
+                    conf.performance.config_reload,
+                );
+            }
+        }
+
         if let Some(section) = ini_conf.section(Some("log")) {
             if let Some(level) = section.get("level").and_then(|v| v.parse().ok()) {
                 conf.log_level = level;
             }
-            if let Some(path) = section.get("path").map(normalize_path_value) {
+            if let Some(path) = section
+                .get("path")
+                .or_else(|| section.get("file"))
+                .map(normalize_path_value)
+            {
                 if !path.trim().is_empty() {
                     let mut path = PathBuf::from(path);
                     if !path.is_absolute() {
@@ -404,8 +525,12 @@ impl Config {
         if let Some(section) = ini_conf.section(Some("switch-windows")) {
             if let Some(v) = section.get("hotkey") {
                 if !v.trim().is_empty() {
-                    conf.switch_windows_hotkey =
-                        parse_hotkeys(SWITCH_WINDOWS_HOTKEY_ID, "switch windows", v)?;
+                    match parse_hotkeys(SWITCH_WINDOWS_HOTKEY_ID, "switch windows", v) {
+                        Ok(hotkeys) => conf.switch_windows_hotkey = hotkeys,
+                        Err(err) => {
+                            warn!("invalid switch-windows.hotkey={v:?}; using default: {err}")
+                        }
+                    }
                 }
             }
 
@@ -434,8 +559,10 @@ impl Config {
             }
             if let Some(v) = section.get("hotkey") {
                 if !v.trim().is_empty() {
-                    conf.switch_apps_hotkey =
-                        parse_hotkeys(SWITCH_APPS_HOTKEY_ID, "switch apps", v)?;
+                    match parse_hotkeys(SWITCH_APPS_HOTKEY_ID, "switch apps", v) {
+                        Ok(hotkeys) => conf.switch_apps_hotkey = hotkeys,
+                        Err(err) => warn!("invalid switch-apps.hotkey={v:?}; using default: {err}"),
+                    }
                 }
             }
             if let Some(v) = section.get("ignore_minimal").and_then(Config::to_bool) {
@@ -445,9 +572,11 @@ impl Config {
                 conf.switch_apps_override_icons = v
                     .split([',', ';'])
                     .filter_map(|v| {
-                        v.trim()
-                            .split_once("=")
-                            .map(|(k, v)| (k.to_lowercase(), v.to_string()))
+                        let (key, value) = v.trim().split_once('=')?;
+                        let key = key.trim();
+                        let value = value.trim();
+                        (!key.is_empty() && !value.is_empty())
+                            .then(|| (key.to_lowercase(), value.to_string()))
                     })
                     .collect();
             }
@@ -635,53 +764,6 @@ impl Hotkey {
     }
 }
 
-pub fn load_config() -> Result<Config> {
-    let _timer = crate::metrics::StageTimer::new("config_load");
-    let filepath = get_config_path()?;
-    if !filepath.exists() {
-        return Ok(Config::default());
-    }
-    let opt = ParseOption {
-        enabled_escape: false,
-        ..Default::default()
-    };
-    let conf = Ini::load_from_file_opt(&filepath, opt)
-        .map_err(|err| anyhow!("Failed to load config file '{}', {err}", filepath.display()))?;
-    Config::load(&conf)
-}
-
-pub(crate) fn edit_config_file() -> Result<bool> {
-    let filepath = get_config_path()?;
-    debug!("open config file '{}'", filepath.display());
-    if !filepath.exists() {
-        fs::write(&filepath, DEFAULT_CONFIG).map_err(|err| {
-            anyhow!(
-                "Failed to write config file '{}', {err}",
-                filepath.display()
-            )
-        })?;
-    }
-    let exit = Command::new("notepad.exe")
-        .arg(&filepath)
-        .spawn()
-        .map_err(|err| anyhow!("Failed to open config file '{}', {err}", filepath.display()))?
-        .wait()
-        .map_err(|err| {
-            anyhow!(
-                "Failed to close config file '{}', {err}",
-                filepath.display()
-            )
-        })?;
-
-    Ok(exit.success())
-}
-
-fn get_config_path() -> Result<PathBuf> {
-    let folder = get_exe_folder()?;
-    let config_path = folder.join("window-switcher.ini");
-    Ok(config_path)
-}
-
 fn normalize_path_value(value: &str) -> String {
     value.replace("\\\\", "\\")
 }
@@ -851,5 +933,39 @@ mod tests {
             Config::load(&ini).unwrap().appearance,
             AppearanceConfig::default()
         );
+    }
+
+    #[test]
+    fn localization_and_performance_settings_are_loaded() {
+        let ini = Ini::load_from_str(
+            "config_version = 1\n[localization]\nlanguage = zh-CN\n[performance]\nicon_cache_limit = 64\nrender_scale = 2\nconfig_reload = watch\n",
+        )
+        .unwrap();
+
+        let config = Config::load(&ini).unwrap();
+        assert_eq!(config.config_version, 1);
+        assert_eq!(config.language, Language::ZhCn);
+        assert_eq!(
+            config.performance,
+            PerformanceConfig {
+                icon_cache_limit: 64,
+                render_scale: RenderScale::Factor(2),
+                config_reload: ConfigReloadMode::Watch,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_hotkeys_keep_safe_defaults() {
+        let defaults = Config::default();
+        let ini = Ini::load_from_str(
+            "[switch-windows]\nhotkey = unsupported\n[switch-apps]\nenable = yes\nhotkey = alt+tab || unsupported\n",
+        )
+        .unwrap();
+
+        let config = Config::load(&ini).unwrap();
+        assert_eq!(config.switch_windows_hotkey, defaults.switch_windows_hotkey);
+        assert_eq!(config.switch_apps_hotkey, defaults.switch_apps_hotkey);
+        assert!(config.switch_apps_enable);
     }
 }

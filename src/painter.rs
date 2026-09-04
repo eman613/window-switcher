@@ -42,7 +42,6 @@ pub const BG_DARK_COLOR: u32 = 0x4c4c4c;
 pub const FG_DARK_COLOR: u32 = 0x3b3b3b;
 pub const BG_LIGHT_COLOR: u32 = 0xe0e0e0;
 pub const FG_LIGHT_COLOR: u32 = 0xf2f2f2;
-pub const SCALE_FACTOR: i32 = 6;
 const THEME_CACHE_TTL: Duration = Duration::from_secs(1);
 
 // GDI Antialiasing Painter
@@ -53,6 +52,7 @@ pub struct GdiAAPainter {
     rounded_corner: bool,
     show: bool,
     appearance: AppearanceConfig,
+    render_scale: i32,
     backdrop: BackdropController,
     theme_cache: Option<(bool, Instant)>,
     last_layout: Option<LayoutSnapshot>,
@@ -64,7 +64,10 @@ pub struct GdiAAPainter {
 }
 
 impl GdiAAPainter {
-    pub fn new(hwnd: HWND, appearance: &AppearanceConfig) -> Result<Self> {
+    pub fn new(hwnd: HWND, appearance: &AppearanceConfig, render_scale: i32) -> Result<Self> {
+        if render_scale <= 0 {
+            return Err(anyhow!("Render scale must be positive"));
+        }
         let startup_input = GdiplusStartupInput {
             GdiplusVersion: 1,
             ..Default::default()
@@ -102,6 +105,7 @@ impl GdiAAPainter {
             rounded_corner,
             show: false,
             appearance: appearance.clone(),
+            render_scale,
             backdrop,
             theme_cache: Some((light_theme, Instant::now())),
             last_layout: None,
@@ -220,6 +224,7 @@ impl GdiAAPainter {
             bg_color,
             self.appearance.show_badge,
             self.appearance.badge_max,
+            self.render_scale,
             &mut self.icon_surface,
             &mut self.frame_icon_surface,
             &mut self.scaled_icon_surface,
@@ -470,6 +475,7 @@ fn draw_icons(
     bg_color: u32,
     show_badge: bool,
     badge_max: usize,
+    render_scale: i32,
     icon_surface: &mut Option<BitmapSurface>,
     frame_icon_surface: &mut Option<BitmapSurface>,
     scaled_icon_surface: &mut Option<BitmapSurface>,
@@ -486,16 +492,16 @@ fn draw_icons(
     let icon_padding = layout.icon_padding;
     let scaled_item_size = layout
         .item_size
-        .checked_mul(SCALE_FACTOR)
+        .checked_mul(render_scale)
         .ok_or_else(|| anyhow!("Scaled icon item size overflow"))?;
     let scaled_corner_radius = corner_radius
-        .checked_mul(SCALE_FACTOR)
+        .checked_mul(render_scale)
         .ok_or_else(|| anyhow!("Scaled corner radius overflow"))?;
     let scaled_padding = icon_padding
-        .checked_mul(SCALE_FACTOR)
+        .checked_mul(render_scale)
         .ok_or_else(|| anyhow!("Scaled icon padding overflow"))?;
     let scaled_icon_size = icon_size
-        .checked_mul(SCALE_FACTOR)
+        .checked_mul(render_scale)
         .ok_or_else(|| anyhow!("Scaled icon size overflow"))?;
 
     if width <= 0 || height <= 0 || item_size <= 0 || scaled_item_size <= 0 {
@@ -534,7 +540,7 @@ fn draw_icons(
         .transpose()?;
     let badge_font = if has_badges {
         badge_geometry("2", icon_size, item_size)
-            .and_then(|geometry| create_badge_font(geometry.height, SCALE_FACTOR))
+            .and_then(|geometry| create_badge_font(geometry.height, render_scale))
             .map(FontGuard::new)
             .transpose()?
     } else {
@@ -586,9 +592,9 @@ fn draw_icons(
         if show_badge {
             if let Some(label) = badge_label(entry.window_count, badge_max) {
                 if let Some(geometry) = badge_geometry(&label, icon_size, item_size) {
-                    let scaled_offset = geometry.offset * SCALE_FACTOR;
-                    let scaled_width = geometry.width * SCALE_FACTOR;
-                    let scaled_height = geometry.height * SCALE_FACTOR;
+                    let scaled_offset = geometry.offset * render_scale;
+                    let scaled_width = geometry.width * render_scale;
+                    let scaled_height = geometry.height * render_scale;
                     let right = scaled_item_size - scaled_offset;
                     let left = right - scaled_width;
                     draw_badge(
@@ -598,7 +604,7 @@ fn draw_icons(
                         scaled_offset,
                         scaled_width,
                         scaled_height,
-                        SCALE_FACTOR,
+                        render_scale,
                         badge_border_brush
                             .as_ref()
                             .map(BrushGuard::get)

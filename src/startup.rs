@@ -1,8 +1,11 @@
 use anyhow::Result;
 use windows::core::{w, PCWSTR};
 
-use crate::utils::{
-    create_scheduled_task, delete_scheduled_task, exist_scheduled_task, get_exe_path, RegKey,
+use crate::{
+    localization::{text, TextId},
+    utils::{
+        create_scheduled_task, delete_scheduled_task, exist_scheduled_task, get_exe_path, RegKey,
+    },
 };
 
 const TASK_NAME: &str = "WindowSwitcher";
@@ -50,7 +53,7 @@ impl Startup {
             }
             (false, false) => {
                 if exist_scheduled_task(TASK_NAME)? {
-                    alert!("To avoid conflicts, please disable 'Startup' feature within Window-Switcher while running it as an administrator. Once disabled, you can safely enable 'Startup' again under normal user permissions.");
+                    alert!("{}", text(TextId::StartupConflict));
                     return Ok(());
                 }
                 reg_enable(&self.exe_path)?;

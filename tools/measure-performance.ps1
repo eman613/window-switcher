@@ -135,6 +135,7 @@ try {
     }
 
     $temporaryConfig = @(
+        'config_version = 1'
         'trayicon = yes'
         ''
         '[startup]'
@@ -145,6 +146,14 @@ try {
         "background_opacity = $BackgroundOpacity"
         "backdrop = $Backdrop"
         "backdrop_fallback = $BackdropFallback"
+        ''
+        '[localization]'
+        'language = en-US'
+        ''
+        '[performance]'
+        'icon_cache_limit = 256'
+        'render_scale = auto'
+        'config_reload = restart'
         ''
         '[switch-windows]'
         'hotkey = alt+`'

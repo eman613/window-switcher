@@ -1,8 +1,12 @@
-use crate::app::{IDM_CONFIGURE, IDM_EXIT, IDM_STARTUP, NAME, WM_USER_TRAYICON};
+use crate::{
+    app::{IDM_CONFIGURE, IDM_EXIT, IDM_STARTUP, WM_USER_TRAYICON},
+    localization::{text, TextId},
+    utils::to_wstring,
+};
 
 use anyhow::{anyhow, Result};
 use std::mem::size_of;
-use windows::core::{w, PCWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::{
     Foundation::{HWND, POINT},
     UI::{
@@ -19,9 +23,6 @@ use windows::Win32::{
 };
 
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.ico");
-const TEXT_CONFIGURE: PCWSTR = w!("Configure");
-const TEXT_STARTUP: PCWSTR = w!("Startup");
-const TEXT_EXIT: PCWSTR = w!("Exit");
 
 pub struct TrayIcon {
     data: NOTIFYICONDATAW,
@@ -76,8 +77,8 @@ impl TrayIcon {
             unsafe { CreateIconFromResourceEx(icon_data, true, 0x30000, 0, 0, LR_DEFAULTCOLOR) }
                 .map_err(|err| anyhow!("Failed to load tray icon resource, {err}"))?;
         let mut tooltip = [0u16; 128];
-        let name = unsafe { NAME.as_wide() };
-        let tooltip_len = name.len().min(tooltip.len() - 1);
+        let name = to_wstring(text(TextId::TrayTooltip));
+        let tooltip_len = name.len().saturating_sub(1).min(tooltip.len() - 1);
         tooltip[..tooltip_len].copy_from_slice(&name[..tooltip_len]);
         Ok(NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -92,6 +93,9 @@ impl TrayIcon {
 
     fn create_menu(&mut self, startup: bool) -> Result<PopupMenuGuard> {
         let startup_flags = if startup { MF_CHECKED } else { MF_UNCHECKED };
+        let configure = to_wstring(text(TextId::MenuConfigure));
+        let startup_text = to_wstring(text(TextId::MenuStartup));
+        let exit = to_wstring(text(TextId::MenuExit));
         unsafe {
             let menu = PopupMenuGuard::new(
                 CreatePopupMenu().map_err(|err| anyhow!("Failed to create menu, {err}"))?,
@@ -100,15 +104,20 @@ impl TrayIcon {
                 menu.get(),
                 MF_STRING,
                 IDM_CONFIGURE as usize,
-                TEXT_CONFIGURE,
+                PCWSTR(configure.as_ptr()),
             )?;
             AppendMenuW(
                 menu.get(),
-                startup_flags,
+                MF_STRING | startup_flags,
                 IDM_STARTUP as usize,
-                TEXT_STARTUP,
+                PCWSTR(startup_text.as_ptr()),
             )?;
-            AppendMenuW(menu.get(), MF_STRING, IDM_EXIT as usize, TEXT_EXIT)?;
+            AppendMenuW(
+                menu.get(),
+                MF_STRING,
+                IDM_EXIT as usize,
+                PCWSTR(exit.as_ptr()),
+            )?;
             Ok(menu)
         }
     }

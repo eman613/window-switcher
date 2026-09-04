@@ -18,11 +18,10 @@ use windows::Win32::{
 
 const ICON_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const ICON_PENDING_TIMEOUT: Duration = Duration::from_secs(5);
-const ICON_CACHE_LIMIT: usize = 256;
 const ICON_PENDING_LIMIT: usize = 64;
 const ICON_RETRY_LIMIT: usize = 256;
 
-pub(crate) const MAX_SWITCH_APPS: usize = ICON_CACHE_LIMIT;
+pub(crate) const MAX_SWITCH_APPS: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 struct PendingIcon {
@@ -36,16 +35,18 @@ pub(crate) struct IconCache {
     retryable: HashMap<String, Instant>,
     next_generation: u64,
     icons: IndexMap<String, HICON>,
+    limit: usize,
 }
 
 impl IconCache {
-    pub(crate) fn new(hwnd: HWND, override_icons: IndexMap<String, String>) -> Self {
+    pub(crate) fn new(hwnd: HWND, override_icons: IndexMap<String, String>, limit: usize) -> Self {
         Self {
             loader: IconLoader::new(hwnd, Arc::new(override_icons)),
             pending: HashMap::new(),
             retryable: HashMap::new(),
             next_generation: 1,
             icons: IndexMap::new(),
+            limit: limit.clamp(1, MAX_SWITCH_APPS),
         }
     }
 
@@ -166,7 +167,7 @@ impl IconCache {
     }
 
     pub(crate) fn trim(&mut self, state: Option<&SwitchAppsState>) {
-        while self.icons.len() > ICON_CACHE_LIMIT {
+        while self.icons.len() > self.limit {
             let candidate = self
                 .icons
                 .keys()

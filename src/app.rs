@@ -1,8 +1,14 @@
-use crate::config::{edit_config_file, Config};
+use crate::config::{Config, ConfigReloadMode};
+use crate::config_file::{
+    config_file_stamp, current_config_source, edit_config_file, load_config_from_path,
+    ConfigFileStamp, ConfigSource,
+};
+use crate::config_watcher::ConfigWatcher;
 use crate::foreground::ForegroundWatcher;
 use crate::icon_cache::{IconCache, MAX_SWITCH_APPS};
 use crate::icon_loader::WM_USER_ICON_READY;
 use crate::keyboard::{drain_keyboard_messages, KeyboardListener};
+use crate::localization::{text, TextId};
 use crate::metrics::StageTimer;
 use crate::painter::GdiAAPainter;
 use crate::startup::Startup;
@@ -38,17 +44,33 @@ pub const WM_USER_SWITCH_APPS_CANCEL: u32 = 6012;
 pub const WM_USER_SWITCH_WINDOWS: u32 = 6020;
 pub const WM_USER_SWITCH_WINDOWS_DONE: u32 = 6021;
 pub const WM_USER_KEYBOARD_QUEUE: u32 = 6030;
+pub const WM_USER_CONFIG_CHANGED: u32 = 6050;
 pub const IDM_EXIT: u32 = 1;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
 
 const TRAY_RETRY_TIMER_ID: usize = 1;
 const TRAY_RETRY_DELAY_MS: u32 = 3_000;
+const RELOAD_EXIT_CODE: usize = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppExit {
+    Exit,
+    Reload,
+}
 
 pub fn start(config: &Config) -> Result<()> {
+    start_internal(config, None).map(drop)
+}
+
+pub fn start_with_config(config: &Config, source: &ConfigSource) -> Result<AppExit> {
+    start_internal(config, Some(source.clone()))
+}
+
+fn start_internal(config: &Config, source: Option<ConfigSource>) -> Result<AppExit> {
     crate::metrics::mark_logging_ready();
     info!("start config={config:?}");
-    App::start(config)
+    App::start(config, source)
 }
 
 /// Listen to this message to recreate the tray icon since the taskbar has been recreated.
@@ -64,14 +86,19 @@ pub struct App {
     switch_apps_state: Option<SwitchAppsState>,
     process_metadata: ProcessMetadataCache,
     icon_cache: IconCache,
+    config_source: Option<ConfigSource>,
+    _config_watcher: Option<ConfigWatcher>,
+    failed_reload_stamp: Option<ConfigFileStamp>,
+    config_check_error_reported: bool,
+    restart_requested: bool,
     tray_retry_pending: bool,
     painter: GdiAAPainter,
 }
 
 impl App {
-    pub fn start(config: &Config) -> Result<()> {
+    pub fn start(config: &Config, source: Option<ConfigSource>) -> Result<AppExit> {
         let hwnd = Self::create_window()?;
-        let result = Self::run(hwnd, config);
+        let result = Self::run(hwnd, config, source);
         if result.is_err() {
             unsafe {
                 let _ = DestroyWindow(hwnd);
@@ -80,8 +107,12 @@ impl App {
         result
     }
 
-    fn run(hwnd: HWND, config: &Config) -> Result<()> {
-        let painter = GdiAAPainter::new(hwnd, &config.appearance)?;
+    fn run(hwnd: HWND, config: &Config, source: Option<ConfigSource>) -> Result<AppExit> {
+        let painter = GdiAAPainter::new(
+            hwnd,
+            &config.appearance,
+            config.performance.render_scale.factor(),
+        )?;
 
         let foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist)?;
         let keyboard_listener = KeyboardListener::init(hwnd, &config.to_hotkeys())?;
@@ -95,7 +126,17 @@ impl App {
         debug!("is_admin {is_admin}");
 
         let startup = Startup::init(is_admin)?;
-        let icon_cache = IconCache::new(hwnd, config.switch_apps_override_icons.clone());
+        let icon_cache = IconCache::new(
+            hwnd,
+            config.switch_apps_override_icons.clone(),
+            config.performance.icon_cache_limit,
+        );
+        let config_watcher = match (config.performance.config_reload, source.as_ref()) {
+            (ConfigReloadMode::Watch, Some(source)) => {
+                Some(ConfigWatcher::start(source, hwnd, WM_USER_CONFIG_CHANGED)?)
+            }
+            _ => None,
+        };
 
         let mut app = Box::new(App {
             hwnd,
@@ -110,6 +151,11 @@ impl App {
             switch_apps_state: None,
             process_metadata: Default::default(),
             icon_cache,
+            config_source: source,
+            _config_watcher: config_watcher,
+            failed_reload_stamp: None,
+            config_check_error_reported: false,
+            restart_requested: false,
             tray_retry_pending: false,
             painter,
         });
@@ -127,12 +173,12 @@ impl App {
                 "Message loop failed: {event_err}; app cleanup failed: {cleanup_err}"
             )),
             (Err(event_err), Ok(())) => Err(event_err),
-            (Ok(()), Err(cleanup_err)) => Err(cleanup_err),
-            (Ok(()), Ok(())) => Ok(()),
+            (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
+            (Ok(exit), Ok(())) => Ok(exit),
         }
     }
 
-    fn eventloop() -> Result<()> {
+    fn eventloop() -> Result<AppExit> {
         let mut message = MSG::default();
         loop {
             let ret = unsafe { GetMessageW(&mut message, None, 0, 0) };
@@ -140,15 +186,19 @@ impl App {
                 -1 => {
                     unsafe { GetLastError() }.ok()?;
                 }
-                0 => break,
+                0 => {
+                    return Ok(if message.wParam.0 == RELOAD_EXIT_CODE {
+                        AppExit::Reload
+                    } else {
+                        AppExit::Exit
+                    });
+                }
                 _ => unsafe {
                     let _ = TranslateMessage(&message);
                     DispatchMessageW(&message);
                 },
             }
         }
-
-        Ok(())
     }
 
     fn create_window() -> Result<HWND> {
@@ -237,6 +287,73 @@ impl App {
         self.tray_retry_pending = false;
     }
 
+    fn edit_config(&mut self) -> Result<()> {
+        let path = match self.config_source.as_ref() {
+            Some(source) => source.path.clone(),
+            None => current_config_source()?.path,
+        };
+        edit_config_file(&path)
+    }
+
+    fn reload_on_open(&mut self, opening_sequence: bool) -> Result<bool> {
+        if !opening_sequence || self.config.performance.config_reload != ConfigReloadMode::OnOpen {
+            return Ok(false);
+        }
+        self.restart_if_config_changed()
+    }
+
+    fn restart_if_config_changed(&mut self) -> Result<bool> {
+        if self.restart_requested {
+            return Ok(true);
+        }
+        let Some(source) = self.config_source.clone() else {
+            return Ok(false);
+        };
+        let current = match config_file_stamp(&source.path) {
+            Ok(stamp) => {
+                self.config_check_error_reported = false;
+                stamp
+            }
+            Err(err) => {
+                if !self.config_check_error_reported {
+                    self.config_check_error_reported = true;
+                    error!("failed to check config reload: {err:#}");
+                    alert!(
+                        "{}\n{}\n{err:#}",
+                        text(TextId::ConfigReloadFailed),
+                        source.path.display()
+                    );
+                }
+                return Ok(false);
+            }
+        };
+        if current == source.stamp || self.failed_reload_stamp.as_ref() == Some(&current) {
+            return Ok(false);
+        }
+
+        match load_config_from_path(&source.path) {
+            Ok(_) => {
+                info!(
+                    "configuration changed; requesting restart path={}",
+                    source.path.display()
+                );
+                self.restart_requested = true;
+                unsafe { PostQuitMessage(RELOAD_EXIT_CODE as i32) };
+                Ok(true)
+            }
+            Err(err) => {
+                error!("failed to validate changed config: {err:#}");
+                alert!(
+                    "{}\n{}\n{err:#}",
+                    text(TextId::ConfigReloadFailed),
+                    source.path.display()
+                );
+                self.failed_reload_stamp = Some(current);
+                Ok(false)
+            }
+        }
+    }
+
     unsafe extern "system" fn window_proc(
         hwnd: HWND,
         msg: u32,
@@ -254,6 +371,13 @@ impl App {
 
     fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<LRESULT> {
         match msg {
+            WM_USER_CONFIG_CHANGED => {
+                with_app(hwnd, |app| {
+                    app.restart_if_config_changed()?;
+                    Ok(())
+                })?;
+                return Ok(LRESULT(0));
+            }
             WM_USER_ICON_READY => {
                 debug!("message WM_USER_ICON_READY");
                 with_app(hwnd, |app| {
@@ -288,6 +412,9 @@ impl App {
                 debug!("message WM_USER_SWITCH_APPS");
                 let reverse = lparam.0 == 1;
                 with_app(hwnd, |app| {
+                    if app.reload_on_open(app.switch_apps_state.is_none())? {
+                        return Ok(());
+                    }
                     app.switch_apps(reverse)?;
                     if let Some(state) = &app.switch_apps_state {
                         app.painter.paint(state);
@@ -313,6 +440,9 @@ impl App {
                 debug!("message WM_USER_SWITCH_WINDOWS");
                 let reverse = lparam.0 == 1;
                 with_app(hwnd, |app| {
+                    if app.reload_on_open(app.switch_windows_state.modifier_released)? {
+                        return Ok(());
+                    }
                     let target_hwnd = app
                         .switch_apps_state
                         .as_ref()
@@ -356,9 +486,7 @@ impl App {
                             with_app(hwnd, |app| app.startup.toggle())?;
                         }
                         IDM_CONFIGURE => {
-                            if let Err(err) = edit_config_file() {
-                                alert!("{err}");
-                            }
+                            with_app(hwnd, |app| app.edit_config())?;
                         }
                         _ => {}
                     }
