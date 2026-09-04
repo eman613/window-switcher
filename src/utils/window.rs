@@ -26,7 +26,7 @@ use windows::Win32::{
         Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
         WindowsAndMessaging::{
             EnumWindows, GetCursorPos, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
-            GetWindowPlacement, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+            GetWindowPlacement, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
             SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GWL_STYLE, GWL_USERDATA, GW_OWNER,
             SW_RESTORE, WINDOWPLACEMENT, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_ICONIC, WS_VISIBLE,
         },
@@ -47,6 +47,10 @@ pub fn get_window_state(hwnd: HWND) -> (bool, bool, bool, bool) {
 
 pub fn is_iconic_window(hwnd: HWND) -> bool {
     unsafe { IsIconic(hwnd) }.as_bool()
+}
+
+pub fn is_window_valid(hwnd: HWND) -> bool {
+    !hwnd.is_invalid() && unsafe { IsWindow(Some(hwnd)) }.as_bool()
 }
 
 pub fn get_window_cloak_type(hwnd: HWND) -> u32 {
@@ -372,7 +376,11 @@ pub fn get_window_exe(hwnd: HWND) -> Option<String> {
     module_path.split('\\').map(|v| v.to_string()).next_back()
 }
 
-pub fn set_foreground_window(hwnd: HWND) {
+pub fn set_foreground_window(hwnd: HWND) -> bool {
+    if !is_window_valid(hwnd) {
+        return false;
+    }
+
     // ref https://github.com/microsoft/PowerToys/blob/4cb72ee126caf1f720c507f6a1dbe658cd515366/src/modules/fancyzones/FancyZonesLib/WindowUtils.cpp#L191
     unsafe {
         if is_iconic_window(hwnd) {
@@ -386,8 +394,8 @@ pub fn set_foreground_window(hwnd: HWND) {
 
         SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
 
-        let _ = SetForegroundWindow(hwnd);
-    };
+        SetForegroundWindow(hwnd).as_bool()
+    }
 }
 
 pub fn get_foreground_window() -> HWND {
