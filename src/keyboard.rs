@@ -93,7 +93,13 @@ unsafe fn send_message_timeout(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-    let kbd_data: &KBDLLHOOKSTRUCT = &*(l_param.0 as *const _);
+    if code < 0 || l_param.0 == 0 {
+        return CallNextHookEx(None, code, w_param, l_param);
+    }
+
+    let Some(kbd_data) = (l_param.0 as *const KBDLLHOOKSTRUCT).as_ref() else {
+        return CallNextHookEx(None, code, w_param, l_param);
+    };
     debug!("keyboard {kbd_data:?}");
     let mut is_modifier = false;
     let scan_code = kbd_data.scanCode;
