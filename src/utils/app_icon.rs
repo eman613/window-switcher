@@ -340,6 +340,7 @@ fn is_valid_icon(hicon: HICON) -> Option<bool> {
     Some(!is_topleft_icon(&bounds))
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct IconBounds {
     pub canvas_width: i32,
     pub canvas_height: i32,
@@ -347,6 +348,93 @@ struct IconBounds {
     pub min_y: i32,
     pub max_x: i32,
     pub max_y: i32,
+}
+
+fn scan_alpha_bounds(pixels: &[u8], width: i32, height: i32) -> (Option<IconBounds>, bool) {
+    let width = match usize::try_from(width).ok() {
+        Some(width) => width,
+        None => return (None, false),
+    };
+    let height = match usize::try_from(height).ok() {
+        Some(height) => height,
+        None => return (None, false),
+    };
+    let Some(stride) = width.checked_mul(4) else {
+        return (None, false);
+    };
+    let Some(required_len) = stride.checked_mul(height) else {
+        return (None, false);
+    };
+    if required_len == 0 || pixels.len() < required_len {
+        return (None, false);
+    }
+
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x: Option<usize> = None;
+    let mut max_y: Option<usize> = None;
+    let mut has_semi_transparent = false;
+    for y in 0..height {
+        let row_start = y * stride;
+        for x in 0..width {
+            let alpha = pixels[row_start + x * 4 + 3];
+            if alpha == 0 {
+                continue;
+            }
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = Some(max_x.map_or(x, |current| current.max(x)));
+            max_y = Some(max_y.map_or(y, |current| current.max(y)));
+            has_semi_transparent |= alpha < 255;
+        }
+    }
+
+    let bounds = max_x.zip(max_y).map(|(max_x, max_y)| IconBounds {
+        canvas_width: width as i32,
+        canvas_height: height as i32,
+        min_x: min_x as i32,
+        min_y: min_y as i32,
+        max_x: max_x as i32,
+        max_y: max_y as i32,
+    });
+    (bounds, has_semi_transparent)
+}
+
+fn scan_mask_bounds(pixels: &[u8], width: i32, height: i32) -> Option<IconBounds> {
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    let stride = width.checked_mul(4)?;
+    let required_len = stride.checked_mul(height)?;
+    if required_len == 0 || pixels.len() < required_len {
+        return None;
+    }
+
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x: Option<usize> = None;
+    let mut max_y: Option<usize> = None;
+    for y in 0..height {
+        let row_start = y * stride;
+        for x in 0..width {
+            let base = row_start + x * 4;
+            if pixels[base] != 0 || pixels[base + 1] != 0 || pixels[base + 2] != 0 {
+                continue;
+            }
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = Some(max_x.map_or(x, |current| current.max(x)));
+            max_y = Some(max_y.map_or(y, |current| current.max(y)));
+        }
+    }
+
+    max_x.zip(max_y).map(|(max_x, max_y)| IconBounds {
+        canvas_width: width as i32,
+        canvas_height: height as i32,
+        min_x: min_x as i32,
+        min_y: min_y as i32,
+        max_x: max_x as i32,
+        max_y: max_y as i32,
+    })
 }
 
 fn is_topleft_icon(bounds: &IconBounds) -> bool {
@@ -465,77 +553,10 @@ fn get_icon_bounds(hicon: HICON) -> Option<IconBounds> {
             return None;
         }
 
-        let mut min_x = width;
-        let mut min_y = height;
-        let mut max_x: i32 = -1;
-        let mut max_y: i32 = -1;
-        let mut has_semi_transparent = false;
-
-        // Pass 1: top/bottom bounds + alpha detection in one scan
-        let rows = pixels.chunks_exact(width as usize * 4);
-
-        for (y, row) in rows.clone().enumerate() {
-            let mut row_has_visible = false;
-            for c in row.chunks_exact(4) {
-                let a = c[3];
-                if a != 0 {
-                    row_has_visible = true;
-                    if a < 255 {
-                        has_semi_transparent = true;
-                    }
-                }
-            }
-            if row_has_visible {
-                min_y = y as i32;
-                break;
-            }
-        }
-
-        if min_y < height {
-            for (y, row) in rows.clone().rev().enumerate() {
-                let actual_y = (height as usize - 1) - y;
-                let mut row_has_visible = false;
-                for c in row.chunks_exact(4) {
-                    let a = c[3];
-                    if a != 0 {
-                        row_has_visible = true;
-                        if a < 255 {
-                            has_semi_transparent = true;
-                        }
-                    }
-                }
-                if row_has_visible {
-                    max_y = actual_y as i32;
-                    break;
-                }
-            }
-        }
-
-        // Pass 2: left/right bounds within [min_y, max_y]
-        if max_y >= 0 {
-            let stride = width as usize * 4;
-
-            'left: for x in 0..width {
-                for y in min_y..=max_y {
-                    if pixels[(y as usize * stride + x as usize * 4) + 3] != 0 {
-                        min_x = x;
-                        break 'left;
-                    }
-                }
-            }
-
-            'right: for x in (0..width).rev() {
-                for y in min_y..=max_y {
-                    if pixels[(y as usize * stride + x as usize * 4) + 3] != 0 {
-                        max_x = x;
-                        break 'right;
-                    }
-                }
-            }
-        }
+        let (mut bounds, has_semi_transparent) = scan_alpha_bounds(&pixels, width, height);
 
         // Fallback to mask when no alpha channel and no visible pixels found
-        if !has_semi_transparent && max_x < 0 {
+        if !has_semi_transparent && bounds.is_none() {
             SelectObject(mem_dc, HGDIOBJ(icon_info.hbmMask.0 as _));
 
             if 0 != GetDIBits(
@@ -547,75 +568,70 @@ fn get_icon_bounds(hicon: HICON) -> Option<IconBounds> {
                 &mut bmi,
                 DIB_RGB_COLORS,
             ) {
-                let mask_rows = pixels.chunks_exact(width as usize * 4);
-
-                min_y = height;
-                max_y = -1i32;
-
-                for (y, row) in mask_rows.clone().enumerate() {
-                    if row
-                        .chunks_exact(4)
-                        .any(|c| c[0] == 0 && c[1] == 0 && c[2] == 0)
-                    {
-                        min_y = y as i32;
-                        break;
-                    }
-                }
-
-                if min_y < height {
-                    for (y, row) in mask_rows.clone().rev().enumerate() {
-                        let actual_y = (height as usize - 1) - y;
-                        if row
-                            .chunks_exact(4)
-                            .any(|c| c[0] == 0 && c[1] == 0 && c[2] == 0)
-                        {
-                            max_y = actual_y as i32;
-                            break;
-                        }
-                    }
-                }
-
-                if max_y >= 0 {
-                    let stride = width as usize * 4;
-
-                    'mleft: for x in 0..width {
-                        for y in min_y..=max_y {
-                            let base = y as usize * stride + x as usize * 4;
-                            if pixels[base] == 0 && pixels[base + 1] == 0 && pixels[base + 2] == 0 {
-                                min_x = x;
-                                break 'mleft;
-                            }
-                        }
-                    }
-
-                    'mright: for x in (0..width).rev() {
-                        for y in min_y..=max_y {
-                            let base = y as usize * stride + x as usize * 4;
-                            if pixels[base] == 0 && pixels[base + 1] == 0 && pixels[base + 2] == 0 {
-                                max_x = x;
-                                break 'mright;
-                            }
-                        }
-                    }
-                }
+                bounds = scan_mask_bounds(&pixels, width, height);
             }
+        }
+        SelectObject(mem_dc, old_bmp);
 
-            SelectObject(mem_dc, old_bmp);
-        } else {
-            SelectObject(mem_dc, old_bmp);
+        bounds
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scan_alpha_bounds, scan_mask_bounds, IconBounds};
+
+    #[test]
+    fn alpha_scan_returns_bounds_and_detects_transparency() {
+        let mut pixels = vec![0u8; 4 * 3 * 4];
+        let pixel_offset = |x: usize, y: usize| (y * 4 + x) * 4;
+        pixels[pixel_offset(1, 1) + 3] = 128;
+        pixels[pixel_offset(3, 2) + 3] = 255;
+
+        let (bounds, has_semi_transparent) = scan_alpha_bounds(&pixels, 4, 3);
+
+        assert_eq!(
+            bounds,
+            Some(IconBounds {
+                canvas_width: 4,
+                canvas_height: 3,
+                min_x: 1,
+                min_y: 1,
+                max_x: 3,
+                max_y: 2,
+            })
+        );
+        assert!(has_semi_transparent);
+    }
+
+    #[test]
+    fn alpha_scan_rejects_empty_or_malformed_buffers() {
+        assert_eq!(scan_alpha_bounds(&[], 0, 4), (None, false));
+        assert_eq!(scan_alpha_bounds(&[0; 4], 2, 2), (None, false));
+        assert_eq!(scan_alpha_bounds(&[0; 4], -1, 1), (None, false));
+    }
+
+    #[test]
+    fn mask_scan_uses_black_pixels_as_visible_content() {
+        let mut pixels = vec![255u8; 4 * 3 * 4];
+        let pixel_offset = |x: usize, y: usize| (y * 4 + x) * 4;
+        for &(x, y) in &[(2, 0), (1, 2)] {
+            let base = pixel_offset(x, y);
+            for channel in 0..3 {
+                pixels[base + channel] = 0;
+            }
         }
 
-        if max_x < 0 {
-            return None;
-        }
-
-        Some(IconBounds {
-            canvas_width: width,
-            canvas_height: height,
-            min_x,
-            min_y,
-            max_x,
-            max_y,
-        })
+        assert_eq!(
+            scan_mask_bounds(&pixels, 4, 3),
+            Some(IconBounds {
+                canvas_width: 4,
+                canvas_height: 3,
+                min_x: 1,
+                min_y: 0,
+                max_x: 2,
+                max_y: 2,
+            })
+        );
     }
 }
