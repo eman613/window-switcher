@@ -1,6 +1,6 @@
 use crate::config::{edit_config_file, Config};
 use crate::foreground::ForegroundWatcher;
-use crate::keyboard::KeyboardListener;
+use crate::keyboard::{drain_keyboard_messages, KeyboardListener};
 use crate::painter::GdiAAPainter;
 use crate::startup::Startup;
 use crate::trayicon::TrayIcon;
@@ -34,6 +34,7 @@ pub const WM_USER_SWITCH_APPS_DONE: u32 = 6011;
 pub const WM_USER_SWITCH_APPS_CANCEL: u32 = 6012;
 pub const WM_USER_SWITCH_WINDOWS: u32 = 6020;
 pub const WM_USER_SWITCH_WINDOWS_DONE: u32 = 6021;
+pub const WM_USER_KEYBOARD_QUEUE: u32 = 6030;
 pub const IDM_EXIT: u32 = 1;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
@@ -227,6 +228,16 @@ impl App {
 
     fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<LRESULT> {
         match msg {
+            WM_USER_KEYBOARD_QUEUE => {
+                for message in drain_keyboard_messages() {
+                    if let Err(err) =
+                        Self::handle_message(hwnd, message.msg, message.wparam, message.lparam)
+                    {
+                        error!("queued keyboard message {} failed: {err}", message.msg);
+                    }
+                }
+                return Ok(LRESULT(0));
+            }
             WM_USER_TRAYICON => {
                 with_app(hwnd, |app| {
                     if let Some(trayicon) = app.trayicon.as_mut() {

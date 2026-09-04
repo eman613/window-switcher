@@ -2,6 +2,7 @@ use crate::utils::get_window_exe;
 use anyhow::{bail, Result};
 use once_cell::sync::OnceCell;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::{
     Foundation::HWND,
     UI::{
@@ -12,7 +13,7 @@ use windows::Win32::{
     },
 };
 
-pub static mut IS_FOREGROUND_IN_BLACKLIST: bool = false;
+pub static IS_FOREGROUND_IN_BLACKLIST: AtomicBool = AtomicBool::new(false);
 
 static BLACKLIST: OnceCell<HashSet<String>> = OnceCell::new();
 
@@ -24,6 +25,7 @@ pub struct ForegroundWatcher {
 impl ForegroundWatcher {
     pub fn init(blacklist: &HashSet<String>) -> Result<Self> {
         if blacklist.is_empty() {
+            IS_FOREGROUND_IN_BLACKLIST.store(false, Ordering::Release);
             return Ok(Self {
                 hook: HWINEVENTHOOK::default(),
             });
@@ -76,7 +78,10 @@ unsafe extern "system" fn win_event_proc(
         Some(v) => v.to_lowercase(),
         None => return,
     };
-    let is_in_blacklist = BLACKLIST.get().unwrap().contains(&exe);
-    IS_FOREGROUND_IN_BLACKLIST = is_in_blacklist;
+    let is_in_blacklist = BLACKLIST
+        .get()
+        .map(|blacklist| blacklist.contains(&exe))
+        .unwrap_or(false);
+    IS_FOREGROUND_IN_BLACKLIST.store(is_in_blacklist, Ordering::Release);
     debug!("foreground {exe} {is_in_blacklist}");
 }
