@@ -108,7 +108,7 @@ impl App {
         drop(keyboard_listener);
         drop(foreground_watcher);
 
-        let cleanup_result = take_app(hwnd).map(|app| drop(app));
+        let cleanup_result = take_app(hwnd).map(drop);
         match (eventloop_result, cleanup_result) {
             (Err(event_err), Err(cleanup_err)) => Err(anyhow!(
                 "Message loop failed: {event_err}; app cleanup failed: {cleanup_err}"
