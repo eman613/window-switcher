@@ -5,7 +5,6 @@ use std::{
     io::{BufReader, Read},
     mem,
     path::{Path, PathBuf},
-    time,
 };
 
 use indexmap::IndexMap;
@@ -39,6 +38,14 @@ pub fn get_app_icon(
     module_path: &str,
     hwnd: HWND,
 ) -> HICON {
+    try_get_app_icon(override_icons, module_path, hwnd).unwrap_or_else(fallback_icon)
+}
+
+pub(crate) fn try_get_app_icon(
+    override_icons: &IndexMap<String, String>,
+    module_path: &str,
+    hwnd: HWND,
+) -> Option<HICON> {
     let module_path_lc = module_path.to_lowercase();
     if let Some((_, v)) = override_icons
         .iter()
@@ -51,30 +58,28 @@ pub fn get_app_icon(
             }
         }
         if let Some(icon) = load_image_as_hicon(override_path) {
-            return icon;
+            return Some(icon);
         }
     }
 
     if let Some(icon) = get_pwa_icon_from_lnk(module_path) {
-        return icon;
+        return Some(icon);
     }
 
     if let Some(icon) = get_browser_profile_icon(module_path) {
-        return icon;
+        return Some(icon);
     }
 
     if module_path.starts_with("C:\\Program Files\\WindowsApps") {
         if let Some(icon) =
             get_appx_logo_path(module_path).and_then(|image_path| load_image_as_hicon(&image_path))
         {
-            return icon;
+            return Some(icon);
         }
     }
 
     let base_path = module_path.split("::").next().unwrap_or(module_path);
-    get_exe_icon(base_path)
-        .or_else(|| get_window_icon(hwnd))
-        .unwrap_or_else(fallback_icon)
+    get_exe_icon(base_path).or_else(|| get_window_icon(hwnd))
 }
 
 fn get_appx_logo_path(module_path: &str) -> Option<PathBuf> {
@@ -186,6 +191,10 @@ pub fn load_image_as_hicon<T: AsRef<Path>>(image_path: T) -> Option<HICON> {
 fn fallback_icon() -> HICON {
     let icon = unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap_or_default();
     unsafe { CopyIcon(icon) }.unwrap_or_default()
+}
+
+pub(crate) fn get_fallback_icon() -> HICON {
+    fallback_icon()
 }
 
 pub fn get_window_icon(hwnd: HWND) -> Option<HICON> {
@@ -310,8 +319,7 @@ fn get_shfileinfo(module_path: &str) -> Option<SHFILEINFOW> {
             .collect();
         let mut file_info = SHFILEINFOW::default();
         // Retry up to 3 times because SHGetFileInfoW can transiently fail
-        // (e.g. shell not fully initialized, file system contention). A simple
-        // short sleep + retry handles these spurious failures robustly.
+        // (e.g. shell not fully initialized, file system contention).
         for _ in 0..3 {
             let fff: usize = SHGetFileInfoW(
                 PCWSTR::from_raw(p_path.as_mut_ptr()),
@@ -322,9 +330,6 @@ fn get_shfileinfo(module_path: &str) -> Option<SHFILEINFOW> {
             );
             if fff != 0 {
                 return Some(file_info);
-            } else {
-                let millis = time::Duration::from_millis(30);
-                std::thread::sleep(millis);
             }
         }
         None

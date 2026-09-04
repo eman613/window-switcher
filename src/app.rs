@@ -1,17 +1,22 @@
 use crate::config::{edit_config_file, Config};
 use crate::foreground::ForegroundWatcher;
+use crate::icon_loader::{IconLoadResult, IconLoader, WM_USER_ICON_READY};
 use crate::keyboard::{drain_keyboard_messages, KeyboardListener};
 use crate::painter::GdiAAPainter;
 use crate::startup::Startup;
 use crate::trayicon::TrayIcon;
 use crate::utils::{
-    check_error, get_app_icon, get_foreground_window, get_window_user_data, is_iconic_window,
+    check_error, get_fallback_icon, get_foreground_window, get_window_user_data, is_iconic_window,
     is_running_as_admin, is_window_valid, list_windows_with_cache, set_foreground_window,
     set_window_user_data, ProcessMetadataCache,
 };
 
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use windows::core::{w, PCWSTR};
 use windows::Win32::{
     Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
@@ -39,6 +44,8 @@ pub const IDM_EXIT: u32 = 1;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
 
+const ICON_RETRY_BACKOFF: Duration = Duration::from_secs(1);
+
 pub fn start(config: &Config) -> Result<()> {
     info!("start config={config:?}");
     App::start(config)
@@ -56,6 +63,10 @@ pub struct App {
     switch_windows_state: SwitchWindowsState,
     switch_apps_state: Option<SwitchAppsState>,
     process_metadata: ProcessMetadataCache,
+    icon_loader: IconLoader,
+    pending_icons: HashMap<String, u64>,
+    retryable_icons: HashMap<String, Instant>,
+    next_icon_generation: u64,
     cached_icons: HashMap<String, HICON>,
     painter: GdiAAPainter,
 }
@@ -87,6 +98,9 @@ impl App {
         debug!("is_admin {is_admin}");
 
         let startup = Startup::init(is_admin)?;
+        let icon_loader =
+            IconLoader::new(hwnd, Arc::new(config.switch_apps_override_icons.clone()))
+                .map_err(|err| anyhow!("Failed to start icon loader: {err}"))?;
 
         let mut app = Box::new(App {
             hwnd,
@@ -100,6 +114,10 @@ impl App {
             },
             switch_apps_state: None,
             process_metadata: Default::default(),
+            icon_loader,
+            pending_icons: Default::default(),
+            retryable_icons: Default::default(),
+            next_icon_generation: 1,
             cached_icons: Default::default(),
             painter,
         });
@@ -230,6 +248,14 @@ impl App {
 
     fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<LRESULT> {
         match msg {
+            WM_USER_ICON_READY => {
+                debug!("message WM_USER_ICON_READY");
+                with_app(hwnd, |app| {
+                    app.apply_icon_results();
+                    Ok(())
+                })?;
+                return Ok(LRESULT(0));
+            }
             WM_USER_KEYBOARD_QUEUE => {
                 for message in drain_keyboard_messages() {
                     if let Err(err) =
@@ -440,6 +466,8 @@ impl App {
     }
 
     fn switch_apps(&mut self, reverse: bool) -> Result<()> {
+        self.apply_icon_results();
+        self.retry_visible_icons();
         debug!(
             "switch apps: reverse:{reverse}, state:{:?}",
             self.switch_apps_state
@@ -490,18 +518,10 @@ impl App {
             } else {
                 valid_hwnds[0]
             };
-            let module_hicon = self
-                .cached_icons
-                .entry(module_path.clone())
-                .or_insert_with(|| {
-                    get_app_icon(
-                        &self.config.switch_apps_override_icons,
-                        module_path,
-                        module_hwnd,
-                    )
-                });
+            let module_hicon = self.icon_for_app(module_path, module_hwnd);
             apps.push(AppEntry {
-                icon: *module_hicon,
+                module_path: module_path.clone(),
+                icon: module_hicon,
                 representative_hwnd: module_hwnd,
                 window_count: valid_hwnds.len(),
             });
@@ -522,6 +542,141 @@ impl App {
         self.switch_apps_state = Some(state);
         debug!("switch apps, new state:{:?}", self.switch_apps_state);
         Ok(())
+    }
+
+    fn icon_for_app(&mut self, module_path: &str, representative_hwnd: HWND) -> HICON {
+        if let Some(icon) = self.cached_icons.get(module_path).copied() {
+            self.request_icon(module_path, module_path, representative_hwnd);
+            return icon;
+        }
+
+        let icon = get_fallback_icon();
+        let key = module_path.to_string();
+        self.retryable_icons.insert(key.clone(), Instant::now());
+        self.cached_icons.insert(key, icon);
+        self.request_icon(module_path, module_path, representative_hwnd);
+        icon
+    }
+
+    fn request_icon(&mut self, key: &str, module_path: &str, representative_hwnd: HWND) {
+        if self.pending_icons.contains_key(key) {
+            return;
+        }
+        if let Some(retry_at) = self.retryable_icons.get(key) {
+            if Instant::now() < *retry_at {
+                return;
+            }
+        } else if self
+            .cached_icons
+            .get(key)
+            .map(|icon| !icon.is_invalid())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let generation = self.allocate_icon_generation();
+        if self
+            .icon_loader
+            .request(key, module_path, representative_hwnd, generation)
+        {
+            self.pending_icons.insert(key.to_string(), generation);
+            self.retryable_icons.remove(key);
+        } else {
+            self.retryable_icons
+                .insert(key.to_string(), Instant::now() + ICON_RETRY_BACKOFF);
+        }
+    }
+
+    fn retry_visible_icons(&mut self) {
+        let requests: Vec<(String, HWND)> = self
+            .switch_apps_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .apps
+                    .iter()
+                    .filter(|entry| {
+                        self.retryable_icons.contains_key(&entry.module_path)
+                            && is_window_valid(entry.representative_hwnd)
+                    })
+                    .map(|entry| (entry.module_path.clone(), entry.representative_hwnd))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (key, representative_hwnd) in requests {
+            self.request_icon(&key, &key, representative_hwnd);
+        }
+    }
+
+    fn allocate_icon_generation(&mut self) -> u64 {
+        let generation = self.next_icon_generation;
+        self.next_icon_generation = self.next_icon_generation.wrapping_add(1);
+        if self.next_icon_generation == 0 {
+            self.next_icon_generation = 1;
+        }
+        generation
+    }
+
+    fn apply_icon_results(&mut self) {
+        let results = self.icon_loader.drain_results();
+        if results.is_empty() {
+            return;
+        }
+
+        let mut repaint = false;
+        for IconLoadResult {
+            key,
+            generation,
+            hicon,
+        } in results
+        {
+            if self.pending_icons.get(&key).copied() != Some(generation) {
+                if let Some(raw_hicon) = hicon {
+                    destroy_raw_icon(raw_hicon);
+                }
+                debug!("discarding stale icon result key={key} generation={generation}");
+                continue;
+            }
+            self.pending_icons.remove(&key);
+
+            let Some(raw_hicon) = hicon else {
+                self.retryable_icons
+                    .insert(key.clone(), Instant::now() + ICON_RETRY_BACKOFF);
+                debug!("icon loading failed; deferring retry key={key}");
+                continue;
+            };
+            let icon = HICON(raw_hicon as _);
+            if icon.is_invalid() {
+                destroy_raw_icon(raw_hicon);
+                self.retryable_icons
+                    .insert(key.clone(), Instant::now() + ICON_RETRY_BACKOFF);
+                debug!("icon loader returned an invalid handle key={key}");
+                continue;
+            }
+
+            self.retryable_icons.remove(&key);
+            let previous = self.cached_icons.insert(key.clone(), icon);
+            if let Some(state) = self.switch_apps_state.as_mut() {
+                for entry in &mut state.apps {
+                    if entry.module_path == key {
+                        entry.icon = icon;
+                        repaint = true;
+                    }
+                }
+            }
+            if let Some(previous) = previous {
+                if previous.0 != icon.0 {
+                    destroy_hicon(previous);
+                }
+            }
+        }
+
+        if repaint {
+            if let Some(state) = self.switch_apps_state.as_ref() {
+                self.painter.paint(state);
+            }
+        }
     }
 
     fn click(&mut self) {
@@ -556,12 +711,27 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.icon_loader.stop();
         for (_, icon) in self.cached_icons.drain() {
-            unsafe {
-                let _ = DestroyIcon(icon);
-            }
+            destroy_hicon(icon);
         }
     }
+}
+
+fn destroy_hicon(icon: HICON) {
+    if icon.is_invalid() {
+        return;
+    }
+    unsafe {
+        let _ = DestroyIcon(icon);
+    }
+}
+
+fn destroy_raw_icon(raw_hicon: isize) {
+    if raw_hicon == 0 || raw_hicon == -1 {
+        return;
+    }
+    destroy_hicon(HICON(raw_hicon as _));
 }
 
 fn install_app(hwnd: HWND, app: Box<App>) -> Result<()> {
@@ -648,6 +818,7 @@ fn next_window_index(index: usize, len: usize, reverse: bool) -> Option<usize> {
 
 #[derive(Debug)]
 pub struct AppEntry {
+    pub module_path: String,
     pub icon: HICON,
     pub representative_hwnd: HWND,
     pub window_count: usize,

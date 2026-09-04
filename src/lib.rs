@@ -8,6 +8,7 @@ mod app;
 mod badge;
 mod config;
 mod foreground;
+mod icon_loader;
 mod keyboard;
 mod painter;
 mod painter_resources;
