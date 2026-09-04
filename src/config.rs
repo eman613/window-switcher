@@ -325,6 +325,9 @@ impl Hotkey {
 
 pub fn load_config() -> Result<Config> {
     let filepath = get_config_path()?;
+    if !filepath.exists() {
+        return Ok(Config::default());
+    }
     let opt = ParseOption {
         enabled_escape: false,
         ..Default::default()

@@ -90,7 +90,7 @@ impl App {
         let keyboard_listener = KeyboardListener::init(hwnd, &config.to_hotkeys())?;
 
         let trayicon = match config.trayicon {
-            true => Some(TrayIcon::create()),
+            true => Some(TrayIcon::create()?),
             false => None,
         };
 

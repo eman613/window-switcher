@@ -1,6 +1,7 @@
 use crate::app::{IDM_CONFIGURE, IDM_EXIT, IDM_STARTUP, NAME, WM_USER_TRAYICON};
 
 use anyhow::{anyhow, Result};
+use std::mem::size_of;
 use windows::core::{w, PCWSTR};
 use windows::Win32::{
     Foundation::{HWND, POINT},
@@ -11,8 +12,8 @@ use windows::Win32::{
         },
         WindowsAndMessaging::{
             AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, DestroyIcon, DestroyMenu,
-            GetCursorPos, LookupIconIdFromDirectoryEx, SetForegroundWindow, TrackPopupMenu, HMENU,
-            LR_DEFAULTCOLOR, MF_CHECKED, MF_STRING, MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+            GetCursorPos, SetForegroundWindow, TrackPopupMenu, HMENU, LR_DEFAULTCOLOR, MF_CHECKED,
+            MF_STRING, MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
         },
     },
 };
@@ -27,9 +28,9 @@ pub struct TrayIcon {
 }
 
 impl TrayIcon {
-    pub fn create() -> Self {
-        let data = Self::create_nid();
-        Self { data }
+    pub fn create() -> Result<Self> {
+        let data = Self::create_nid()?;
+        Ok(Self { data })
     }
 
     pub fn register(&mut self, hwnd: HWND) -> Result<()> {
@@ -69,27 +70,24 @@ impl TrayIcon {
         Ok(())
     }
 
-    fn create_nid() -> NOTIFYICONDATAW {
-        let offset = unsafe {
-            LookupIconIdFromDirectoryEx(ICON_BYTES.as_ptr(), true, 0, 0, LR_DEFAULTCOLOR)
-        };
-        let icon_data = &ICON_BYTES[offset as usize..];
+    fn create_nid() -> Result<NOTIFYICONDATAW> {
+        let icon_data = icon_image_data(ICON_BYTES)?;
         let hicon =
             unsafe { CreateIconFromResourceEx(icon_data, true, 0x30000, 0, 0, LR_DEFAULTCOLOR) }
-                .expect("Failed to load icon resource");
-        let mut tooltip: Vec<u16> = unsafe { NAME.as_wide() }.to_vec();
-        tooltip.resize(128, 0);
-        tooltip.pop();
-        tooltip.push(0);
-        let tooltip: [u16; 128] = tooltip.try_into().unwrap();
-        NOTIFYICONDATAW {
+                .map_err(|err| anyhow!("Failed to load tray icon resource, {err}"))?;
+        let mut tooltip = [0u16; 128];
+        let name = unsafe { NAME.as_wide() };
+        let tooltip_len = name.len().min(tooltip.len() - 1);
+        tooltip[..tooltip_len].copy_from_slice(&name[..tooltip_len]);
+        Ok(NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             uID: WM_USER_TRAYICON,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: WM_USER_TRAYICON,
             hIcon: hicon,
             szTip: tooltip,
             ..Default::default()
-        }
+        })
     }
 
     fn create_menu(&mut self, startup: bool) -> Result<PopupMenuGuard> {
@@ -114,6 +112,33 @@ impl TrayIcon {
             Ok(menu)
         }
     }
+}
+
+fn icon_image_data(bytes: &[u8]) -> Result<&[u8]> {
+    const ICO_HEADER_SIZE: usize = 6;
+    const ICO_ENTRY_SIZE: usize = 16;
+    if bytes.len() < ICO_HEADER_SIZE + ICO_ENTRY_SIZE {
+        return Err(anyhow!("Tray icon resource is truncated"));
+    }
+    let reserved = u16::from_le_bytes([bytes[0], bytes[1]]);
+    let image_type = u16::from_le_bytes([bytes[2], bytes[3]]);
+    let image_count = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if reserved != 0 || image_type != 1 || image_count == 0 {
+        return Err(anyhow!("Tray icon resource has an invalid ICO header"));
+    }
+    let entry = &bytes[ICO_HEADER_SIZE..ICO_HEADER_SIZE + ICO_ENTRY_SIZE];
+    let image_size = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]) as usize;
+    let image_offset = u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]) as usize;
+    if image_size == 0 {
+        return Err(anyhow!("Tray icon resource has an empty image"));
+    }
+    let image_end = image_offset
+        .checked_add(image_size)
+        .ok_or_else(|| anyhow!("Tray icon resource offset overflow"))?;
+    if image_offset < ICO_HEADER_SIZE + ICO_ENTRY_SIZE || image_end > bytes.len() {
+        return Err(anyhow!("Tray icon resource image is outside the ICO data"));
+    }
+    Ok(&bytes[image_offset..image_end])
 }
 
 struct PopupMenuGuard(HMENU);

@@ -1,6 +1,6 @@
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct HandleWrapper {
     handle: HANDLE,
 }

@@ -9,6 +9,7 @@ use std::{
 use window_switcher::{
     alert, load_config, start,
     utils::{is_running_as_admin, relaunch_as_admin, SingleInstance},
+    Config,
 };
 
 fn main() {
@@ -25,7 +26,13 @@ fn run() -> Result<()> {
         );
     }
 
-    let config = load_config().unwrap_or_default();
+    let config = match load_config() {
+        Ok(config) => config,
+        Err(err) => {
+            alert!("Failed to load configuration. Default settings will be used.\n{err}");
+            Config::default()
+        }
+    };
     if config.run_as_admin && !is_running_as_admin()? {
         relaunch_as_admin()?;
         return Ok(());
