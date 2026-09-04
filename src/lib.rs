@@ -5,6 +5,7 @@ pub mod macros;
 extern crate log;
 
 mod app;
+mod badge;
 mod config;
 mod foreground;
 mod keyboard;

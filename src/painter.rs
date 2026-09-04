@@ -1,4 +1,8 @@
 use crate::app::SwitchAppsState;
+use crate::badge::{
+    badge_geometry, badge_label, create_badge_font, draw_badge, BADGE_BACKGROUND_COLOR,
+    BADGE_BORDER_COLOR,
+};
 use crate::utils::{check_error, get_moinitor_rect, is_light_theme, is_win11};
 
 use anyhow::{Context, Result};
@@ -355,6 +359,23 @@ fn draw_icons(
 
         let fg_brush = CreateSolidBrush(COLORREF(fg_color));
         let bg_brush = CreateSolidBrush(COLORREF(bg_color));
+        let has_badges = state.apps.iter().any(|entry| entry.window_count > 1);
+        let badge_border_brush = if has_badges {
+            CreateSolidBrush(COLORREF(BADGE_BORDER_COLOR))
+        } else {
+            Default::default()
+        };
+        let badge_background_brush = if has_badges {
+            CreateSolidBrush(COLORREF(BADGE_BACKGROUND_COLOR))
+        } else {
+            Default::default()
+        };
+        let badge_font = if has_badges {
+            badge_geometry("2", icon_size, height)
+                .and_then(|geometry| create_badge_font(geometry.height, SCALE_FACTOR))
+        } else {
+            None
+        };
 
         let rect = RECT {
             left: 0,
@@ -365,7 +386,7 @@ fn draw_icons(
 
         FillRect(hdc_scaled, &rect, bg_brush);
 
-        for (i, (icon, _)) in state.apps.iter().enumerate() {
+        for (i, entry) in state.apps.iter().enumerate() {
             // draw the box for selected icon
             if i == state.index {
                 let left = scaled_icon_outer_size * (i as i32);
@@ -389,13 +410,36 @@ fn draw_icons(
                 hdc_scaled,
                 cx,
                 scaled_border_size,
-                *icon,
+                entry.icon,
                 scaled_icon_inner_size,
                 scaled_icon_inner_size,
                 0,
                 None,
                 DI_NORMAL,
             );
+
+            if let Some(label) = badge_label(entry.window_count) {
+                if let Some(geometry) = badge_geometry(&label, icon_size, height) {
+                    let scaled_offset = geometry.offset * SCALE_FACTOR;
+                    let scaled_width = geometry.width * SCALE_FACTOR;
+                    let scaled_height = geometry.height * SCALE_FACTOR;
+                    let item_left = scaled_icon_outer_size * (i as i32);
+                    let right = item_left + scaled_icon_outer_size - scaled_offset;
+                    let left = right - scaled_width;
+                    draw_badge(
+                        hdc_scaled,
+                        &label,
+                        left,
+                        scaled_offset,
+                        scaled_width,
+                        scaled_height,
+                        SCALE_FACTOR,
+                        badge_border_brush,
+                        badge_background_brush,
+                        badge_font,
+                    );
+                }
+            }
         }
 
         SetStretchBltMode(hdc_tmp, HALFTONE);
@@ -415,6 +459,11 @@ fn draw_icons(
 
         let _ = DeleteObject(fg_brush.into());
         let _ = DeleteObject(bg_brush.into());
+        let _ = DeleteObject(badge_border_brush.into());
+        let _ = DeleteObject(badge_background_brush.into());
+        if let Some(font) = badge_font {
+            let _ = DeleteObject(font.into());
+        }
         let _ = DeleteObject(bitmap_scaled.into());
         let _ = DeleteDC(hdc_scaled);
         let _ = DeleteDC(hdc_tmp);

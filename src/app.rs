@@ -244,7 +244,12 @@ impl App {
                 let hwnd = app
                     .switch_apps_state
                     .as_ref()
-                    .and_then(|state| state.apps.get(state.index).map(|(_, id)| *id))
+                    .and_then(|state| {
+                        state
+                            .apps
+                            .get(state.index)
+                            .map(|entry| entry.representative_hwnd)
+                    })
                     .unwrap_or_else(get_foreground_window);
                 app.switch_windows(hwnd, reverse)?;
                 app.cancel_switch_app();
@@ -423,7 +428,11 @@ impl App {
                         module_hwnd,
                     )
                 });
-            apps.push((*module_hicon, module_hwnd));
+            apps.push(AppEntry {
+                icon: *module_hicon,
+                representative_hwnd: module_hwnd,
+                window_count: hwnds.len(),
+            });
         }
         let num_apps = apps.len() as i32;
         if num_apps == 0 {
@@ -455,8 +464,8 @@ impl App {
 
     fn do_switch_app(&mut self) {
         if let Some(state) = self.switch_apps_state.take() {
-            if let Some((_, id)) = state.apps.get(state.index) {
-                set_foreground_window(*id);
+            if let Some(entry) = state.apps.get(state.index) {
+                set_foreground_window(entry.representative_hwnd);
             }
             self.painter.unpaint(state);
         }
@@ -495,7 +504,14 @@ struct SwitchWindowsState {
 }
 
 #[derive(Debug)]
+pub struct AppEntry {
+    pub icon: HICON,
+    pub representative_hwnd: HWND,
+    pub window_count: usize,
+}
+
+#[derive(Debug)]
 pub struct SwitchAppsState {
-    pub apps: Vec<(HICON, HWND)>,
+    pub apps: Vec<AppEntry>,
     pub index: usize,
 }
