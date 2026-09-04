@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs, path::PathBuf, process::Command};
+use std::{collections::HashSet, fs, path::PathBuf, process::Command, str::FromStr};
 
 use anyhow::{anyhow, Result};
 use indexmap::IndexMap;
@@ -13,10 +13,98 @@ pub const SWITCH_APPS_HOTKEY_ID: u32 = 2;
 
 const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 
+const ICON_SIZE_MIN: i32 = 24;
+const ICON_SIZE_MAX: i32 = 256;
+const SPACING_MAX: i32 = 256;
+const PANEL_EXTENT_MAX: i32 = 32_768;
+const GRID_EXTENT_MAX: usize = 256;
+const BADGE_MAX_MIN: usize = 2;
+const BADGE_MAX_MAX: usize = 9_999;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MonitorTarget {
+    #[default]
+    Cursor,
+    Foreground,
+    Primary,
+}
+
+impl FromStr for MonitorTarget {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cursor" => Ok(Self::Cursor),
+            "foreground" => Ok(Self::Foreground),
+            "primary" => Ok(Self::Primary),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutMode {
+    #[default]
+    SingleRow,
+    Grid,
+    Paged,
+}
+
+impl FromStr for LayoutMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "single-row" => Ok(Self::SingleRow),
+            "grid" => Ok(Self::Grid),
+            "paged" => Ok(Self::Paged),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppearanceConfig {
+    pub monitor: MonitorTarget,
+    pub use_work_area: bool,
+    pub icon_size: i32,
+    pub icon_padding: i32,
+    pub item_gap: i32,
+    pub panel_padding: i32,
+    pub max_width: i32,
+    pub max_height: i32,
+    pub layout: LayoutMode,
+    pub max_columns: usize,
+    pub max_rows: usize,
+    pub show_badge: bool,
+    pub badge_max: usize,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            monitor: MonitorTarget::Cursor,
+            use_work_area: true,
+            icon_size: 64,
+            icon_padding: 4,
+            item_gap: 8,
+            panel_padding: 10,
+            max_width: 0,
+            max_height: 0,
+            layout: LayoutMode::SingleRow,
+            max_columns: 0,
+            max_rows: 0,
+            show_badge: true,
+            badge_max: 99,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub trayicon: bool,
     pub run_as_admin: bool,
+    pub appearance: AppearanceConfig,
     pub log_level: LevelFilter,
     pub log_file: Option<PathBuf>,
     pub switch_windows_hotkey: Vec<Hotkey>,
@@ -35,6 +123,7 @@ impl Default for Config {
         Self {
             trayicon: true,
             run_as_admin: false,
+            appearance: AppearanceConfig::default(),
             log_level: LevelFilter::Info,
             log_file: None,
             switch_windows_hotkey: vec![Hotkey::create(
@@ -72,6 +161,112 @@ impl Config {
         if let Some(section) = ini_conf.section(Some("startup")) {
             if let Some(v) = section.get("run_as_admin").and_then(Config::to_bool) {
                 conf.run_as_admin = v;
+            }
+        }
+
+        if let Some(section) = ini_conf.section(Some("appearance")) {
+            if let Some(value) = section.get("monitor") {
+                conf.appearance.monitor =
+                    parse_enum_or_default("appearance.monitor", value, conf.appearance.monitor);
+            }
+            if let Some(value) = section.get("use_work_area") {
+                conf.appearance.use_work_area = parse_bool_or_default(
+                    "appearance.use_work_area",
+                    value,
+                    conf.appearance.use_work_area,
+                );
+            }
+            if let Some(value) = section.get("icon_size") {
+                conf.appearance.icon_size = parse_i32_or_default(
+                    "appearance.icon_size",
+                    value,
+                    ICON_SIZE_MIN,
+                    ICON_SIZE_MAX,
+                    conf.appearance.icon_size,
+                );
+            }
+            if let Some(value) = section.get("icon_padding") {
+                conf.appearance.icon_padding = parse_i32_or_default(
+                    "appearance.icon_padding",
+                    value,
+                    0,
+                    SPACING_MAX,
+                    conf.appearance.icon_padding,
+                );
+            }
+            if let Some(value) = section.get("item_gap") {
+                conf.appearance.item_gap = parse_i32_or_default(
+                    "appearance.item_gap",
+                    value,
+                    0,
+                    SPACING_MAX,
+                    conf.appearance.item_gap,
+                );
+            }
+            if let Some(value) = section.get("panel_padding") {
+                conf.appearance.panel_padding = parse_i32_or_default(
+                    "appearance.panel_padding",
+                    value,
+                    0,
+                    SPACING_MAX,
+                    conf.appearance.panel_padding,
+                );
+            }
+            if let Some(value) = section.get("max_width") {
+                conf.appearance.max_width = parse_i32_or_default(
+                    "appearance.max_width",
+                    value,
+                    0,
+                    PANEL_EXTENT_MAX,
+                    conf.appearance.max_width,
+                );
+            }
+            if let Some(value) = section.get("max_height") {
+                conf.appearance.max_height = parse_i32_or_default(
+                    "appearance.max_height",
+                    value,
+                    0,
+                    PANEL_EXTENT_MAX,
+                    conf.appearance.max_height,
+                );
+            }
+            if let Some(value) = section.get("layout") {
+                conf.appearance.layout =
+                    parse_enum_or_default("appearance.layout", value, conf.appearance.layout);
+            }
+            if let Some(value) = section.get("max_columns") {
+                conf.appearance.max_columns = parse_usize_or_default(
+                    "appearance.max_columns",
+                    value,
+                    0,
+                    GRID_EXTENT_MAX,
+                    conf.appearance.max_columns,
+                );
+            }
+            if let Some(value) = section.get("max_rows") {
+                conf.appearance.max_rows = parse_usize_or_default(
+                    "appearance.max_rows",
+                    value,
+                    0,
+                    GRID_EXTENT_MAX,
+                    conf.appearance.max_rows,
+                );
+            }
+            if let Some(value) = section.get("show_badge") {
+                conf.appearance.show_badge = parse_bool_or_default(
+                    "appearance.show_badge",
+                    value,
+                    conf.appearance.show_badge,
+                );
+            }
+            if let Some(value) = section.get("badge_max") {
+                conf.appearance.badge_max = parse_usize_or_default(
+                    "appearance.badge_max",
+                    value,
+                    BADGE_MAX_MIN,
+                    BADGE_MAX_MAX,
+                    conf.appearance.badge_max,
+                );
             }
         }
 
@@ -376,6 +571,55 @@ fn normalize_path_value(value: &str) -> String {
     value.replace("\\\\", "\\")
 }
 
+fn parse_enum_or_default<T>(name: &str, value: &str, default: T) -> T
+where
+    T: FromStr + Copy,
+{
+    match value.parse() {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            warn!("invalid {name}={value:?}; using default");
+            default
+        }
+    }
+}
+
+fn parse_bool_or_default(name: &str, value: &str, default: bool) -> bool {
+    match Config::to_bool(value.trim()) {
+        Some(parsed) => parsed,
+        None => {
+            warn!("invalid {name}={value:?}; using default {default}");
+            default
+        }
+    }
+}
+
+fn parse_i32_or_default(name: &str, value: &str, min: i32, max: i32, default: i32) -> i32 {
+    match value.trim().parse::<i32>() {
+        Ok(parsed) if (min..=max).contains(&parsed) => parsed,
+        _ => {
+            warn!("invalid {name}={value:?}; expected {min}..={max}, using default {default}");
+            default
+        }
+    }
+}
+
+fn parse_usize_or_default(
+    name: &str,
+    value: &str,
+    min: usize,
+    max: usize,
+    default: usize,
+) -> usize {
+    match value.trim().parse::<usize>() {
+        Ok(parsed) if (min..=max).contains(&parsed) => parsed,
+        _ => {
+            warn!("invalid {name}={value:?}; expected {min}..={max}, using default {default}");
+            default
+        }
+    }
+}
+
 fn parse_hotkeys(id: u32, name: &str, value: &str) -> Result<Vec<Hotkey>> {
     let parts: Vec<&str> = value.split("||").collect();
     let mut hotkeys = vec![];
@@ -434,5 +678,45 @@ mod tests {
             .unwrap()
             .switch_windows_blacklist
             .is_empty());
+    }
+
+    #[test]
+    fn appearance_settings_are_loaded() {
+        let ini = Ini::load_from_str(
+            "[appearance]\nmonitor = foreground\nuse_work_area = no\nicon_size = 80\nicon_padding = 6\nitem_gap = 12\npanel_padding = 16\nmax_width = 1200\nmax_height = 800\nlayout = grid\nmax_columns = 8\nmax_rows = 3\nshow_badge = no\nbadge_max = 999\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            Config::load(&ini).unwrap().appearance,
+            AppearanceConfig {
+                monitor: MonitorTarget::Foreground,
+                use_work_area: false,
+                icon_size: 80,
+                icon_padding: 6,
+                item_gap: 12,
+                panel_padding: 16,
+                max_width: 1200,
+                max_height: 800,
+                layout: LayoutMode::Grid,
+                max_columns: 8,
+                max_rows: 3,
+                show_badge: false,
+                badge_max: 999,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_appearance_settings_keep_safe_defaults() {
+        let ini = Ini::load_from_str(
+            "[appearance]\nmonitor = elsewhere\nicon_size = 0\nitem_gap = -1\nlayout = diagonal\nmax_columns = 999\nbadge_max = 1\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            Config::load(&ini).unwrap().appearance,
+            AppearanceConfig::default()
+        );
     }
 }

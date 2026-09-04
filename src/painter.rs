@@ -3,12 +3,14 @@ use crate::badge::{
     badge_geometry, badge_label, create_badge_font, draw_badge, BADGE_BACKGROUND_COLOR,
     BADGE_BORDER_COLOR,
 };
+use crate::config::AppearanceConfig;
+use crate::layout::LayoutSnapshot;
 use crate::metrics::StageTimer;
 use crate::painter_resources::{
     gdiplus_status, BitmapSurface, BrushGuard, FontGuard, GpBrushGuard, GpGraphicsGuard,
     GpImageGuard, GpPathGuard, RegionGuard, ScreenDcGuard,
 };
-use crate::utils::{get_moinitor_rect, is_light_theme, is_win11};
+use crate::utils::{get_monitor_context, is_light_theme, is_win11};
 
 use anyhow::{anyhow, Context, Result};
 use std::time::{Duration, Instant};
@@ -27,7 +29,6 @@ use windows::Win32::{
         },
     },
     UI::{
-        HiDpi::GetDpiForWindow,
         Input::KeyboardAndMouse::SetFocus,
         WindowsAndMessaging::{
             DrawIconEx, GetCursorPos, ShowWindow, UpdateLayeredWindow, DI_NORMAL, SW_HIDE, SW_SHOW,
@@ -41,9 +42,6 @@ pub const FG_DARK_COLOR: u32 = 0x3b3b3b;
 pub const BG_LIGHT_COLOR: u32 = 0xe0e0e0;
 pub const FG_LIGHT_COLOR: u32 = 0xf2f2f2;
 pub const ALPHA_MASK: u32 = 0xff000000;
-pub const ICON_SIZE_BASE: i32 = 64;
-pub const WINDOW_BORDER_SIZE_BASE: i32 = 10;
-pub const ICON_BORDER_SIZE_BASE: i32 = 4;
 pub const SCALE_FACTOR: i32 = 6;
 const THEME_CACHE_TTL: Duration = Duration::from_secs(1);
 
@@ -54,9 +52,9 @@ pub struct GdiAAPainter {
     hdc_screen: ScreenDcGuard,
     rounded_corner: bool,
     show: bool,
-    dpi_scale: Option<f64>,
+    appearance: AppearanceConfig,
     theme_cache: Option<(bool, Instant)>,
-    last_coordinate: Option<(usize, Coordinate)>,
+    last_layout: Option<LayoutSnapshot>,
     panel_surface: Option<BitmapSurface>,
     icon_surface: Option<BitmapSurface>,
     frame_icon_surface: Option<BitmapSurface>,
@@ -65,7 +63,7 @@ pub struct GdiAAPainter {
 }
 
 impl GdiAAPainter {
-    pub fn new(hwnd: HWND) -> Result<Self> {
+    pub fn new(hwnd: HWND, appearance: &AppearanceConfig) -> Result<Self> {
         let startup_input = GdiplusStartupInput {
             GdiplusVersion: 1,
             ..Default::default()
@@ -92,9 +90,9 @@ impl GdiAAPainter {
             hdc_screen,
             rounded_corner,
             show: false,
-            dpi_scale: None,
+            appearance: appearance.clone(),
             theme_cache: None,
-            last_coordinate: None,
+            last_layout: None,
             panel_surface: None,
             icon_surface: None,
             frame_icon_surface: None,
@@ -116,37 +114,22 @@ impl GdiAAPainter {
         }
 
         let layout_timer = StageTimer::new("layout");
-        let hwnd = self.hwnd;
-        let dpi_scale = *self.dpi_scale.get_or_insert_with(|| get_dpi_scale(hwnd));
-        let icon_size_max = (ICON_SIZE_BASE as f64 * dpi_scale) as i32;
-        let border_size = (WINDOW_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
-        let icon_border = (ICON_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
-
-        let coordinate = Coordinate::new(
-            state.apps.len() as i32,
-            icon_size_max,
-            border_size,
-            icon_border,
-        );
-        let Coordinate {
-            x,
-            y,
-            width,
-            height,
-            icon_size,
-            item_size,
-        } = coordinate;
-        if width <= 0 || height <= 0 || icon_size <= 0 || item_size <= 0 {
-            return Err(anyhow!("Invalid painter dimensions"));
-        }
+        let monitor = match self.last_layout.as_ref() {
+            Some(layout) if self.show && !layout.monitor.handle.is_invalid() => layout.monitor,
+            _ => get_monitor_context(self.appearance.monitor, self.appearance.use_work_area)?,
+        };
+        let layout = LayoutSnapshot::new(state.apps.len(), state.index, &self.appearance, monitor)?;
+        let width = layout.panel_width();
+        let height = layout.panel_height();
         layout_timer.finish();
 
         let corner_radius = if self.rounded_corner {
-            item_size / 4
+            layout.item_size / 4
         } else {
             0
         };
 
+        let hwnd = self.hwnd;
         let hdc_screen = self.hdc_screen.get();
 
         let light_theme = match self.theme_cache {
@@ -208,18 +191,15 @@ impl GdiAAPainter {
             )?;
         }
 
-        let icons_width = item_size * state.apps.len() as i32;
-        let icons_height = item_size;
         let bitmap_icons = draw_icons(
             state,
+            &layout,
             hdc_screen,
-            icon_size,
-            icon_border,
-            icons_width,
-            icons_height,
             corner_radius,
             fg_color,
             bg_color,
+            self.appearance.show_badge,
+            self.appearance.badge_max,
             &mut self.icon_surface,
             &mut self.frame_icon_surface,
             &mut self.scaled_icon_surface,
@@ -232,10 +212,10 @@ impl GdiAAPainter {
                 GdipDrawImageRect(
                     graphics.get(),
                     image.get(),
-                    border_size as f32,
-                    border_size as f32,
-                    icons_width as f32,
-                    icons_height as f32,
+                    layout.panel_padding as f32,
+                    layout.panel_padding as f32,
+                    layout.content_width as f32,
+                    layout.content_height as f32,
                 )
             },
             "GdipDrawImageRect",
@@ -253,7 +233,10 @@ impl GdiAAPainter {
             UpdateLayeredWindow(
                 hwnd,
                 Some(hdc_screen),
-                Some(&POINT { x, y }),
+                Some(&POINT {
+                    x: layout.panel_rect.left,
+                    y: layout.panel_rect.top,
+                }),
                 Some(&SIZE {
                     cx: width,
                     cy: height,
@@ -267,7 +250,7 @@ impl GdiAAPainter {
         }
         .context("UpdateLayeredWindow failed")?;
         update_timer.finish();
-        self.last_coordinate = Some((state.apps.len(), coordinate));
+        self.last_layout = Some(layout);
 
         if self.show {
             return Ok(());
@@ -287,7 +270,16 @@ impl GdiAAPainter {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         self.show = false;
-        self.last_coordinate = None;
+        self.last_layout = None;
+        self.release_surfaces();
+    }
+
+    pub fn invalidate_layout(&mut self) {
+        self.last_layout = None;
+        self.release_surfaces();
+    }
+
+    fn release_surfaces(&mut self) {
         self.scaled_icon_surface = None;
         self.frame_icon_surface = None;
         self.icon_surface = None;
@@ -296,32 +288,18 @@ impl GdiAAPainter {
     }
 
     pub fn find_clicked_app_index(&self, state: &SwitchAppsState) -> Option<usize> {
-        let cursor_pos = unsafe {
-            let mut pos = POINT::default();
-            let _ = GetCursorPos(&mut pos);
-            pos
-        };
-
-        let (app_count, coordinate) = self.last_coordinate?;
-        if app_count != state.apps.len() {
+        let mut cursor_pos = POINT::default();
+        if let Err(err) = unsafe { GetCursorPos(&mut cursor_pos) } {
+            warn!("failed to get cursor position for hit testing: {err}");
             return None;
         }
-        let Coordinate {
-            x, y, item_size, ..
-        } = coordinate;
-        let border_size = (coordinate.width - coordinate.item_size * app_count as i32) / 2;
-
-        let xpos = cursor_pos.x - x;
-        let ypos = cursor_pos.y - y;
-
-        let cy = border_size;
-        for (i, _) in state.apps.iter().enumerate() {
-            let cx = border_size + item_size * (i as i32);
-            if xpos >= cx && xpos < cx + item_size && ypos >= cy && ypos < cy + item_size {
-                return Some(i);
-            }
+        let layout = self.last_layout.as_ref()?;
+        if layout.app_count != state.apps.len() {
+            return None;
         }
-        None
+        layout
+            .hit_test(cursor_pos)
+            .filter(|index| *index < state.apps.len())
     }
 }
 
@@ -418,34 +396,42 @@ fn draw_round_rect(
 #[allow(clippy::too_many_arguments)]
 fn draw_icons(
     state: &SwitchAppsState,
+    layout: &LayoutSnapshot,
     hdc_screen: HDC,
-    icon_size: i32,
-    icon_border: i32,
-    width: i32,
-    height: i32,
     corner_radius: i32,
     fg_color: u32,
     bg_color: u32,
+    show_badge: bool,
+    badge_max: usize,
     icon_surface: &mut Option<BitmapSurface>,
     frame_icon_surface: &mut Option<BitmapSurface>,
     scaled_icon_surface: &mut Option<BitmapSurface>,
     icon_layer_key: &mut Option<IconLayerKey>,
 ) -> Result<HBITMAP> {
-    let item_size = icon_size
-        .checked_add(
-            icon_border
-                .checked_mul(2)
-                .ok_or_else(|| anyhow!("Icon border size overflow"))?,
-        )
-        .ok_or_else(|| anyhow!("Icon item size overflow"))?;
-    let scaled_item_size = item_size
+    if layout.items.is_empty() {
+        return Err(anyhow!("Layout has no visible app items"));
+    }
+
+    let width = layout.content_width;
+    let height = layout.content_height;
+    let item_size = layout.item_size;
+    let icon_size = layout.icon_size;
+    let icon_padding = layout.icon_padding;
+    let scaled_item_size = layout
+        .item_size
         .checked_mul(SCALE_FACTOR)
         .ok_or_else(|| anyhow!("Scaled icon item size overflow"))?;
-    let scaled_corner_radius = corner_radius * SCALE_FACTOR;
-    let scaled_border_size = icon_border * SCALE_FACTOR;
-    let scaled_icon_inner_size = icon_size * SCALE_FACTOR;
+    let scaled_corner_radius = corner_radius
+        .checked_mul(SCALE_FACTOR)
+        .ok_or_else(|| anyhow!("Scaled corner radius overflow"))?;
+    let scaled_padding = icon_padding
+        .checked_mul(SCALE_FACTOR)
+        .ok_or_else(|| anyhow!("Scaled icon padding overflow"))?;
+    let scaled_icon_size = icon_size
+        .checked_mul(SCALE_FACTOR)
+        .ok_or_else(|| anyhow!("Scaled icon size overflow"))?;
 
-    if width <= 0 || height <= 0 || item_size != height || scaled_item_size <= 0 {
+    if width <= 0 || height <= 0 || item_size <= 0 || scaled_item_size <= 0 {
         return Err(anyhow!("Invalid icon bitmap dimensions"));
     }
 
@@ -463,7 +449,14 @@ fn draw_icons(
 
     let fg_brush = BrushGuard::new(unsafe { CreateSolidBrush(COLORREF(fg_color)) })?;
     let bg_brush = BrushGuard::new(unsafe { CreateSolidBrush(COLORREF(bg_color)) })?;
-    let has_badges = state.apps.iter().any(|entry| entry.window_count > 1);
+    let has_badges = show_badge
+        && layout.items.iter().any(|item| {
+            state
+                .apps
+                .get(item.app_index)
+                .map(|entry| entry.window_count > 1)
+                .unwrap_or(false)
+        });
     let badge_border_brush = has_badges
         .then(|| unsafe { CreateSolidBrush(COLORREF(BADGE_BORDER_COLOR)) })
         .map(BrushGuard::new)
@@ -473,7 +466,7 @@ fn draw_icons(
         .map(BrushGuard::new)
         .transpose()?;
     let badge_font = if has_badges {
-        badge_geometry("2", icon_size, height)
+        badge_geometry("2", icon_size, item_size)
             .and_then(|geometry| create_badge_font(geometry.height, SCALE_FACTOR))
             .map(FontGuard::new)
             .transpose()?
@@ -511,11 +504,11 @@ fn draw_icons(
         unsafe {
             DrawIconEx(
                 hdc_scaled,
-                scaled_border_size,
-                scaled_border_size,
+                scaled_padding,
+                scaled_padding,
                 entry.icon,
-                scaled_icon_inner_size,
-                scaled_icon_inner_size,
+                scaled_icon_size,
+                scaled_icon_size,
                 0,
                 None,
                 DI_NORMAL,
@@ -523,31 +516,33 @@ fn draw_icons(
         }
         .map_err(|err| anyhow!("DrawIconEx failed, {err}"))?;
 
-        if let Some(label) = badge_label(entry.window_count) {
-            if let Some(geometry) = badge_geometry(&label, icon_size, height) {
-                let scaled_offset = geometry.offset * SCALE_FACTOR;
-                let scaled_width = geometry.width * SCALE_FACTOR;
-                let scaled_height = geometry.height * SCALE_FACTOR;
-                let right = scaled_item_size - scaled_offset;
-                let left = right - scaled_width;
-                draw_badge(
-                    hdc_scaled,
-                    &label,
-                    left,
-                    scaled_offset,
-                    scaled_width,
-                    scaled_height,
-                    SCALE_FACTOR,
-                    badge_border_brush
-                        .as_ref()
-                        .map(BrushGuard::get)
-                        .unwrap_or_default(),
-                    badge_background_brush
-                        .as_ref()
-                        .map(BrushGuard::get)
-                        .unwrap_or_default(),
-                    badge_font.as_ref().map(FontGuard::get),
-                );
+        if show_badge {
+            if let Some(label) = badge_label(entry.window_count, badge_max) {
+                if let Some(geometry) = badge_geometry(&label, icon_size, item_size) {
+                    let scaled_offset = geometry.offset * SCALE_FACTOR;
+                    let scaled_width = geometry.width * SCALE_FACTOR;
+                    let scaled_height = geometry.height * SCALE_FACTOR;
+                    let right = scaled_item_size - scaled_offset;
+                    let left = right - scaled_width;
+                    draw_badge(
+                        hdc_scaled,
+                        &label,
+                        left,
+                        scaled_offset,
+                        scaled_width,
+                        scaled_height,
+                        SCALE_FACTOR,
+                        badge_border_brush
+                            .as_ref()
+                            .map(BrushGuard::get)
+                            .unwrap_or_default(),
+                        badge_background_brush
+                            .as_ref()
+                            .map(BrushGuard::get)
+                            .unwrap_or_default(),
+                        badge_font.as_ref().map(FontGuard::get),
+                    );
+                }
             }
         }
         Ok(())
@@ -563,23 +558,50 @@ fn draw_icons(
         width,
         height,
         icon_size,
-        icon_border,
+        icon_padding,
         bg_color,
-        entries: state
-            .apps
+        show_badge,
+        badge_max,
+        entries: layout
+            .items
             .iter()
-            .map(|entry| (entry.icon.0 as isize, entry.window_count))
-            .collect(),
+            .map(|item| {
+                let entry = state
+                    .apps
+                    .get(item.app_index)
+                    .ok_or_else(|| anyhow!("Layout app index is out of range"))?;
+                Ok((
+                    item.app_index,
+                    entry.icon.0 as isize,
+                    entry.window_count,
+                    item.x,
+                    item.y,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?,
     };
     if icon_layer_key.as_ref() != Some(&next_layer_key) {
         let static_layer_timer = StageTimer::new("static_icon_layer");
-        for (index, entry) in state.apps.iter().enumerate() {
+        let static_rect = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        if unsafe { FillRect(hdc_static, &static_rect, bg_brush.get()) } == 0 {
+            return Err(anyhow!("FillRect static icon layer failed"));
+        }
+        for item in &layout.items {
+            let entry = state
+                .apps
+                .get(item.app_index)
+                .ok_or_else(|| anyhow!("Layout app index is out of range"))?;
             draw_item(entry, false)?;
             unsafe {
                 StretchBlt(
                     hdc_static,
-                    item_size * index as i32,
-                    0,
+                    item.x,
+                    item.y,
                     item_size,
                     item_size,
                     Some(hdc_scaled),
@@ -612,6 +634,11 @@ fn draw_icons(
     }
     .map_err(|err| anyhow!("BitBlt icon layer failed, {err}"))?;
 
+    let selected_item = layout
+        .items
+        .iter()
+        .find(|item| item.app_index == state.index)
+        .ok_or_else(|| anyhow!("Selected app is not on the current layout page"))?;
     let selected = state
         .apps
         .get(state.index)
@@ -620,8 +647,8 @@ fn draw_icons(
     unsafe {
         StretchBlt(
             hdc_frame,
-            item_size * state.index as i32,
-            0,
+            selected_item.x,
+            selected_item.y,
             item_size,
             item_size,
             Some(hdc_scaled),
@@ -657,59 +684,14 @@ fn ensure_surface(
         .ok_or_else(|| anyhow!("Bitmap surface was not initialized"))
 }
 
-fn get_dpi_scale(hwnd: HWND) -> f64 {
-    unsafe {
-        let dpi = GetDpiForWindow(hwnd);
-        if dpi == 0 {
-            1.0
-        } else {
-            dpi as f64 / 96.0
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 struct IconLayerKey {
     width: i32,
     height: i32,
     icon_size: i32,
-    icon_border: i32,
+    icon_padding: i32,
     bg_color: u32,
-    entries: Vec<(isize, usize)>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Coordinate {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    icon_size: i32,
-    item_size: i32,
-}
-
-impl Coordinate {
-    fn new(num_apps: i32, icon_size_max: i32, border_size: i32, icon_border: i32) -> Self {
-        let monitor_rect = get_moinitor_rect();
-        let monitor_width = monitor_rect.right - monitor_rect.left;
-        let monitor_height = monitor_rect.bottom - monitor_rect.top;
-
-        let icon_size =
-            ((monitor_width - 2 * border_size) / num_apps - icon_border * 2).min(icon_size_max);
-
-        let item_size = icon_size + icon_border * 2;
-        let width = item_size * num_apps + border_size * 2;
-        let height = item_size + border_size * 2;
-        let x = monitor_rect.left + (monitor_width - width) / 2;
-        let y = monitor_rect.top + (monitor_height - height) / 2;
-
-        Self {
-            x,
-            y,
-            width,
-            height,
-            icon_size,
-            item_size,
-        }
-    }
+    show_badge: bool,
+    badge_max: usize,
+    entries: Vec<(usize, isize, usize, i32, i32)>,
 }

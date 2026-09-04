@@ -6,6 +6,11 @@ use std::{
     path::Path,
 };
 
+#[cfg(all(target_os = "windows", target_env = "gnu"))]
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+
 use window_switcher::{
     alert, load_config, start,
     utils::{is_running_as_admin, relaunch_as_admin, SingleInstance},
@@ -20,11 +25,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    unsafe {
-        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
-            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_SYSTEM_AWARE,
-        );
-    }
+    configure_dpi_awareness()?;
 
     let config = match load_config() {
         Ok(config) => config,
@@ -52,6 +53,17 @@ fn run() -> Result<()> {
         bail!("Another instance is running. This instance will abort.")
     }
     start(&config)
+}
+
+#[cfg(all(target_os = "windows", target_env = "gnu"))]
+fn configure_dpi_awareness() -> Result<()> {
+    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }
+        .map_err(|err| anyhow!("Failed to enable Per-Monitor V2 DPI awareness: {err}"))
+}
+
+#[cfg(not(all(target_os = "windows", target_env = "gnu")))]
+fn configure_dpi_awareness() -> Result<()> {
+    Ok(())
 }
 
 fn prepare_log_file(path: &Path) -> std::io::Result<File> {

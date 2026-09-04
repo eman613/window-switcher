@@ -53,4 +53,6 @@ IDI_ICON ICON "icon.ico"
 #define RT_MANIFEST 24
 #define APP_MANIFEST 1
 
-// APP_MANIFEST RT_MANIFEST app.manifest
+#if !defined(WINDOW_SWITCHER_USE_TOOLCHAIN_MANIFEST)
+APP_MANIFEST RT_MANIFEST "app.manifest"
+#endif

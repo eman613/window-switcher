@@ -1,4 +1,5 @@
 use crate::{
+    config::MonitorTarget,
     metrics::StageTimer,
     utils::{is_process_elevated, HandleWrapper},
 };
@@ -17,7 +18,10 @@ use windows::Win32::{
     Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HWND, LPARAM, MAX_PATH, POINT, RECT},
     Graphics::{
         Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWM_CLOAKED_SHELL},
-        Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST},
+        Gdi::{
+            GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO,
+            MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+        },
     },
     Storage::{
         EnhancedStorage::PKEY_AppUserModel_ID,
@@ -31,6 +35,7 @@ use windows::Win32::{
         },
     },
     UI::{
+        HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
         Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_MOUSE},
         Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
         WindowsAndMessaging::{
@@ -96,19 +101,100 @@ pub fn is_small_window(hwnd: HWND) -> bool {
     width < 120 || height < 90
 }
 
-pub fn get_moinitor_rect() -> RECT {
-    unsafe {
-        let mut mi = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..MONITORINFO::default()
-        };
-        let mut cursor = POINT::default();
-        let _ = GetCursorPos(&mut cursor);
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MonitorContext {
+    pub(crate) handle: HMONITOR,
+    pub(crate) rect: RECT,
+    pub(crate) dpi: u32,
+}
 
-        let hmonitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
-        let _ = GetMonitorInfoW(hmonitor, &mut mi);
-        mi.rcMonitor
+pub(crate) fn get_monitor_context(
+    target: MonitorTarget,
+    use_work_area: bool,
+) -> Result<MonitorContext> {
+    let primary = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
+    if primary.is_invalid() {
+        return Err(anyhow!("Failed to resolve the primary monitor"));
     }
+
+    let requested = match target {
+        MonitorTarget::Cursor => {
+            let mut cursor = POINT::default();
+            match unsafe { GetCursorPos(&mut cursor) } {
+                Ok(()) => unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) },
+                Err(err) => {
+                    warn!("failed to get cursor position; using primary monitor: {err}");
+                    primary
+                }
+            }
+        }
+        MonitorTarget::Foreground => {
+            let foreground = unsafe { GetForegroundWindow() };
+            if foreground.is_invalid() {
+                primary
+            } else {
+                unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) }
+            }
+        }
+        MonitorTarget::Primary => primary,
+    };
+
+    match read_monitor_context(requested, use_work_area) {
+        Ok(context) => Ok(context),
+        Err(err) if requested != primary => {
+            warn!("failed to query requested monitor; using primary monitor: {err}");
+            read_monitor_context(primary, use_work_area)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn read_monitor_context(handle: HMONITOR, use_work_area: bool) -> Result<MonitorContext> {
+    if handle.is_invalid() {
+        return Err(anyhow!("Monitor handle is invalid"));
+    }
+
+    let mut monitor_info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..MONITORINFO::default()
+    };
+    unsafe { GetMonitorInfoW(handle, &mut monitor_info) }
+        .ok()
+        .map_err(|err| anyhow!("GetMonitorInfoW failed, {err}"))?;
+
+    let mut rect = if use_work_area {
+        monitor_info.rcWork
+    } else {
+        monitor_info.rcMonitor
+    };
+    if !is_positive_rect(rect) && use_work_area {
+        warn!("monitor work area is invalid; using full monitor bounds");
+        rect = monitor_info.rcMonitor;
+    }
+    if !is_positive_rect(rect) {
+        return Err(anyhow!("Monitor bounds are empty or invalid"));
+    }
+
+    let mut dpi_x = 96;
+    let mut dpi_y = 96;
+    if let Err(err) = unsafe { GetDpiForMonitor(handle, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }
+    {
+        warn!("GetDpiForMonitor failed; using 96 DPI: {err}");
+        dpi_x = 96;
+    }
+    if dpi_x == 0 {
+        dpi_x = 96;
+    }
+
+    Ok(MonitorContext {
+        handle,
+        rect,
+        dpi: dpi_x,
+    })
+}
+
+fn is_positive_rect(rect: RECT) -> bool {
+    rect.right > rect.left && rect.bottom > rect.top
 }
 
 pub fn get_window_size(hwnd: HWND) -> (i32, i32) {

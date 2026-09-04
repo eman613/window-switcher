@@ -24,8 +24,9 @@ use windows::Win32::{
         GetWindowLongPtrW, KillTimer, LoadCursorW, PostQuitMessage, RegisterClassW,
         RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage, CS_HREDRAW,
         CS_VREDRAW, CW_USEDEFAULT, GWL_STYLE, HICON, HTCLIENT, IDC_ARROW, MSG, WINDOW_STYLE,
-        WM_COMMAND, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCHITTEST, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
-        WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WM_COMMAND, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCHITTEST,
+        WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     },
 };
 
@@ -80,7 +81,7 @@ impl App {
     }
 
     fn run(hwnd: HWND, config: &Config) -> Result<()> {
-        let painter = GdiAAPainter::new(hwnd)?;
+        let painter = GdiAAPainter::new(hwnd, &config.appearance)?;
 
         let foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist)?;
         let keyboard_listener = KeyboardListener::init(hwnd, &config.to_hotkeys())?;
@@ -364,6 +365,16 @@ impl App {
                 }
             }
             WM_ERASEBKGND => {
+                return Ok(LRESULT(0));
+            }
+            WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+                with_app(hwnd, |app| {
+                    app.painter.invalidate_layout();
+                    if let Some(state) = app.switch_apps_state.as_ref() {
+                        app.painter.paint(state);
+                    }
+                    Ok(())
+                })?;
                 return Ok(LRESULT(0));
             }
             WM_TIMER if wparam.0 == TRAY_RETRY_TIMER_ID => {

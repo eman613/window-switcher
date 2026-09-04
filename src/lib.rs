@@ -11,6 +11,7 @@ mod foreground;
 mod icon_cache;
 mod icon_loader;
 mod keyboard;
+mod layout;
 mod metrics;
 mod painter;
 mod painter_resources;
@@ -18,4 +19,4 @@ mod startup;
 mod trayicon;
 
 pub use crate::app::start;
-pub use crate::config::{load_config, Config};
+pub use crate::config::{load_config, AppearanceConfig, Config, LayoutMode, MonitorTarget};

@@ -9,7 +9,6 @@ use windows::Win32::{
     },
 };
 
-const BADGE_MAX_COUNT: usize = 99;
 const BADGE_HEIGHT_NUMERATOR: i32 = 3;
 const BADGE_HEIGHT_DENOMINATOR: i32 = 8;
 const BADGE_EXTRA_WIDTH: i32 = 8;
@@ -30,13 +29,13 @@ pub(crate) struct BadgeGeometry {
     pub(crate) offset: i32,
 }
 
-pub(crate) fn badge_label(window_count: usize) -> Option<String> {
+pub(crate) fn badge_label(window_count: usize, max_count: usize) -> Option<String> {
     if window_count <= 1 {
         return None;
     }
 
-    if window_count > BADGE_MAX_COUNT {
-        Some(format!("{BADGE_MAX_COUNT}+"))
+    if window_count > max_count {
+        Some(format!("{max_count}+"))
     } else {
         Some(window_count.to_string())
     }
@@ -233,16 +232,16 @@ mod tests {
 
     #[test]
     fn badge_label_only_appears_for_multiple_windows() {
-        assert_eq!(badge_label(0), None);
-        assert_eq!(badge_label(1), None);
-        assert_eq!(badge_label(2).as_deref(), Some("2"));
-        assert_eq!(badge_label(99).as_deref(), Some("99"));
+        assert_eq!(badge_label(0, 99), None);
+        assert_eq!(badge_label(1, 99), None);
+        assert_eq!(badge_label(2, 99).as_deref(), Some("2"));
+        assert_eq!(badge_label(99, 99).as_deref(), Some("99"));
     }
 
     #[test]
     fn badge_label_caps_large_window_counts() {
-        assert_eq!(badge_label(100).as_deref(), Some("99+"));
-        assert_eq!(badge_label(usize::MAX).as_deref(), Some("99+"));
+        assert_eq!(badge_label(100, 99).as_deref(), Some("99+"));
+        assert_eq!(badge_label(usize::MAX, 999).as_deref(), Some("999+"));
     }
 
     #[test]
