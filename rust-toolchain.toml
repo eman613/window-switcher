@@ -1,0 +1,5 @@
+[toolchain]
+# The local Windows environment provides the GNU linker; CI overrides this with MSVC.
+channel = "1.98.0-x86_64-pc-windows-gnu"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

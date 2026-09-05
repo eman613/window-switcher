@@ -10,46 +10,67 @@ on:
 
 jobs:
   all:
-    name: All
+    name: ${{ matrix.name }}
 
     strategy:
+      fail-fast: false
       matrix:
-        target:
-        - x86_64-pc-windows-msvc
         include:
-        - target: x86_64-pc-windows-msvc
-          os: windows-latest
+        - name: x64 quality
+          target: x86_64-pc-windows-msvc
+          toolchain: 1.98.0
+          quality: true
+        - name: ARM64 compile
+          target: aarch64-pc-windows-msvc
+          toolchain: 1.98.0
+          quality: false
+        - name: MSRV 1.85
+          target: x86_64-pc-windows-msvc
+          toolchain: 1.85.0
+          quality: false
 
-    runs-on: ${{matrix.os}}
+    runs-on: windows-latest
 
     env:
       MAX_RELEASE_SIZE_BYTES: 900000
       RUSTFLAGS: --deny warnings
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}-x86_64-pc-windows-msvc
 
     steps:
     - uses: actions/checkout@v6
 
     - name: Install Rust Toolchain Components
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1
       with:
+        toolchain: ${{ matrix.toolchain }}
         targets: ${{ matrix.target }}
         components: clippy, rustfmt
 
     - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ matrix.toolchain }}-${{ matrix.target }}
 
     - name: Test
-      run: cargo test --locked --target=${{ matrix.target }} --workspace --all-targets
+      if: ${{ matrix.quality }}
+      run: cargo test --locked --release --target=${{ matrix.target }} --workspace --all-targets
 
     - name: Clippy
-      run: cargo clippy --locked --target=${{ matrix.target }} --workspace --all-targets -- -D warnings
+      if: ${{ matrix.quality }}
+      run: cargo clippy --locked --release --target=${{ matrix.target }} --workspace --all-targets -- -D warnings
 
     - name: Format
+      if: ${{ matrix.quality }}
       run: cargo fmt --all --check
+
+    - name: Cross-target compile check
+      if: ${{ !matrix.quality }}
+      run: cargo check --locked --release --target=${{ matrix.target }} --workspace --all-targets
 
     - name: Build release
       run: cargo build --locked --release --package window-switcher --target=${{ matrix.target }}
 
     - name: Enforce release size budget
+      if: ${{ matrix.quality }}
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'

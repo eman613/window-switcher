@@ -119,7 +119,7 @@ impl RegKey {
     }
 
     pub fn set_value(&self, value: &[u8]) -> Result<()> {
-        if !value.len().is_multiple_of(2) {
+        if value.len() % 2 != 0 {
             bail!("Registry string value must contain UTF-16 bytes");
         }
         let mut data = value.to_vec();
