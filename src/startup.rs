@@ -21,7 +21,7 @@ pub struct Startup {
 
 impl Startup {
     pub fn init(is_admin: bool) -> Result<Self> {
-        let exe_path = get_exe_path();
+        let exe_path = get_exe_path()?;
         let is_enable = if is_admin {
             exist_scheduled_task(TASK_NAME)?
         } else {

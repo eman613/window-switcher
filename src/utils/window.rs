@@ -1,7 +1,7 @@
 use crate::{
     config::MonitorTarget,
     metrics::StageTimer,
-    utils::{is_process_elevated, HandleWrapper},
+    utils::{get_module_path, is_process_elevated},
 };
 
 use anyhow::{anyhow, Result};
@@ -15,7 +15,7 @@ use std::{
 };
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::{
-    Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HWND, LPARAM, MAX_PATH, POINT, RECT},
+    Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HWND, LPARAM, POINT, RECT},
     Graphics::{
         Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWM_CLOAKED_SHELL},
         Gdi::{
@@ -26,13 +26,6 @@ use windows::Win32::{
     Storage::{
         EnhancedStorage::PKEY_AppUserModel_ID,
         Packaging::Appx::{GetPackagePathByFullName, GetPackagesByPackageFamily},
-    },
-    System::{
-        LibraryLoader::GetModuleFileNameW,
-        Threading::{
-            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-            PROCESS_QUERY_LIMITED_INFORMATION,
-        },
     },
     UI::{
         HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
@@ -204,49 +197,10 @@ pub fn get_window_size(hwnd: HWND) -> (i32, i32) {
     ((rect.right - rect.left), (rect.bottom - rect.top))
 }
 
-pub fn get_exe_folder() -> Result<PathBuf> {
-    let path =
-        std::env::current_exe().map_err(|err| anyhow!("Failed to get binary path, {err}"))?;
-    path.parent()
-        .ok_or_else(|| anyhow!("Failed to get binary folder"))
-        .map(|v| v.to_path_buf())
-}
-
-pub fn get_exe_path() -> Vec<u16> {
-    let mut path = vec![0u16; MAX_PATH as _];
-    let size = unsafe { GetModuleFileNameW(None, &mut path) } as usize;
-    path[..size].to_vec()
-}
-
 pub fn get_window_pid(hwnd: HWND) -> u32 {
     let mut pid: u32 = 0;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32)) };
     pid
-}
-
-pub fn get_module_path(pid: u32) -> Option<String> {
-    let handle = HandleWrapper::new(
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?,
-    );
-    let mut len: u32 = MAX_PATH;
-    let mut name = vec![0u16; len as usize];
-    let ret = unsafe {
-        QueryFullProcessImageNameW(
-            handle.get_handle(),
-            PROCESS_NAME_WIN32,
-            PWSTR(name.as_mut_ptr()),
-            &mut len,
-        )
-    };
-    if ret.is_err() || len == 0 {
-        return None;
-    }
-    unsafe { name.set_len(len as usize) };
-    let module_path = String::from_utf16_lossy(&name);
-    if module_path.is_empty() {
-        return None;
-    }
-    Some(module_path)
 }
 
 fn is_chrome_browser(module_path: &str) -> bool {
