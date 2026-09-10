@@ -1,0 +1,158 @@
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$helperDirectory = Join-Path $PSScriptRoot 'performance'
+$sources = @('CycleContracts.cs', 'WindowProbe.cs', 'CycleRunner.cs', 'tests/FakeCycleTarget.cs') |
+    ForEach-Object { Join-Path $helperDirectory $_ }
+Add-Type -Path $sources
+. (Join-Path $helperDirectory 'Report.ps1')
+$script:performanceTestCount = 0
+
+function Assert-PerformanceTest {
+    param([bool] $Condition, [string] $Message)
+    if (-not $Condition) { throw $Message }
+}
+
+function Invoke-PerformanceTest {
+    param([string] $Name, [scriptblock] $Body)
+    & $Body
+    $script:performanceTestCount++
+    Write-Host "PASS $Name"
+}
+
+function New-PerformanceTestOptions {
+    $options = [WindowSwitcher.Performance.CycleOptions]::new()
+    $options.RequestedCycles = 3
+    $options.WarmupCycles = 0
+    $options.VisibleMilliseconds = 0
+    $options.HiddenMilliseconds = 0
+    $options.StepTimeoutMilliseconds = 30
+    $options.MaxRunMilliseconds = 2000
+    $options.CheckpointEvery = 2
+    $options.CooldownMilliseconds = 0
+    $options
+}
+
+function Wait-PerformanceTestRunner {
+    param([object] $Runner)
+    Assert-PerformanceTest ($Runner.Completion.Wait(5000)) 'The worker did not complete within its test deadline.'
+}
+
+Invoke-PerformanceTest 'complete cycles distinguish warmup, acknowledgements and visibility' {
+    $target = [WindowSwitcher.Performance.Tests.FakeCycleTarget]::new()
+    $options = New-PerformanceTestOptions
+    $options.WarmupCycles = 2
+    $runner = [WindowSwitcher.Performance.CycleRunner]::new($target, $options)
+    try {
+        $runner.Start()
+        Wait-PerformanceTestRunner $runner
+        Assert-PerformanceTest ($runner.Phase -ceq 'Completed') $runner.Error
+        Assert-PerformanceTest ($runner.CompletedCycles -eq 3 -and $runner.WarmupCompleted -eq 2) 'Incorrect measured/warmup counts.'
+        Assert-PerformanceTest ($runner.OpenRequested -eq 5 -and $runner.CloseRequested -eq 5) 'Incorrect request counts.'
+        Assert-PerformanceTest ($runner.OpenAcknowledged -eq 5 -and $runner.CloseAcknowledged -eq 5) 'Incorrect acknowledgement count.'
+        Assert-PerformanceTest ($runner.OpenedVerified -eq 5 -and $runner.ClosedVerified -eq 5) 'Incorrect visibility count.'
+        Assert-PerformanceTest ($runner.Checkpoints.Count -eq 4) 'Missing baseline, cycle or settled checkpoints.'
+        Assert-PerformanceTest (@($runner.Checkpoints | Where-Object WindowVisible).Count -eq 0) 'A checkpoint was not taken in the hidden state.'
+    } finally { $runner.Dispose() }
+}
+
+foreach ($ignoredTransition in @('IgnoreOpen', 'IgnoreClose')) {
+    Invoke-PerformanceTest "$ignoredTransition acknowledgement cannot count as a completed cycle" {
+        $target = [WindowSwitcher.Performance.Tests.FakeCycleTarget]::new()
+        $target.$ignoredTransition = $true
+        $runner = [WindowSwitcher.Performance.CycleRunner]::new($target, (New-PerformanceTestOptions))
+        try {
+            $runner.Start()
+            Wait-PerformanceTestRunner $runner
+            Assert-PerformanceTest ($runner.Phase -ceq 'Failed' -and $runner.CompletedCycles -eq 0) 'Unconfirmed visibility was counted as completion.'
+            Assert-PerformanceTest ($runner.Error.Contains('visibility')) 'Missing transition timeout diagnosis.'
+        } finally { $runner.Dispose() }
+    }
+}
+
+Invoke-PerformanceTest 'a failed later message preserves only previously completed cycles' {
+    $target = [WindowSwitcher.Performance.Tests.FakeCycleTarget]::new()
+    $target.FailOnOpen = 2
+    $runner = [WindowSwitcher.Performance.CycleRunner]::new($target, (New-PerformanceTestOptions))
+    try {
+        $runner.Start()
+        Wait-PerformanceTestRunner $runner
+        Assert-PerformanceTest ($runner.Phase -ceq 'Failed' -and $runner.CompletedCycles -eq 1) 'Failure inflated the completion count.'
+        Assert-PerformanceTest ($runner.OpenRequested -eq 2 -and $runner.CloseRequested -eq 1) 'The failed message attempt was not recorded.'
+        Assert-PerformanceTest ($runner.OpenAcknowledged -eq 1 -and $runner.CloseAcknowledged -eq 1) 'Failure inflated acknowledgement counts.'
+    } finally { $runner.Dispose() }
+}
+
+Invoke-PerformanceTest 'cancellation interrupts the hold and cleans the visible panel' {
+    $target = [WindowSwitcher.Performance.Tests.FakeCycleTarget]::new()
+    $options = New-PerformanceTestOptions
+    $options.VisibleMilliseconds = 1000
+    $runner = [WindowSwitcher.Performance.CycleRunner]::new($target, $options)
+    try {
+        $runner.Start()
+        $wait = [Diagnostics.Stopwatch]::StartNew()
+        while ($runner.OpenedVerified -eq 0 -and $wait.ElapsedMilliseconds -lt 1000) { Start-Sleep -Milliseconds 5 }
+        Assert-PerformanceTest ($runner.OpenedVerified -eq 1) 'The cancellation test never reached its visible state.'
+        $runner.Cancel()
+        Wait-PerformanceTestRunner $runner
+        Assert-PerformanceTest ($runner.Phase -ceq 'Cancelled' -and $runner.CompletedCycles -eq 0) 'Cancellation was reported as completion.'
+        Assert-PerformanceTest (-not $target.IsVisible) 'Cancellation left the panel visible.'
+    } finally { $runner.Dispose() }
+}
+
+Invoke-PerformanceTest 'the total time budget bounds a long visibility hold' {
+    $options = New-PerformanceTestOptions
+    $options.MaxRunMilliseconds = 40
+    $options.VisibleMilliseconds = 1000
+    $runner = [WindowSwitcher.Performance.CycleRunner]::new([WindowSwitcher.Performance.Tests.FakeCycleTarget]::new(), $options)
+    try {
+        $runner.Start()
+        Wait-PerformanceTestRunner $runner
+        Assert-PerformanceTest ($runner.Phase -ceq 'Failed' -and $runner.CompletedCycles -eq 0) 'The total deadline did not stop the cycle.'
+        Assert-PerformanceTest ($runner.Error.Contains('time limit')) 'Missing total-deadline diagnosis.'
+    } finally { $runner.Dispose() }
+}
+
+Invoke-PerformanceTest 'resource safety limits stop the run before measuring cycles' {
+    $target = [WindowSwitcher.Performance.Tests.FakeCycleTarget]::new()
+    $target.PrivateBytes = 2GB
+    $runner = [WindowSwitcher.Performance.CycleRunner]::new($target, (New-PerformanceTestOptions))
+    try {
+        $runner.Start()
+        Wait-PerformanceTestRunner $runner
+        Assert-PerformanceTest ($runner.Phase -ceq 'Failed' -and $runner.CompletedCycles -eq 0) 'The memory safety limit was ignored.'
+        Assert-PerformanceTest ($runner.Error.Contains('resource safety limit')) 'Missing resource-limit diagnosis.'
+    } finally { $runner.Dispose() }
+}
+
+Invoke-PerformanceTest 'the native adapter rejects an invalid window' {
+    $process = [Diagnostics.Process]::GetCurrentProcess()
+    $rejected = $false
+    try {
+        try { $null = [WindowSwitcher.Performance.WindowProbe]::new($process, [IntPtr]::Zero) }
+        catch { $rejected = $true }
+        Assert-PerformanceTest $rejected 'An invalid window was accepted.'
+    } finally { $process.Dispose() }
+}
+
+Invoke-PerformanceTest 'closed-state trends use actual completed cycles' {
+    $target = [WindowSwitcher.Performance.Tests.FakeCycleTarget]::new()
+    $points = @()
+    for ($index = 0; $index -le 21; $index++) {
+        $point = $target.Capture()
+        $point.Phase = if ($index -eq 0) { 'Baseline' } elseif ($index -eq 21) { 'Settled' } else { 'Closed' }
+        $point.CompletedCycles = [math]::Min($index, 20) * 100
+        $point.GdiObjects = 20 + [math]::Min($index, 20)
+        $points += $point
+    }
+    $trend = @(Get-WindowSwitcherResourceTrend -Samples $points -Checkpoints $points)
+    $gdi = $trend | Where-Object Metric -EQ 'GdiObjects'
+    $handles = $trend | Where-Object Metric -EQ 'HandleCount'
+    Assert-PerformanceTest ($gdi.Delta -eq 20 -and $gdi.ClosedMedianDelta -eq 10 -and $gdi.SlopePer1000Cycles -eq 10) 'The GDI growth calculation is incorrect.'
+    Assert-PerformanceTest ($handles.Delta -eq 0 -and $handles.SlopePer1000Cycles -eq 0) 'Stable resources were reported as growing.'
+    Assert-PerformanceTest (@(Get-WindowSwitcherResourceTrend -Samples @() -Checkpoints @()).Count -eq 0) 'An empty run produced a false baseline.'
+}
+
+Write-Host "Performance harness regression tests passed: $script:performanceTestCount"

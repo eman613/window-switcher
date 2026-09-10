@@ -67,6 +67,11 @@ jobs:
       shell: pwsh
       run: pwsh -NoProfile -NonInteractive -File tools/test-install.ps1
 
+    - name: Performance harness regression tests
+      if: ${{ matrix.quality }}
+      shell: pwsh
+      run: pwsh -NoProfile -NonInteractive -File tools/test-performance.ps1
+
     - name: Cross-target compile check
       if: ${{ !matrix.quality }}
       run: cargo check --locked --release --target=${{ matrix.target }} --workspace --all-targets
