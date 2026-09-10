@@ -137,10 +137,15 @@ function Assert-WindowSwitcherArchive {
     $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
     try {
         $entries = @($archive.Entries)
-        if ($entries.Count -ne 1 -or
-            $entries[0].FullName -cne $ExecutableName -or
-            $entries[0].Length -le 0) {
-            throw "Archive must contain exactly one non-empty '$ExecutableName' entry."
+        $configurationName = [System.IO.Path]::ChangeExtension($ExecutableName, '.ini')
+        $executableEntries = @($entries | Where-Object { $_.FullName -ceq $ExecutableName })
+        $invalidEntries = @($entries | Where-Object {
+                $_.Length -le 0 -or $_.FullName -cnotin @($ExecutableName, $configurationName)
+            })
+        if ($entries.Count -notin 1, 2 -or
+            $executableEntries.Count -ne 1 -or
+            $invalidEntries.Count -ne 0) {
+            throw "Archive must contain one non-empty '$ExecutableName' and at most one non-empty '$configurationName' in its root."
         }
     } finally {
         $archive.Dispose()
@@ -256,6 +261,8 @@ try {
         throw "The verified archive does not contain '$commandName.exe'."
     }
 
+    # The INI is for portable ZIP users. Install only the EXE so existing portable,
+    # legacy, or per-user configuration keeps its precedence and contents.
     $null = [System.IO.Directory]::CreateDirectory($resolvedInstallDirectory)
     $installationNonce = [Guid]::NewGuid().ToString('N')
     $stagedExecutable = Join-Path $resolvedInstallDirectory ".$commandName.$installationNonce.tmp"

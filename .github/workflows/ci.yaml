@@ -62,6 +62,11 @@ jobs:
       if: ${{ matrix.quality }}
       run: cargo fmt --all --check
 
+    - name: Installer regression tests
+      if: ${{ matrix.quality }}
+      shell: pwsh
+      run: pwsh -NoProfile -NonInteractive -File tools/test-install.ps1
+
     - name: Cross-target compile check
       if: ${{ !matrix.quality }}
       run: cargo check --locked --release --target=${{ matrix.target }} --workspace --all-targets

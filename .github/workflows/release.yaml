@@ -55,12 +55,16 @@ jobs:
         if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
           throw "Release executable not found: $executable"
         }
+        $configurationTemplate = Join-Path $env:GITHUB_WORKSPACE "$env:BINARY_NAME.ini"
+        if (-not (Test-Path -LiteralPath $configurationTemplate -PathType Leaf)) {
+          throw "Configuration template not found: $configurationTemplate"
+        }
 
         $distDirectory = Join-Path $env:GITHUB_WORKSPACE 'dist'
         $null = New-Item -ItemType Directory -Path $distDirectory -Force
         $archiveName = "$env:BINARY_NAME-$env:VERSION-$env:PLATFORM.zip"
         $archivePath = Join-Path $distDirectory $archiveName
-        Compress-Archive -LiteralPath $executable -DestinationPath $archivePath -CompressionLevel Optimal
+        Compress-Archive -LiteralPath $executable, $configurationTemplate -DestinationPath $archivePath -CompressionLevel Optimal
 
         $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
         $checksumPath = "$archivePath.sha256"
