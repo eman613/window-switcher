@@ -13,17 +13,20 @@ use std::{
     collections::VecDeque,
     sync::{
         atomic::{AtomicIsize, Ordering},
-        LazyLock,
+        mpsc, LazyLock,
     },
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
-    System::LibraryLoader::GetModuleHandleW,
+    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
     UI::{
         Input::KeyboardAndMouse::{SCANCODE_LSHIFT, SCANCODE_RSHIFT},
         WindowsAndMessaging::{
-            CallNextHookEx, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
-            KBDLLHOOKSTRUCT, LLKHF_UP, WH_KEYBOARD_LL,
+            CallNextHookEx, GetMessageW, PeekMessageW, PostMessageW, PostThreadMessageW,
+            SetWindowsHookExW, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, LLKHF_UP, MSG, PM_NOREMOVE,
+            WH_KEYBOARD_LL, WM_QUIT,
         },
     },
 };
@@ -47,7 +50,8 @@ pub(crate) struct KeyboardMessage {
 
 #[derive(Debug)]
 pub struct KeyboardListener {
-    hook: HHOOK,
+    thread_id: u32,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl KeyboardListener {
@@ -66,33 +70,100 @@ impl KeyboardListener {
         };
         *KEYBOARD_STATE.lock() = keyboard_state;
 
-        let hook = unsafe {
-            let hinstance = { GetModuleHandleW(None) }
-                .map_err(|err| anyhow!("Failed to get module handle, {err}"))?;
-            SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(keyboard_proc),
-                Some(hinstance.into()),
-                0,
-            )
-        }
-        .map_err(|err| anyhow!("Failed to set windows hook, {err}"))?;
-        info!("keyboard listener start");
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("window-switcher-keyboard-hook".to_string())
+            .spawn(move || run_hook_thread(ready_tx))
+            .map_err(|err| anyhow!("Failed to start keyboard hook thread, {err}"))?;
+        let thread_id = match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(thread_id)) => thread_id,
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                WINDOW.store(0, Ordering::Release);
+                *KEYBOARD_STATE.lock() = KeyboardStateMachine::new();
+                return Err(anyhow!(error));
+            }
+            Err(error) => {
+                let _ = worker.join();
+                WINDOW.store(0, Ordering::Release);
+                *KEYBOARD_STATE.lock() = KeyboardStateMachine::new();
+                return Err(anyhow!(
+                    "Keyboard hook thread did not become ready: {error}"
+                ));
+            }
+        };
+        info!("keyboard listener start thread_id={thread_id}");
 
-        Ok(Self { hook })
+        Ok(Self {
+            thread_id,
+            worker: Some(worker),
+        })
     }
 }
 
 impl Drop for KeyboardListener {
     fn drop(&mut self) {
         debug!("keyboard listener destroyed");
-        if !self.hook.is_invalid() {
-            let _ = unsafe { UnhookWindowsHookEx(self.hook) };
+        if self.thread_id != 0 {
+            if let Err(error) =
+                unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) }
+            {
+                warn!(
+                    "failed to stop keyboard hook thread {}: {error}",
+                    self.thread_id
+                );
+            }
+        }
+        if let Some(worker) = self.worker.take() {
+            if let Err(error) = worker.join() {
+                warn!("keyboard hook thread panicked during cleanup: {error:?}");
+            }
         }
         WINDOW.store(0, Ordering::Release);
         *KEYBOARD_STATE.lock() = KeyboardStateMachine::new();
         clear_keyboard_messages();
     }
+}
+
+fn run_hook_thread(ready: mpsc::SyncSender<std::result::Result<u32, String>>) {
+    let hook = unsafe {
+        let hinstance = match GetModuleHandleW(None) {
+            Ok(hinstance) => hinstance,
+            Err(error) => {
+                let _ = ready.send(Err(format!("Failed to get module handle, {error}")));
+                return;
+            }
+        };
+        match SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(keyboard_proc),
+            Some(hinstance.into()),
+            0,
+        ) {
+            Ok(hook) => hook,
+            Err(error) => {
+                let _ = ready.send(Err(format!("Failed to set windows hook, {error}")));
+                return;
+            }
+        }
+    };
+    let thread_id = unsafe { GetCurrentThreadId() };
+    let mut message = MSG::default();
+    unsafe {
+        let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+    }
+    if ready.send(Ok(thread_id)).is_err() {
+        unsafe { UnhookWindowsHookEx(hook) }.ok();
+        return;
+    }
+
+    loop {
+        let result = unsafe { GetMessageW(&mut message, None, 0, 0) };
+        if result.0 <= 0 {
+            break;
+        }
+    }
+    unsafe { UnhookWindowsHookEx(hook) }.ok();
 }
 
 #[derive(Debug)]
