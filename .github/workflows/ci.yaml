@@ -8,9 +8,55 @@ on:
     branches:
     - main
 
+permissions:
+  contents: read
+
 jobs:
+  audit:
+    name: RustSec audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+    - name: RustSec dependency audit
+      uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Capture RustSec audit evidence
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo audit --json --file Cargo.lock > rustsec-audit.json
+        advisory_db="${CARGO_HOME:-$HOME/.cargo}/advisory-db"
+        {
+          printf 'audit_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf 'action_commit=%s\n' '69366f33c96575abad1ee0dba8212993eecbe998'
+          printf 'cargo_lock_sha256=%s\n' "$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          if [ -d "$advisory_db/.git" ]; then
+            printf 'advisory_db_commit=%s\n' "$(git -C "$advisory_db" rev-parse HEAD)"
+          else
+            printf 'advisory_db_commit=unknown\n'
+          fi
+        } > rustsec-audit-context.txt
+
+    - name: Upload RustSec audit report
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: rustsec-audit-${{ github.sha }}
+        path: |
+          rustsec-audit.json
+          rustsec-audit-context.txt
+        if-no-files-found: error
+        retention-days: 14
+
   all:
     name: ${{ matrix.name }}
+    needs: audit
 
     strategy:
       fail-fast: false
@@ -37,7 +83,7 @@ jobs:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}-x86_64-pc-windows-msvc
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
     - name: Install Rust Toolchain Components
       uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1
@@ -46,7 +92,7 @@ jobs:
         targets: ${{ matrix.target }}
         components: clippy, rustfmt
 
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       with:
         key: ${{ matrix.toolchain }}-${{ matrix.target }}
 

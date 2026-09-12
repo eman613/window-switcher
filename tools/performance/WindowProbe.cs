@@ -1,11 +1,38 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
 namespace WindowSwitcher.Performance
 {
+    public sealed class ProcessIdentity
+    {
+        public ProcessIdentity(int processId, long creationTimeUtcTicks, string imagePath)
+        {
+            ProcessId = processId;
+            CreationTimeUtcTicks = creationTimeUtcTicks;
+            ImagePath = imagePath ?? throw new ArgumentNullException(nameof(imagePath));
+        }
+
+        public int ProcessId { get; }
+        public long CreationTimeUtcTicks { get; }
+        public string ImagePath { get; }
+
+        public bool Matches(ProcessIdentity other)
+        {
+            return other != null && ProcessId == other.ProcessId &&
+                CreationTimeUtcTicks == other.CreationTimeUtcTicks &&
+                StringComparer.OrdinalIgnoreCase.Equals(ImagePath, other.ImagePath);
+        }
+
+        public override string ToString()
+        {
+            return $"pid={ProcessId},created={CreationTimeUtcTicks},path={ImagePath}";
+        }
+    }
+
     public sealed class WindowProbe : ICycleTarget
     {
         private const uint OpenMessage = 6010;
@@ -17,11 +44,13 @@ namespace WindowSwitcher.Performance
         private readonly Process process;
         private readonly IntPtr window;
         private readonly object processLock = new object();
+        private readonly ProcessIdentity identity;
 
         public WindowProbe(Process process, IntPtr window)
         {
             this.process = process ?? throw new ArgumentNullException(nameof(process));
             this.window = window;
+            identity = GetProcessIdentity(process);
             CheckWindow();
         }
 
@@ -44,6 +73,7 @@ namespace WindowSwitcher.Performance
         }
 
         public uint Dpi { get { return Native.GetDpiForWindow(window); } }
+        public ProcessIdentity Identity { get { return identity; } }
 
         public void Open(int timeoutMilliseconds)
         {
@@ -82,11 +112,41 @@ namespace WindowSwitcher.Performance
         {
             lock (processLock)
             {
-                if (process.HasExited || !Native.IsWindow(window))
+                if (!Native.IsWindow(window))
                     throw new InvalidOperationException("The tested process or window has exited.");
+                ProcessIdentity current = GetProcessIdentity(process);
+                if (!identity.Matches(current))
+                    throw new InvalidOperationException(
+                        "The tested process identity changed during the test. " +
+                        $"expected={identity}; actual={current}");
                 uint owner;
-                if (Native.GetWindowThreadProcessId(window, out owner) == 0 || owner != process.Id)
+                if (Native.GetWindowThreadProcessId(window, out owner) == 0 || owner != identity.ProcessId)
                     throw new InvalidOperationException("Window ownership changed during the test.");
+            }
+        }
+
+        public static ProcessIdentity GetProcessIdentity(Process process)
+        {
+            if (process == null) throw new ArgumentNullException(nameof(process));
+            process.Refresh();
+            if (process.HasExited)
+                throw new InvalidOperationException("The process has exited before its identity was captured.");
+            string imagePath = GetProcessImagePath(process.Id);
+            if (string.IsNullOrWhiteSpace(imagePath))
+                throw new InvalidOperationException("The process image path is empty.");
+            long creationTimeUtcTicks = process.StartTime.ToUniversalTime().Ticks;
+            return new ProcessIdentity(process.Id, creationTimeUtcTicks, NormalizePath(imagePath));
+        }
+
+        private static string NormalizePath(string path)
+        {
+            try
+            {
+                return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+            catch (Exception error) when (error is ArgumentException || error is NotSupportedException)
+            {
+                throw new InvalidOperationException("The process image path is invalid.", error);
             }
         }
 

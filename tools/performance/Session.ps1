@@ -18,6 +18,7 @@ function New-WindowSwitcherPerformanceSession {
         ConfigurationPath = Join-Path $runtimeDirectory 'window-switcher.ini'
         LogPath = Join-Path $runDirectory 'application.log'
         Process = $null
+        ProcessIdentity = $null
         Probe = $null
         Originals = [Collections.Generic.List[object]]::new()
         CleanupErrors = [Collections.Generic.List[string]]::new()
@@ -39,13 +40,24 @@ function Start-WindowSwitcherPerformanceSession {
     if ($existing.Count -gt 0 -and -not $StopExisting) {
         throw 'A switcher is already running. The single-instance mutex requires it to exit before testing.'
     }
+    if ($existing.Count -gt 1 -and [string]::IsNullOrWhiteSpace($ResumeExecutablePath)) {
+        throw 'Multiple Window Switcher processes exist. Supply ResumeExecutablePath to identify the exact instance.'
+    }
+    $expectedResumePath = $null
+    if (-not [string]::IsNullOrWhiteSpace($ResumeExecutablePath)) {
+        $expectedResumePath = (Resolve-Path -LiteralPath $ResumeExecutablePath -ErrorAction Stop).ProviderPath
+    }
     foreach ($candidate in $existing) {
-        try { $originalPath = [WindowSwitcher.Performance.WindowProbe]::GetProcessImagePath($candidate.Id) }
-        catch {
-            if ($existing.Count -ne 1 -or -not $ResumeExecutablePath) {
-                throw 'Cannot determine the existing executable path. Supply ResumeExecutablePath before stopping it.'
-            }
-            $originalPath = (Resolve-Path -LiteralPath $ResumeExecutablePath -ErrorAction Stop).ProviderPath
+        try { $identity = [WindowSwitcher.Performance.WindowProbe]::GetProcessIdentity($candidate) }
+        catch { throw "Cannot capture the existing process identity (pid=$($candidate.Id)): $($_.Exception.Message)" }
+        $originalPath = $identity.ImagePath
+        if ($null -ne $expectedResumePath -and
+            -not [StringComparer]::OrdinalIgnoreCase.Equals($originalPath, (Resolve-Path -LiteralPath $expectedResumePath).ProviderPath)) {
+            throw "The existing process path does not match ResumeExecutablePath: $originalPath"
+        }
+        if ($null -eq $expectedResumePath -and
+            -not [StringComparer]::OrdinalIgnoreCase.Equals($originalPath, $Session.SourcePath)) {
+            throw "The existing Window Switcher path is not the test executable. Supply ResumeExecutablePath: $originalPath"
         }
         if (-not (Test-Path -LiteralPath $originalPath -PathType Leaf)) { throw 'The resume executable does not exist.' }
         $configurationHashes = @{}
@@ -56,8 +68,8 @@ function Start-WindowSwitcherPerformanceSession {
             }
         }
         $Session.Originals.Add([pscustomobject]@{
-            Id = $candidate.Id; Path = $originalPath; StopRequested = $false
-            Resumed = $false; ConfigurationHashes = $configurationHashes
+            Id = $identity.ProcessId; Path = $originalPath; Identity = $identity; StopRequested = $false
+            Resumed = $false; ResumedIdentity = $null; ConfigurationHashes = $configurationHashes
         })
     }
 
@@ -85,7 +97,7 @@ function Start-WindowSwitcherPerformanceSession {
 
     foreach ($original in $Session.Originals) {
         $original.StopRequested = $true
-        Stop-WindowSwitcherPerformanceProcess -ProcessId $original.Id
+        Stop-WindowSwitcherPerformanceProcess -ProcessId $original.Id -ExpectedIdentity $original.Identity
     }
     $startInfo = [Diagnostics.ProcessStartInfo]::new($Session.ExecutablePath)
     $startInfo.WorkingDirectory = $Session.RuntimeDirectory
@@ -96,35 +108,80 @@ function Start-WindowSwitcherPerformanceSession {
     $startup = [Diagnostics.Stopwatch]::StartNew()
     $Session.Process = [Diagnostics.Process]::Start($startInfo)
     if ($null -eq $Session.Process) { throw 'Window Switcher did not start.' }
-    $window = [IntPtr]::Zero
-    while ($startup.Elapsed.TotalSeconds -lt 15 -and $window -eq [IntPtr]::Zero) {
-        if ($Session.Process.HasExited) { throw "The tested process exited during startup: $($Session.Process.ExitCode)" }
-        $window = [WindowSwitcher.Performance.WindowProbe]::FindReadyWindow($Session.Process.Id)
-        if ($window -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 25 }
-    }
-    if ($window -eq [IntPtr]::Zero) { throw 'The initialized switcher window was not found within 15 seconds.' }
+    $ready = Wait-WindowSwitcherPerformanceProcess -Process $Session.Process -TimeoutMilliseconds 15000
     $Session.InputIdleMilliseconds = $startup.Elapsed.TotalMilliseconds
-    $Session.Probe = [WindowSwitcher.Performance.WindowProbe]::new($Session.Process, $window)
+    $Session.ProcessIdentity = $ready.Identity
+    $Session.Probe = $ready.Probe
+}
+
+function Wait-WindowSwitcherPerformanceProcess {
+    param([Diagnostics.Process] $Process, [int] $TimeoutMilliseconds)
+
+    if ($null -eq $Process) { throw 'Cannot wait for a null process.' }
+    if ($TimeoutMilliseconds -lt 1) { throw 'The process readiness timeout must be positive.' }
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    $lastError = $null
+    while ($wait.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+        try {
+            $identity = [WindowSwitcher.Performance.WindowProbe]::GetProcessIdentity($Process)
+            $window = [WindowSwitcher.Performance.WindowProbe]::FindReadyWindow($identity.ProcessId)
+            if ($window -ne [IntPtr]::Zero) {
+                $probe = [WindowSwitcher.Performance.WindowProbe]::new($Process, $window)
+                $null = $probe.IsVisible
+                return [pscustomobject]@{ Identity = $identity; Probe = $probe }
+            }
+        } catch {
+            $lastError = $_.Exception.Message
+            if ($Process.HasExited) { break }
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    if ($Process.HasExited) {
+        throw "The Window Switcher process exited before readiness: $($Process.ExitCode)"
+    }
+    $detail = if ($lastError) { " Last error: $lastError" } else { '' }
+    throw "The initialized switcher window was not ready within $TimeoutMilliseconds ms.$detail"
 }
 
 function Stop-WindowSwitcherPerformanceProcess {
-    param([int] $ProcessId)
+    param([int] $ProcessId, [object] $ExpectedIdentity)
 
     $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($null -eq $process) { return }
     if ($process.ProcessName -cne 'window-switcher') { throw 'The process ID no longer belongs to Window Switcher.' }
-    try { [WindowSwitcher.Performance.WindowProbe]::RequestExit($ProcessId, 500) }
+    $actualIdentity = [WindowSwitcher.Performance.WindowProbe]::GetProcessIdentity($process)
+    if ($null -eq $ExpectedIdentity -or -not $ExpectedIdentity.Matches($actualIdentity)) {
+        throw "The process identity changed before shutdown: expected=$ExpectedIdentity actual=$actualIdentity"
+    }
+    try { [WindowSwitcher.Performance.WindowProbe]::RequestExit($actualIdentity.ProcessId, 500) }
     catch { Write-Verbose "Graceful shutdown unavailable: $($_.Exception.Message)" }
     $wait = [Diagnostics.Stopwatch]::StartNew()
-    while ($wait.ElapsedMilliseconds -lt 3000 -and (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+    while ($wait.ElapsedMilliseconds -lt 3000) {
+        $remaining = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if ($null -eq $remaining) { break }
+        if ($remaining.ProcessName -cne 'window-switcher') { throw 'Process ownership changed before termination.' }
+        $remainingIdentity = [WindowSwitcher.Performance.WindowProbe]::GetProcessIdentity($remaining)
+        if (-not $ExpectedIdentity.Matches($remainingIdentity)) {
+            throw "The process identity changed during graceful shutdown: expected=$ExpectedIdentity actual=$remainingIdentity"
+        }
         Start-Sleep -Milliseconds 50
     }
     $remaining = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($null -ne $remaining) {
         if ($remaining.ProcessName -cne 'window-switcher') { throw 'Process ownership changed before termination.' }
+        $remainingIdentity = [WindowSwitcher.Performance.WindowProbe]::GetProcessIdentity($remaining)
+        if (-not $ExpectedIdentity.Matches($remainingIdentity)) {
+            throw "The process identity changed before forced termination: expected=$ExpectedIdentity actual=$remainingIdentity"
+        }
         Stop-Process -Id $ProcessId -Force -ErrorAction Stop
         $wait.Restart()
-        while ($wait.ElapsedMilliseconds -lt 3000 -and (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        while ($wait.ElapsedMilliseconds -lt 3000) {
+            $remaining = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+            if ($null -eq $remaining) { break }
+            $remainingIdentity = [WindowSwitcher.Performance.WindowProbe]::GetProcessIdentity($remaining)
+            if (-not $ExpectedIdentity.Matches($remainingIdentity)) {
+                throw "The process identity changed after forced termination: expected=$ExpectedIdentity actual=$remainingIdentity"
+            }
             Start-Sleep -Milliseconds 50
         }
         if (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) { throw 'The switcher process did not exit after termination.' }
@@ -137,19 +194,51 @@ function Close-WindowSwitcherPerformanceSession {
 
     if ($null -ne $Session.Process) {
         try {
-            if (-not $Session.Process.HasExited) { Stop-WindowSwitcherPerformanceProcess -ProcessId $Session.Process.Id }
+            if (-not $Session.Process.HasExited) {
+                Stop-WindowSwitcherPerformanceProcess -ProcessId $Session.Process.Id -ExpectedIdentity $Session.ProcessIdentity
+            }
             $Session.Process.Dispose()
         } catch { $Session.CleanupErrors.Add("Test process cleanup: $($_.Exception.Message)") }
     }
     foreach ($original in $Session.Originals) {
         if ($original.StopRequested) {
             try {
-                if (@(Get-Process -Name window-switcher -ErrorAction SilentlyContinue).Count -eq 0) {
-                    $null = Start-Process -FilePath $original.Path -WorkingDirectory (Split-Path -Parent $original.Path) -WindowStyle Hidden -PassThru
-                    Start-Sleep -Seconds 2
+                $matching = @()
+                $samePath = @()
+                foreach ($candidate in @(Get-Process -Name window-switcher -ErrorAction SilentlyContinue)) {
+                    try {
+                        $candidateIdentity = [WindowSwitcher.Performance.WindowProbe]::GetProcessIdentity($candidate)
+                        if ([StringComparer]::OrdinalIgnoreCase.Equals($candidateIdentity.ImagePath, $original.Path)) {
+                            $samePath += [pscustomobject]@{ Process = $candidate; Identity = $candidateIdentity }
+                            if ($original.Identity.Matches($candidateIdentity)) {
+                                $matching += [pscustomobject]@{ Process = $candidate; Identity = $candidateIdentity }
+                            }
+                        }
+                    } catch { }
                 }
-                if (@(Get-Process -Name window-switcher -ErrorAction SilentlyContinue).Count -eq 0) { throw 'The original application did not remain running.' }
+                if ($matching.Count -gt 1) { throw "Multiple restored processes match the original path: $($original.Path)" }
+                if ($matching.Count -eq 0 -and $samePath.Count -gt 0) {
+                    throw "A different process instance already owns the original path: $($original.Path)"
+                }
+                if ($matching.Count -eq 0) {
+                    $startInfo = [Diagnostics.ProcessStartInfo]::new($original.Path)
+                    $startInfo.WorkingDirectory = Split-Path -Parent $original.Path
+                    $startInfo.UseShellExecute = $false
+                    $startInfo.CreateNoWindow = $true
+                    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+                    $restoredProcess = [Diagnostics.Process]::Start($startInfo)
+                    if ($null -eq $restoredProcess) { throw 'The original application did not start.' }
+                } else {
+                    $restoredProcess = $matching[0].Process
+                }
+                $ready = Wait-WindowSwitcherPerformanceProcess -Process $restoredProcess -TimeoutMilliseconds 15000
+                if ($ready.Probe.IsVisible) {
+                    $ready.Probe.Close(1000)
+                    if ($ready.Probe.IsVisible) { throw 'The restored original panel remained visible.' }
+                }
+                $original.ResumedIdentity = $ready.Identity
                 $original.Resumed = $true
+                $restoredProcess.Dispose()
             } catch { $Session.CleanupErrors.Add("Original process restore: $($_.Exception.Message)") }
         }
         foreach ($path in $original.ConfigurationHashes.Keys) {

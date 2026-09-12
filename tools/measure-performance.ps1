@@ -26,13 +26,12 @@ Set-StrictMode -Version Latest
 if (-not $IsWindows) { throw 'Performance sampling requires Windows.' }
 
 $helperDirectory = Join-Path $PSScriptRoot 'performance'
-. (Join-Path $helperDirectory 'Session.ps1')
-. (Join-Path $helperDirectory 'Report.ps1')
 $nativeSources = @('CycleContracts.cs', 'WindowProbe.cs', 'CycleRunner.cs') |
     ForEach-Object { Join-Path $helperDirectory $_ }
-if (-not ('WindowSwitcher.Performance.CycleRunner' -as [type])) {
-    Add-Type -Path $nativeSources
-}
+. (Join-Path $helperDirectory 'LoadHelpers.ps1')
+$helperIdentity = Import-WindowSwitcherPerformanceHelpers -SourcePaths $nativeSources
+. (Join-Path $helperDirectory 'Session.ps1')
+. (Join-Path $helperDirectory 'Report.ps1')
 
 $session = New-WindowSwitcherPerformanceSession -ExecutablePath $ExecutablePath -OutputDirectory $OutputDirectory
 $runner = $null
@@ -61,10 +60,15 @@ $settings = [ordered]@{
     OperatingSystem = [Environment]::OSVersion.VersionString
     ProcessorCount = [Environment]::ProcessorCount
     RunnerArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
-    HelperSha256 = @(@($nativeSources) + @($PSCommandPath, (Join-Path $helperDirectory 'Session.ps1'), (Join-Path $helperDirectory 'Report.ps1')) |
-        Get-FileHash -Algorithm SHA256 | Select-Object Path, Hash)
+    HelperSourceSha256 = $helperIdentity.SourceSha256
+    HelperSourceEntries = $helperIdentity.SourceEntries
+    HelperAssemblySha256 = $helperIdentity.AssemblySha256
+    HelperAssemblyFullName = $helperIdentity.AssemblyFullName
+    HelperModuleVersionId = $helperIdentity.ModuleVersionId
     HarnessElevated = ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     Dpi = $null
+    TargetProcessIdentity = $null
+    SampleDropCount = 0
 }
 try {
     $startParameters = @{
@@ -75,6 +79,7 @@ try {
     }
     Start-WindowSwitcherPerformanceSession @startParameters
     $settings.Dpi = $session.Probe.Dpi
+    $settings.TargetProcessIdentity = $session.ProcessIdentity
     $cancellationPath = Join-Path $session.RunDirectory 'cancel.request'
     Write-Host "Run directory: $($session.RunDirectory)"
     Write-Host "Cancellation file: $cancellationPath"
@@ -99,25 +104,36 @@ try {
     $sampling = [Diagnostics.Stopwatch]::StartNew()
     $nextSampleAt = 0.0
     $nextProgressAt = 0.0
+    $sampleSequence = 0L
+    $droppedSamples = 0L
     do {
         if (Test-Path -LiteralPath $cancellationPath) {
             if ($null -ne $runner) { $runner.Cancel() }
             throw 'Performance sampling was cancelled by request.'
         }
         if ($sampling.Elapsed.TotalMilliseconds -ge $nextSampleAt) {
+            $sampleElapsed = $sampling.Elapsed.TotalMilliseconds
+            if ($sampleSequence -gt 0 -and $sampleElapsed -ge ($nextSampleAt + $SampleIntervalMilliseconds)) {
+                $droppedSamples += [long][math]::Floor(
+                    ($sampleElapsed - $nextSampleAt) / $SampleIntervalMilliseconds
+                )
+            }
             $sample = $session.Probe.Capture()
-            $sample.ElapsedMilliseconds = $sampling.Elapsed.TotalMilliseconds
+            $sampleSequence++
+            $sample.SampleSequence = $sampleSequence
+            $sample.DroppedSamples = $droppedSamples
+            $sample.ElapsedMilliseconds = $sampleElapsed
             $sample.Phase = if ($null -ne $runner) { $runner.Phase } else { 'Manual' }
             $sample.CompletedCycles = if ($null -ne $runner) { $runner.CompletedCycles } else { 0 }
             $samples.Add($sample)
             if ($null -ne $runner) { $runner.ValidateResources($sample) }
-            $nextSampleAt = $sampling.Elapsed.TotalMilliseconds + $SampleIntervalMilliseconds
-            if ($sampling.Elapsed.TotalMilliseconds -ge $nextProgressAt) {
+            $nextSampleAt = $sampleElapsed + $SampleIntervalMilliseconds
+            if ($sampleElapsed -ge $nextProgressAt) {
                 $progress = [pscustomobject]@{
                     Phase = $sample.Phase; CompletedCycles = $sample.CompletedCycles
                     RequestedCycles = $AutomatedCycleCount
                     WarmupCompleted = if ($null -ne $runner) { $runner.WarmupCompleted } else { 0 }
-                    ElapsedSeconds = [math]::Round($sampling.Elapsed.TotalSeconds, 1)
+                    ElapsedSeconds = [math]::Round($sampleElapsed / 1000, 1)
                     PrivateMiB = [math]::Round($sample.PrivateMemoryBytes / 1MB, 2)
                     GdiObjects = $sample.GdiObjects; UserObjects = $sample.UserObjects
                     HandleCount = $sample.HandleCount; ThreadCount = $sample.ThreadCount
@@ -125,7 +141,7 @@ try {
                 $progress | ConvertTo-Json -Compress |
                     Set-Content -LiteralPath (Join-Path $session.RunDirectory 'progress.json') -Encoding UTF8
                 Write-Host ($progress | ConvertTo-Json -Compress)
-                $nextProgressAt = $sampling.Elapsed.TotalMilliseconds + 30000
+                $nextProgressAt = $sampleElapsed + 30000
             }
         }
         Start-Sleep -Milliseconds 20
@@ -146,6 +162,7 @@ try {
     } elseif ($session.Probe.IsVisible) {
         $session.Probe.Close($StepTimeoutMilliseconds)
     }
+    $settings.SampleDropCount = $droppedSamples
 } catch {
     $runError = $_.Exception.Message
 } finally {

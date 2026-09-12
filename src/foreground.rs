@@ -4,8 +4,8 @@ use once_cell::sync::OnceCell;
 use std::{
     collections::HashSet,
     sync::{
-        atomic::{AtomicBool, AtomicIsize, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
         Arc,
     },
     thread::{self, JoinHandle},
@@ -23,8 +23,9 @@ use windows::Win32::{
 
 pub static IS_FOREGROUND_IN_BLACKLIST: AtomicBool = AtomicBool::new(false);
 
-static FOREGROUND_WINDOW_TX: OnceCell<SyncSender<isize>> = OnceCell::new();
-static FOREGROUND_PENDING: AtomicIsize = AtomicIsize::new(0);
+static FOREGROUND_WINDOW_TX: OnceCell<parking_lot::Mutex<Option<SyncSender<()>>>> = OnceCell::new();
+static FOREGROUND_LATEST: AtomicIsize = AtomicIsize::new(0);
+static FOREGROUND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const FOREGROUND_QUEUE_CAPACITY: usize = 1;
 const FOREGROUND_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -38,8 +39,8 @@ pub struct ForegroundWatcher {
 
 impl ForegroundWatcher {
     pub fn init(blacklist: &HashSet<String>) -> Result<Self> {
+        IS_FOREGROUND_IN_BLACKLIST.store(false, Ordering::Release);
         if blacklist.is_empty() {
-            IS_FOREGROUND_IN_BLACKLIST.store(false, Ordering::Release);
             return Ok(Self {
                 hook: HWINEVENTHOOK::default(),
                 worker: None,
@@ -48,17 +49,30 @@ impl ForegroundWatcher {
         }
 
         let (window_tx, window_rx) = mpsc::sync_channel(FOREGROUND_QUEUE_CAPACITY);
-        FOREGROUND_WINDOW_TX
-            .set(window_tx)
-            .map_err(|_| anyhow!("Foreground watcher is already initialized"))?;
+        let channel = FOREGROUND_WINDOW_TX.get_or_init(|| parking_lot::Mutex::new(None));
+        {
+            let mut sender = channel.lock();
+            if sender.is_some() {
+                return Err(anyhow!("Foreground watcher is already initialized"));
+            }
+            *sender = Some(window_tx.clone());
+        }
 
+        FOREGROUND_LATEST.store(0, Ordering::Release);
+        FOREGROUND_SEQUENCE.store(0, Ordering::Release);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let blacklist = blacklist.iter().map(|value| value.to_lowercase()).collect();
-        let worker = thread::Builder::new()
+        let worker = match thread::Builder::new()
             .name("window-switcher-foreground".to_string())
             .spawn(move || run_foreground_worker(window_rx, blacklist, worker_stop))
-            .map_err(|err| anyhow!("Failed to start foreground worker, {err}"))?;
+        {
+            Ok(worker) => worker,
+            Err(err) => {
+                channel.lock().take();
+                return Err(anyhow!("Failed to start foreground worker, {err}"));
+            }
+        };
 
         let hook = unsafe {
             SetWinEventHook(
@@ -73,11 +87,15 @@ impl ForegroundWatcher {
         };
         if hook.is_invalid() {
             stop.store(true, Ordering::Release);
+            channel.lock().take();
             if let Err(err) = worker.join() {
                 warn!("foreground worker panicked during cleanup: {err:?}");
             }
             bail!("Failed to watch foreground");
         }
+
+        let initial = crate::utils::get_foreground_window();
+        publish_foreground(initial.0 as isize);
 
         info!("foreground watcher start");
 
@@ -103,38 +121,52 @@ impl Drop for ForegroundWatcher {
                 warn!("foreground worker panicked: {err:?}");
             }
         }
-        FOREGROUND_PENDING.store(0, Ordering::Release);
+        if let Some(channel) = FOREGROUND_WINDOW_TX.get() {
+            channel.lock().take();
+        }
+        FOREGROUND_LATEST.store(0, Ordering::Release);
+        FOREGROUND_SEQUENCE.fetch_add(1, Ordering::AcqRel);
         IS_FOREGROUND_IN_BLACKLIST.store(false, Ordering::Release);
     }
 }
 
 fn run_foreground_worker(
-    window_rx: Receiver<isize>,
+    window_rx: Receiver<()>,
     blacklist: HashSet<String>,
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::Acquire) {
-        let mut raw_hwnd = match window_rx.recv_timeout(FOREGROUND_WORKER_POLL_INTERVAL) {
-            Ok(raw_hwnd) => raw_hwnd,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => break,
-        };
-
-        loop {
-            let pending = FOREGROUND_PENDING.swap(0, Ordering::AcqRel);
-            if pending == 0 || pending == raw_hwnd {
-                break;
-            }
-            raw_hwnd = pending;
+        if !matches!(
+            window_rx.recv_timeout(FOREGROUND_WORKER_POLL_INTERVAL),
+            Ok(())
+        ) {
+            continue;
         }
 
-        let exe = get_window_exe(HWND(raw_hwnd as _)).map(|value| value.to_lowercase());
-        let is_in_blacklist = exe
-            .as_ref()
-            .map(|value| blacklist.contains(value))
-            .unwrap_or(false);
-        IS_FOREGROUND_IN_BLACKLIST.store(is_in_blacklist, Ordering::Release);
+        let mut processed_sequence = 0;
+        loop {
+            let sequence = FOREGROUND_SEQUENCE.load(Ordering::Acquire);
+            if !should_process_sequence(processed_sequence, sequence) {
+                break;
+            }
+            let raw_hwnd = FOREGROUND_LATEST.load(Ordering::Acquire);
+            let exe = get_window_exe(HWND(raw_hwnd as _)).map(|value| value.to_lowercase());
+            let is_in_blacklist = exe
+                .as_ref()
+                .map(|value| blacklist.contains(value))
+                .unwrap_or(false);
+            IS_FOREGROUND_IN_BLACKLIST.store(is_in_blacklist, Ordering::Release);
+            processed_sequence = sequence;
+            if FOREGROUND_SEQUENCE.load(Ordering::Acquire) != sequence {
+                continue;
+            }
+            break;
+        }
     }
+}
+
+fn should_process_sequence(processed: u64, current: u64) -> bool {
+    current != 0 && current != processed
 }
 
 unsafe extern "system" fn win_event_proc(
@@ -150,14 +182,37 @@ unsafe extern "system" fn win_event_proc(
     if raw_hwnd == 0 {
         return;
     }
-    let Some(window_tx) = FOREGROUND_WINDOW_TX.get() else {
+    publish_foreground(raw_hwnd);
+}
+
+fn publish_foreground(raw_hwnd: isize) {
+    if raw_hwnd == 0 {
+        return;
+    }
+    FOREGROUND_LATEST.store(raw_hwnd, Ordering::Release);
+    FOREGROUND_SEQUENCE.fetch_add(1, Ordering::AcqRel);
+    let Some(channel) = FOREGROUND_WINDOW_TX.get() else {
         return;
     };
-    match window_tx.try_send(raw_hwnd) {
-        Ok(()) => {}
-        Err(TrySendError::Full(raw_hwnd)) => {
-            FOREGROUND_PENDING.store(raw_hwnd, Ordering::Release);
-        }
-        Err(TrySendError::Disconnected(_)) => {}
+    let Some(window_tx) = channel
+        .try_lock()
+        .and_then(|mut sender| sender.as_mut().cloned())
+    else {
+        return;
+    };
+    match window_tx.try_send(()) {
+        Ok(()) | Err(TrySendError::Full(())) | Err(TrySendError::Disconnected(())) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_process_sequence;
+
+    #[test]
+    fn latest_sequence_replaces_stale_work() {
+        assert!(should_process_sequence(1, 2));
+        assert!(!should_process_sequence(2, 2));
+        assert!(!should_process_sequence(0, 0));
     }
 }

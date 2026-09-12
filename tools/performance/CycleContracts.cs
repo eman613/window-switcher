@@ -8,6 +8,8 @@ namespace WindowSwitcher.Performance
         public double ElapsedMilliseconds { get; set; }
         public string Phase { get; set; }
         public int CompletedCycles { get; set; }
+        public long SampleSequence { get; set; }
+        public long DroppedSamples { get; set; }
         public long WorkingSetBytes { get; set; }
         public long PrivateMemoryBytes { get; set; }
         public double CpuSeconds { get; set; }

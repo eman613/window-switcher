@@ -6,7 +6,8 @@ Set-StrictMode -Version Latest
 $helperDirectory = Join-Path $PSScriptRoot 'performance'
 $sources = @('CycleContracts.cs', 'WindowProbe.cs', 'CycleRunner.cs', 'tests/FakeCycleTarget.cs') |
     ForEach-Object { Join-Path $helperDirectory $_ }
-Add-Type -Path $sources
+. (Join-Path $helperDirectory 'LoadHelpers.ps1')
+$helperIdentity = Import-WindowSwitcherPerformanceHelpers -SourcePaths $sources
 . (Join-Path $helperDirectory 'Report.ps1')
 $script:performanceTestCount = 0
 
@@ -38,6 +39,28 @@ function New-PerformanceTestOptions {
 function Wait-PerformanceTestRunner {
     param([object] $Runner)
     Assert-PerformanceTest ($Runner.Completion.Wait(5000)) 'The worker did not complete within its test deadline.'
+}
+
+Invoke-PerformanceTest 'helper assembly is bound to the current source manifest' {
+    Assert-PerformanceTest ($helperIdentity.SourceSha256 -match '^[0-9a-f]{64}$') 'Missing helper source hash.'
+    Assert-PerformanceTest ($helperIdentity.AssemblySha256 -match '^[0-9a-f]{64}$') 'Missing helper assembly hash.'
+    $moduleId = [guid]::Empty
+    Assert-PerformanceTest ([guid]::TryParse($helperIdentity.ModuleVersionId, [ref]$moduleId)) 'Missing helper module identity.'
+}
+
+Invoke-PerformanceTest 'log diagnostics ignore severity words inside messages' {
+    $logPath = [IO.Path]::GetTempFileName()
+    try {
+        [IO.File]::WriteAllLines($logPath, @(
+            '[00:00:00.000] (abc) INFO   configured path contains ERROR and WARN'
+            '[00:00:00.001] (abc) WARN   expected warning'
+            '[00:00:00.002] (abc) ERROR  expected error'
+        ), [Text.UTF8Encoding]::new($false))
+        $diagnostics = Get-WindowSwitcherApplicationLogDiagnostics -Path $logPath
+        Assert-PerformanceTest ($diagnostics.Warnings.Count -eq 1 -and $diagnostics.Errors.Count -eq 1) 'Log severity parsing matched message text.'
+    } finally {
+        if (Test-Path -LiteralPath $logPath -PathType Leaf) { [IO.File]::Delete($logPath) }
+    }
 }
 
 Invoke-PerformanceTest 'complete cycles distinguish warmup, acknowledgements and visibility' {
@@ -131,6 +154,15 @@ Invoke-PerformanceTest 'the native adapter rejects an invalid window' {
     $process = [Diagnostics.Process]::GetCurrentProcess()
     $rejected = $false
     try {
+        $identity = [WindowSwitcher.Performance.WindowProbe]::GetProcessIdentity($process)
+        $sameIdentity = [WindowSwitcher.Performance.ProcessIdentity]::new(
+            $identity.ProcessId, $identity.CreationTimeUtcTicks, $identity.ImagePath
+        )
+        $differentIdentity = [WindowSwitcher.Performance.ProcessIdentity]::new(
+            $identity.ProcessId, $identity.CreationTimeUtcTicks + 1, $identity.ImagePath
+        )
+        Assert-PerformanceTest ($identity.Matches($sameIdentity)) 'Stable process identity did not compare equal.'
+        Assert-PerformanceTest (-not $identity.Matches($differentIdentity)) 'Creation identity changes were ignored.'
         try { $null = [WindowSwitcher.Performance.WindowProbe]::new($process, [IntPtr]::Zero) }
         catch { $rejected = $true }
         Assert-PerformanceTest $rejected 'An invalid window was accepted.'
@@ -153,6 +185,11 @@ Invoke-PerformanceTest 'closed-state trends use actual completed cycles' {
     Assert-PerformanceTest ($gdi.Delta -eq 20 -and $gdi.ClosedMedianDelta -eq 10 -and $gdi.SlopePer1000Cycles -eq 10) 'The GDI growth calculation is incorrect.'
     Assert-PerformanceTest ($handles.Delta -eq 0 -and $handles.SlopePer1000Cycles -eq 0) 'Stable resources were reported as growing.'
     Assert-PerformanceTest (@(Get-WindowSwitcherResourceTrend -Samples @() -Checkpoints @()).Count -eq 0) 'An empty run produced a false baseline.'
+    $gdi.ClosedMedianDelta = 17
+    $trendStatus = Get-WindowSwitcherResourceTrendStatus -Trend $trend
+    Assert-PerformanceTest ($trendStatus.Status -ceq 'Failed' -and @($trendStatus.Failures | Where-Object { $_ -like 'GdiObjects*' }).Count -gt 0) 'Resource growth was not rejected.'
+    $incompleteStatus = Get-WindowSwitcherResourceTrendStatus -Trend $trend -DroppedSamples 1
+    Assert-PerformanceTest ($incompleteStatus.Status -ceq 'Incomplete') 'Dropped samples did not invalidate the resource trend.'
 }
 
 Write-Host "Performance harness regression tests passed: $script:performanceTestCount"

@@ -53,6 +53,100 @@ function Get-WindowSwitcherResourceTrend {
     }
 }
 
+function Get-WindowSwitcherResourceTrendStatus {
+    param(
+        [AllowEmptyCollection()][object[]] $Trend,
+        [long] $DroppedSamples = 0
+    )
+
+    $limits = [ordered]@{
+        PrivateMemoryBytes = 4MB
+        WorkingSetBytes = 8MB
+        HandleCount = 32
+        GdiObjects = 16
+        UserObjects = 16
+        ThreadCount = 4
+    }
+    if ($DroppedSamples -gt 0) {
+        return [pscustomobject]@{
+            Status = 'Incomplete'
+            Failures = @("$DroppedSamples resource samples were dropped.")
+            Limits = $limits
+        }
+    }
+    if ($Trend.Count -eq 0) {
+        return [pscustomobject]@{
+            Status = 'Incomplete'
+            Failures = @('No resource trend checkpoints were captured.')
+            Limits = $limits
+        }
+    }
+
+    $failures = @()
+    foreach ($point in $Trend) {
+        if (-not $limits.Contains($point.Metric)) {
+            $failures += "Unknown resource trend metric: $($point.Metric)"
+            continue
+        }
+        if ($null -eq $point.ClosedMedianDelta -or $null -eq $point.SlopePer1000Cycles) {
+            $failures += "Resource trend is incomplete for $($point.Metric)."
+            continue
+        }
+        $medianDelta = [double]$point.ClosedMedianDelta
+        $slope = [double]$point.SlopePer1000Cycles
+        if ([double]::IsNaN($medianDelta) -or [double]::IsInfinity($medianDelta) -or
+            [double]::IsNaN($slope) -or [double]::IsInfinity($slope)) {
+            $failures += "Resource trend contains a non-finite value for $($point.Metric)."
+            continue
+        }
+        $limit = [double]$limits[$point.Metric]
+        if ($medianDelta -gt $limit) {
+            $failures += "$($point.Metric) closed median growth $medianDelta exceeds $limit."
+        }
+        if ($slope -gt $limit) {
+            $failures += "$($point.Metric) slope $slope per 1000 cycles exceeds $limit."
+        }
+    }
+    [pscustomobject]@{
+        Status = if ($failures.Count -eq 0) { 'Passed' } else { 'Failed' }
+        Failures = $failures
+        Limits = $limits
+    }
+}
+
+function Get-WindowSwitcherApplicationLogDiagnostics {
+    param([Parameter(Mandatory)][string] $Path)
+
+    $present = Test-Path -LiteralPath $Path -PathType Leaf
+    if (-not $present) {
+        return [pscustomobject]@{
+            Present = $false
+            LineCount = 0
+            Warnings = @()
+            Errors = @()
+            MetricDropCount = 0
+        }
+    }
+    $lines = @(Get-Content -LiteralPath $Path -Encoding UTF8)
+    $levelPrefix = '^\[[^\]]+\]\s+\([^)]+\)\s+'
+    $warnings = @($lines | Where-Object { $_ -cmatch ($levelPrefix + 'WARN\b') })
+    $errors = @($lines | Where-Object { $_ -cmatch ($levelPrefix + 'ERROR\b') })
+    $metricDropCount = 0L
+    foreach ($line in $lines) {
+        $match = [regex]::Match($line, '\bdropped_metrics=(?<count>\d+)\b')
+        if ($match.Success) {
+            $metricDropCount = [long]$match.Groups['count'].Value
+        }
+    }
+    [pscustomobject]@{
+        Present = $true
+        LineCount = $lines.Count
+        Warnings = $warnings
+        Errors = $errors
+        MetricDropCount = $metricDropCount
+    }
+}
+
 function Write-WindowSwitcherPerformanceReport {
     param(
         [object] $Session, [object] $Settings, [object] $Runner,
@@ -61,22 +155,45 @@ function Write-WindowSwitcherPerformanceReport {
 
     $checkpoints = if ($null -ne $Runner) { @($Runner.Checkpoints) } else { @() }
     $completed = if ($null -ne $Runner) { $Runner.CompletedCycles } else { 0 }
-    $status = if ($RunError -or $Session.CleanupErrors.Count -gt 0) { 'Failed' }
-        elseif ($null -ne $Runner) { $Runner.Phase }
-        else { 'Completed' }
-    $warnings = @()
-    $errors = @()
-    if (Test-Path -LiteralPath $Session.LogPath) {
-        $warnings = @(Select-String -LiteralPath $Session.LogPath -Pattern '\bWARN\b' -CaseSensitive | ForEach-Object { $_.Line })
-        $errors = @(Select-String -LiteralPath $Session.LogPath -Pattern '\bERROR\b' -CaseSensitive | ForEach-Object { $_.Line })
+    $logDiagnostics = Get-WindowSwitcherApplicationLogDiagnostics -Path $Session.LogPath
+    $warnings = @($logDiagnostics.Warnings)
+    $errors = @($logDiagnostics.Errors)
+    $logPresent = $logDiagnostics.Present
+    $logLineCount = $logDiagnostics.LineCount
+    $metricDropCount = $logDiagnostics.MetricDropCount
+    $droppedSamples = if ($Samples.Count -gt 0) {
+        [long](($Samples | Measure-Object DroppedSamples -Maximum).Maximum)
+    } else { 0 }
+    $trend = @(Get-WindowSwitcherResourceTrend -Samples $Samples -Checkpoints $checkpoints)
+    $trendStatus = if ($null -eq $Runner) {
+        [pscustomobject]@{ Status = 'NotRun'; Failures = @(); Limits = [ordered]@{} }
+    } else {
+        Get-WindowSwitcherResourceTrendStatus -Trend $trend -DroppedSamples ($droppedSamples + $metricDropCount)
     }
-    if ($errors.Count -gt 0) { $status = 'Failed' }
+    $cycleStatus = if ($null -eq $Runner) { 'NotRun' }
+        elseif ($Runner.Phase -ceq 'Completed') { 'Passed' }
+        else { 'Failed' }
+    $diagnosticFailures = @()
+    if (-not $logPresent -or $logLineCount -eq 0) {
+        $diagnosticFailures += "Application log is missing or empty: $($Session.LogPath)"
+    }
+    if ($errors.Count -gt 0) { $diagnosticFailures += "$($errors.Count) application error log entries were found." }
+    if ($metricDropCount -gt 0) { $diagnosticFailures += "$metricDropCount performance metric samples were dropped." }
+    $diagnosticsStatus = if ($diagnosticFailures.Count -eq 0) { 'Passed' } else { 'Failed' }
+    $status = if ($RunError -or $Session.CleanupErrors.Count -gt 0 -or
+        $cycleStatus -eq 'Failed' -or $trendStatus.Status -ne 'Passed' -and $null -ne $Runner -or
+        $diagnosticsStatus -eq 'Failed') { 'Failed' } else { 'Completed' }
     $counterPath = Join-Path $Session.RunDirectory 'resources.csv'
     $checkpointPath = Join-Path $Session.RunDirectory 'closed-checkpoints.csv'
     if ($Samples.Count -gt 0) { $Samples | Export-Csv -LiteralPath $counterPath -NoTypeInformation -Encoding UTF8 }
     if ($checkpoints.Count -gt 0) { $checkpoints | Export-Csv -LiteralPath $checkpointPath -NoTypeInformation -Encoding UTF8 }
     $summary = [pscustomobject]@{
         Status = $status
+        CycleStatus = $cycleStatus
+        ResourceTrendStatus = $trendStatus.Status
+        ResourceTrendFailures = @($trendStatus.Failures)
+        DiagnosticsStatus = $diagnosticsStatus
+        DiagnosticsFailures = $diagnosticFailures
         SourceExecutable = $Session.SourcePath
         ExecutableSha256 = $Session.SourceSha256
         ProductVersion = $Session.ProductVersion
@@ -91,10 +208,15 @@ function Write-WindowSwitcherPerformanceReport {
         OpenedVerified = if ($null -ne $Runner) { $Runner.OpenedVerified } else { 0 }
         ClosedVerified = if ($null -ne $Runner) { $Runner.ClosedVerified } else { 0 }
         SampleCount = $Samples.Count
+        DroppedSampleCount = $droppedSamples
+        PerformanceMetricDropCount = $metricDropCount
         CheckpointCount = $checkpoints.Count
         InitializedWindowReadyMilliseconds = $Session.InputIdleMilliseconds
         ElapsedMilliseconds = if ($null -ne $Runner) { $Runner.ElapsedMilliseconds } elseif ($Samples.Count -gt 0) { $Samples[-1].ElapsedMilliseconds } else { 0 }
-        ResourceTrend = @(Get-WindowSwitcherResourceTrend -Samples $Samples -Checkpoints $checkpoints)
+        ResourceTrend = $trend
+        ResourceTrendLimits = $trendStatus.Limits
+        ApplicationLogPresent = $logPresent
+        ApplicationLogLineCount = $logLineCount
         ApplicationWarningCount = $warnings.Count
         ApplicationErrorCount = $errors.Count
         ApplicationDiagnostics = @($errors + $warnings | Select-Object -First 20)

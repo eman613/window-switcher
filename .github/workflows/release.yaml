@@ -5,9 +5,108 @@ on:
     tags:
     - v[0-9]+.[0-9]+.[0-9]+*
 
+permissions:
+  contents: read
+
 jobs:
+  audit:
+    name: RustSec audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+    - name: RustSec dependency audit
+      uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Capture RustSec audit evidence
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo audit --json --file Cargo.lock > rustsec-audit.json
+        advisory_db="${CARGO_HOME:-$HOME/.cargo}/advisory-db"
+        {
+          printf 'audit_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf 'action_commit=%s\n' '69366f33c96575abad1ee0dba8212993eecbe998'
+          printf 'cargo_lock_sha256=%s\n' "$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          if [ -d "$advisory_db/.git" ]; then
+            printf 'advisory_db_commit=%s\n' "$(git -C "$advisory_db" rev-parse HEAD)"
+          else
+            printf 'advisory_db_commit=unknown\n'
+          fi
+        } > rustsec-audit-context.txt
+
+    - name: Upload RustSec audit report
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: rustsec-audit-${{ github.sha }}
+        path: |
+          rustsec-audit.json
+          rustsec-audit-context.txt
+        if-no-files-found: error
+        retention-days: 14
+
+  quality:
+    name: Release quality gate
+    needs: audit
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: --deny warnings
+      RUSTUP_TOOLCHAIN: 1.98.0-x86_64-pc-windows-msvc
+
+    steps:
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+    - name: Verify checked-out source SHA
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $actual = (git rev-parse HEAD).Trim()
+        if ($actual -cne $env:GITHUB_SHA) {
+          throw "Release quality checked out $actual instead of $env:GITHUB_SHA."
+        }
+
+    - name: Install Rust toolchain components
+      uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1
+      with:
+        toolchain: 1.98.0
+        targets: x86_64-pc-windows-msvc
+        components: clippy, rustfmt
+
+    - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      with:
+        key: release-quality-x86_64-pc-windows-msvc
+
+    - name: Test
+      shell: pwsh
+      run: cargo test --locked --release --target=x86_64-pc-windows-msvc --workspace --all-targets
+
+    - name: Clippy
+      shell: pwsh
+      run: cargo clippy --locked --release --target=x86_64-pc-windows-msvc --workspace --all-targets -- -D warnings
+
+    - name: Format
+      shell: pwsh
+      run: cargo fmt --all --check
+
+    - name: Installer regression tests
+      shell: pwsh
+      run: pwsh -NoProfile -NonInteractive -File tools/test-install.ps1
+
+    - name: Performance harness regression tests
+      shell: pwsh
+      run: pwsh -NoProfile -NonInteractive -File tools/test-performance.ps1
+
   build:
     name: Build ${{ matrix.platform }}
+    needs: [audit, quality]
     permissions:
       contents: read
     strategy:
@@ -26,7 +125,7 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.98.0-x86_64-pc-windows-msvc
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1
@@ -34,13 +133,72 @@ jobs:
         toolchain: 1.98.0
         targets: ${{ matrix.target }}
 
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       with:
         key: ${{ matrix.target }}
 
     - name: Build release
       shell: pwsh
       run: cargo build --locked --release --target=${{ matrix.target }}
+
+    - name: Validate source, version, PE architecture and size
+      shell: pwsh
+      env:
+        BINARY_NAME: ${{ github.event.repository.name }}
+        TARGET: ${{ matrix.target }}
+        PLATFORM: ${{ matrix.platform }}
+        VERSION: ${{ github.ref_name }}
+        MAX_RELEASE_SIZE_BYTES: 900000
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $actualSha = (git rev-parse HEAD).Trim()
+        if ($actualSha -cne $env:GITHUB_SHA) {
+          throw "Release build checked out $actualSha instead of $env:GITHUB_SHA."
+        }
+        $cargoText = Get-Content -LiteralPath 'Cargo.toml' -Raw -Encoding UTF8
+        $cargoMatch = [regex]::Match($cargoText, '(?m)^\s*version\s*=\s*"(?<version>[^"\r\n]+)"')
+        if (-not $cargoMatch.Success) { throw 'Cargo package version was not found.' }
+        if ($env:VERSION -notmatch '^v(?<base>\d+\.\d+\.\d+)(?:-[0-9A-Za-z.-]+)?$') {
+          throw "Invalid release tag: $env:VERSION"
+        }
+        if ($cargoMatch.Groups['version'].Value -cne $Matches.base) {
+          throw "Cargo version $($cargoMatch.Groups['version'].Value) does not match tag base $($Matches.base)."
+        }
+
+        $executable = Join-Path "target/$env:TARGET/release" "$env:BINARY_NAME.exe"
+        if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+          throw "Release executable not found: $executable"
+        }
+        $fileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path -LiteralPath $executable).ProviderPath)
+        if ($fileVersion.ProductName -cne 'Window Switcher' -or
+            -not $fileVersion.ProductVersion.StartsWith($cargoMatch.Groups['version'].Value, [StringComparison]::Ordinal)) {
+          throw "PE version metadata does not match Cargo version $($cargoMatch.Groups['version'].Value)."
+        }
+
+        $bytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $executable).ProviderPath)
+        if ($bytes.Length -lt 64 -or [Text.Encoding]::ASCII.GetString($bytes, 0, 2) -cne 'MZ') {
+          throw 'Release executable does not have a valid DOS header.'
+        }
+        $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+        if ($peOffset -lt 0 -or $peOffset -gt $bytes.Length - 6 -or
+            [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -cne ("PE" + [char]0 + [char]0)) {
+          throw 'Release executable does not have a valid PE header.'
+        }
+        $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+        $expectedMachine = switch ($env:TARGET) {
+          'x86_64-pc-windows-msvc' { 0x8664 }
+          'aarch64-pc-windows-msvc' { 0xaa64 }
+          default { throw "Unsupported release target: $env:TARGET" }
+        }
+        if ($machine -ne $expectedMachine) {
+          throw "PE machine 0x{0:x4} does not match target $env:TARGET." -f $machine
+        }
+        $size = (Get-Item -LiteralPath $executable).Length
+        if ($env:TARGET -eq 'x86_64-pc-windows-msvc' -and $size -gt [long]$env:MAX_RELEASE_SIZE_BYTES) {
+          throw "x64 release size $size exceeds $env:MAX_RELEASE_SIZE_BYTES bytes."
+        }
+        "### $env:PLATFORM release validation`n`n- source SHA: $actualSha`n- Cargo/tag version: $($cargoMatch.Groups['version'].Value)`n- PE machine: 0x{0:x4}`n- executable size: $size bytes" -f $machine |
+          Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
     - name: Build archive and SHA-256 checksum
       shell: pwsh
@@ -66,6 +224,18 @@ jobs:
         $archivePath = Join-Path $distDirectory $archiveName
         Compress-Archive -LiteralPath $executable, $configurationTemplate -DestinationPath $archivePath -CompressionLevel Optimal
 
+        $zip = [IO.Compression.ZipFile]::OpenRead($archivePath)
+        try {
+          $expectedEntries = @("$env:BINARY_NAME.exe", "$env:BINARY_NAME.ini") | Sort-Object
+          $actualEntries = @($zip.Entries | ForEach-Object FullName | Sort-Object)
+          $differences = @(Compare-Object $expectedEntries $actualEntries)
+          if ($differences.Count -ne 0) {
+            throw "Archive content does not exactly match the executable and INI template: $archiveName"
+          }
+        } finally {
+          $zip.Dispose()
+        }
+
         $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
         $checksumPath = "$archivePath.sha256"
         [System.IO.File]::WriteAllText(
@@ -75,7 +245,7 @@ jobs:
         )
 
     - name: Upload release files
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: release-${{ matrix.platform }}
         path: |
@@ -94,7 +264,7 @@ jobs:
 
     steps:
     - name: Download release files
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
         path: dist
         pattern: release-*
@@ -142,6 +312,17 @@ jobs:
           if ($actualHash -ine $checksumMatch.Groups['hash'].Value) {
             throw "Checksum mismatch: $($_.Name)"
           }
+          $zip = [IO.Compression.ZipFile]::OpenRead($_.FullName)
+          try {
+            $expectedEntries = @("$env:BINARY_NAME.exe", "$env:BINARY_NAME.ini") | Sort-Object
+            $actualEntries = @($zip.Entries | ForEach-Object { $_.FullName } | Sort-Object)
+            $entryDifferences = @(Compare-Object $expectedEntries $actualEntries)
+            if ($entryDifferences.Count -ne 0) {
+              throw "Archive content does not exactly match the executable and INI template: $($_.Name)"
+            }
+          } finally {
+            $zip.Dispose()
+          }
         }
 
     - name: Classify tag
@@ -154,7 +335,7 @@ jobs:
           Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
     - name: Publish archive and checksum files
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@5113cdc90fd4d541c801c55356214017bf5ae34b
       with:
         draft: false
         files: |

@@ -1,7 +1,7 @@
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, SyncSender},
+        mpsc::{self, SyncSender, TrySendError},
         Mutex, OnceLock,
     },
     thread,
@@ -16,10 +16,13 @@ use std::{
 /// still makes measurements reproducible from the PowerShell sampler.
 static ENABLED: OnceLock<bool> = OnceLock::new();
 static LOGGING_READY: AtomicBool = AtomicBool::new(false);
+static DROPPED_METRICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DROP_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 static PENDING: Mutex<Vec<(&'static str, Duration)>> = Mutex::new(Vec::new());
 static METRIC_TX: OnceLock<SyncSender<(&'static str, Duration)>> = OnceLock::new();
 
 const METRIC_QUEUE_CAPACITY: usize = 256;
+const PENDING_QUEUE_CAPACITY: usize = 256;
 
 pub(crate) fn enabled() -> bool {
     *ENABLED.get_or_init(|| {
@@ -99,7 +102,11 @@ fn log_duration(stage: &'static str, elapsed: Duration) {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !LOGGING_READY.load(Ordering::Acquire) {
-            pending.push((stage, elapsed));
+            if pending.len() < PENDING_QUEUE_CAPACITY {
+                pending.push((stage, elapsed));
+            } else {
+                record_metric_drop("pending metric queue full");
+            }
             return;
         }
     }
@@ -108,12 +115,28 @@ fn log_duration(stage: &'static str, elapsed: Duration) {
 
 fn write_duration(stage: &'static str, elapsed: Duration) {
     if let Some(tx) = METRIC_TX.get() {
-        let _ = tx.try_send((stage, elapsed));
+        match tx.try_send((stage, elapsed)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => record_metric_drop("metric queue full"),
+            Err(TrySendError::Disconnected(_)) => record_metric_drop("metric writer stopped"),
+        }
     } else {
         write_duration_now(stage, elapsed);
     }
 }
 
 fn write_duration_now(stage: &'static str, elapsed: Duration) {
-    info!("perf stage={} elapsed_us={}", stage, elapsed.as_micros());
+    info!(
+        "perf stage={} elapsed_us={} dropped_metrics={}",
+        stage,
+        elapsed.as_micros(),
+        DROPPED_METRICS.load(Ordering::Relaxed)
+    );
+}
+
+fn record_metric_drop(reason: &str) {
+    let dropped = DROPPED_METRICS.fetch_add(1, Ordering::Relaxed) + 1;
+    if dropped == 1 && !DROP_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+        warn!("performance metrics sample dropped: reason={reason} dropped_metrics={dropped}");
+    }
 }

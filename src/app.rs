@@ -30,9 +30,9 @@ use windows::Win32::{
         GetWindowLongPtrW, KillTimer, LoadCursorW, PostQuitMessage, RegisterClassW,
         RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage, CS_HREDRAW,
         CS_VREDRAW, CW_USEDEFAULT, GWL_STYLE, HICON, HTCLIENT, IDC_ARROW, MSG, WINDOW_STYLE,
-        WM_COMMAND, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCHITTEST,
-        WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND,
+        WM_LBUTTONUP, WM_NCDESTROY, WM_NCHITTEST, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+        WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     },
 };
 
@@ -99,7 +99,7 @@ impl App {
     pub fn start(config: &Config, source: Option<ConfigSource>) -> Result<AppExit> {
         let hwnd = Self::create_window()?;
         let result = Self::run(hwnd, config, source);
-        if result.is_err() {
+        if result.is_err() && is_window_valid(hwnd) {
             unsafe {
                 let _ = DestroyWindow(hwnd);
             }
@@ -147,6 +147,7 @@ impl App {
             switch_windows_state: SwitchWindowsState {
                 cache: None,
                 modifier_released: true,
+                sequence: 0,
             },
             switch_apps_state: None,
             process_metadata: Default::default(),
@@ -167,7 +168,16 @@ impl App {
         drop(keyboard_listener);
         drop(foreground_watcher);
 
-        let cleanup_result = take_app(hwnd).map(drop);
+        let cleanup_result = take_app(hwnd).and_then(|owner| {
+            let destroy_result = if is_window_valid(hwnd) {
+                unsafe { DestroyWindow(hwnd) }
+                    .map_err(|err| anyhow!("Failed to destroy application window, {err}"))
+            } else {
+                Ok(())
+            };
+            drop(owner);
+            destroy_result
+        });
         match (eventloop_result, cleanup_result) {
             (Err(event_err), Err(cleanup_err)) => Err(anyhow!(
                 "Message loop failed: {event_err}; app cleanup failed: {cleanup_err}"
@@ -360,7 +370,7 @@ impl App {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        match Self::handle_message(hwnd, msg, wparam, lparam) {
+        match Self::handle_message(hwnd, msg, wparam, lparam, 0) {
             Ok(ret) => ret,
             Err(err) => {
                 error!("{err}");
@@ -369,7 +379,13 @@ impl App {
         }
     }
 
-    fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<LRESULT> {
+    fn handle_message(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        sequence: u64,
+    ) -> Result<LRESULT> {
         match msg {
             WM_USER_CONFIG_CHANGED => {
                 with_app(hwnd, |app| {
@@ -388,9 +404,13 @@ impl App {
             }
             WM_USER_KEYBOARD_QUEUE => {
                 for message in drain_keyboard_messages() {
-                    if let Err(err) =
-                        Self::handle_message(hwnd, message.msg, message.wparam, message.lparam)
-                    {
+                    if let Err(err) = Self::handle_message(
+                        hwnd,
+                        message.msg,
+                        message.wparam,
+                        message.lparam,
+                        message.sequence,
+                    ) {
                         error!("queued keyboard message {} failed: {err}", message.msg);
                     }
                 }
@@ -415,7 +435,16 @@ impl App {
                     if app.reload_on_open(app.switch_apps_state.is_none())? {
                         return Ok(());
                     }
-                    app.switch_apps(reverse)?;
+                    if sequence != 0
+                        && app
+                            .switch_apps_state
+                            .as_ref()
+                            .is_some_and(|state| state.sequence != sequence)
+                    {
+                        debug!("ignoring stale switch-apps sequence={sequence}");
+                        return Ok(());
+                    }
+                    app.switch_apps(reverse, sequence)?;
                     if let Some(state) = &app.switch_apps_state {
                         app.painter.paint(state);
                     }
@@ -425,14 +454,28 @@ impl App {
             WM_USER_SWITCH_APPS_DONE => {
                 debug!("message WM_USER_SWITCH_APPS_DONE");
                 with_app(hwnd, |app| {
-                    app.do_switch_app();
+                    if sequence == 0
+                        || app
+                            .switch_apps_state
+                            .as_ref()
+                            .is_some_and(|state| state.sequence == sequence)
+                    {
+                        app.do_switch_app();
+                    }
                     Ok(())
                 })?;
             }
             WM_USER_SWITCH_APPS_CANCEL => {
                 debug!("message WM_USER_SWITCH_APPS_CANCEL");
                 with_app(hwnd, |app| {
-                    app.cancel_switch_app();
+                    if sequence == 0
+                        || app
+                            .switch_apps_state
+                            .as_ref()
+                            .is_some_and(|state| state.sequence == sequence)
+                    {
+                        app.cancel_switch_app();
+                    }
                     Ok(())
                 })?;
             }
@@ -441,6 +484,13 @@ impl App {
                 let reverse = lparam.0 == 1;
                 with_app(hwnd, |app| {
                     if app.reload_on_open(app.switch_windows_state.modifier_released)? {
+                        return Ok(());
+                    }
+                    if sequence != 0
+                        && !app.switch_windows_state.modifier_released
+                        && app.switch_windows_state.sequence != sequence
+                    {
+                        debug!("ignoring stale switch-windows sequence={sequence}");
                         return Ok(());
                     }
                     let target_hwnd = app
@@ -454,7 +504,7 @@ impl App {
                         })
                         .filter(|window| is_window_valid(*window))
                         .unwrap_or_else(get_foreground_window);
-                    app.switch_windows(target_hwnd, reverse)?;
+                    app.switch_windows(target_hwnd, reverse, sequence)?;
                     app.cancel_switch_app();
                     Ok(())
                 })?;
@@ -462,12 +512,24 @@ impl App {
             WM_USER_SWITCH_WINDOWS_DONE => {
                 debug!("message WM_USER_SWITCH_WINDOWS_DONE");
                 with_app(hwnd, |app| {
-                    app.switch_windows_state.modifier_released = true;
+                    if sequence == 0 || app.switch_windows_state.sequence == sequence {
+                        app.switch_windows_state.modifier_released = true;
+                    }
                     Ok(())
                 })?;
             }
             WM_NCHITTEST => {
                 return Ok(LRESULT(HTCLIENT as _));
+            }
+            WM_CLOSE | WM_DESTROY => {
+                unsafe { PostQuitMessage(0) };
+                return Ok(LRESULT(0));
+            }
+            WM_NCDESTROY => {
+                if let Ok(Some(owner)) = take_app(hwnd) {
+                    drop(owner);
+                }
+                return Ok(LRESULT(0));
             }
             WM_LBUTTONUP => {
                 with_app(hwnd, |app| {
@@ -529,7 +591,7 @@ impl App {
         Ok(unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) })
     }
 
-    fn switch_windows(&mut self, hwnd: HWND, reverse: bool) -> Result<bool> {
+    fn switch_windows(&mut self, hwnd: HWND, reverse: bool, sequence: u64) -> Result<bool> {
         let _timer = StageTimer::new("switch_windows");
         if !is_window_valid(hwnd) {
             self.switch_windows_state.cache = None;
@@ -621,6 +683,9 @@ impl App {
                     windows: state_windows,
                 });
                 self.switch_windows_state.modifier_released = false;
+                if sequence != 0 {
+                    self.switch_windows_state.sequence = sequence;
+                }
                 Ok(true)
             }
         }
@@ -648,7 +713,7 @@ impl App {
         true
     }
 
-    fn switch_apps(&mut self, reverse: bool) -> Result<()> {
+    fn switch_apps(&mut self, reverse: bool, sequence: u64) -> Result<()> {
         let _timer = StageTimer::new("switch_apps");
         self.apply_icon_results();
         self.icon_cache
@@ -663,9 +728,17 @@ impl App {
                 .unwrap_or(0)
         );
         if let Some(mut state) = self.switch_apps_state.take() {
-            state
-                .apps
-                .retain(|entry| is_window_valid(entry.representative_hwnd));
+            state.apps.retain_mut(|entry| {
+                entry.windows.retain(|window| is_window_valid(*window));
+                if entry.windows.is_empty() {
+                    return false;
+                }
+                if !entry.windows.contains(&entry.representative_hwnd) {
+                    entry.representative_hwnd = entry.windows[0];
+                }
+                entry.window_count = entry.windows.len();
+                true
+            });
             let active_keys: HashSet<String> = state
                 .apps
                 .iter()
@@ -727,6 +800,7 @@ impl App {
                 icon: module_hicon,
                 representative_hwnd: module_hwnd,
                 window_count: valid_hwnds.len(),
+                windows: valid_hwnds,
             });
         }
         if apps.is_empty() {
@@ -742,7 +816,11 @@ impl App {
             1
         };
 
-        let state = SwitchAppsState { apps, index };
+        let state = SwitchAppsState {
+            apps,
+            index,
+            sequence,
+        };
         self.switch_apps_state = Some(state);
         self.icon_cache.trim(self.switch_apps_state.as_ref());
         debug!(
@@ -845,6 +923,7 @@ fn with_app<T>(hwnd: HWND, callback: impl FnOnce(&mut App) -> Result<T>) -> Resu
 struct SwitchWindowsState {
     cache: Option<SwitchWindowsCache>,
     modifier_released: bool,
+    sequence: u64,
 }
 
 #[derive(Debug)]
@@ -895,12 +974,14 @@ pub struct AppEntry {
     pub icon: HICON,
     pub representative_hwnd: HWND,
     pub window_count: usize,
+    pub windows: Vec<HWND>,
 }
 
 #[derive(Debug)]
 pub struct SwitchAppsState {
     pub apps: Vec<AppEntry>,
     pub index: usize,
+    pub sequence: u64,
 }
 
 #[cfg(test)]
