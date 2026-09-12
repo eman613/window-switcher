@@ -1,6 +1,8 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     env, fs,
     fs::OpenOptions,
+    hash::{Hash, Hasher},
     io::Write,
     path::{Path, PathBuf},
     process::Command,
@@ -21,12 +23,14 @@ const CONFIG_FILE_NAME: &str = "window-switcher.ini";
 const LEGACY_CONFIG_FILE_NAME: &str = "windows-switcher.ini";
 const CONFIG_DIRECTORY_NAME: &str = "WindowSwitcher";
 const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
+const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigFileStamp {
     exists: bool,
     modified: Option<SystemTime>,
     length: u64,
+    content_hash: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,8 +78,7 @@ pub(crate) fn load_config_from_path(path: &Path) -> Result<ConfigLoadReport> {
         });
     }
 
-    let source = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
+    let source = read_config_source(path)?;
     let after = config_file_stamp(path)?;
     if before != after {
         return Err(anyhow!(
@@ -129,16 +132,54 @@ pub(crate) fn config_file_stamp(path: &Path) -> Result<ConfigFileStamp> {
             exists: true,
             modified: metadata.modified().ok(),
             length: metadata.len(),
+            content_hash: hash_config_file(path, metadata.len())?,
         }),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(ConfigFileStamp {
             exists: false,
             modified: None,
             length: 0,
+            content_hash: 0,
         }),
         Err(err) => {
             Err(err).with_context(|| format!("Failed to inspect config file '{}'", path.display()))
         }
     }
+}
+
+fn read_config_source(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
+    if bytes.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(anyhow!(
+            "Config file '{}' exceeds the {}-byte safety limit",
+            path.display(),
+            MAX_CONFIG_FILE_BYTES
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|err| anyhow!("Config file '{}' is not valid UTF-8: {err}", path.display()))
+}
+
+fn hash_config_file(path: &Path, length: u64) -> Result<u64> {
+    if length > MAX_CONFIG_FILE_BYTES {
+        return Err(anyhow!(
+            "Config file '{}' exceeds the {}-byte safety limit",
+            path.display(),
+            MAX_CONFIG_FILE_BYTES
+        ));
+    }
+    let bytes = fs::read(path)
+        .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
+    if bytes.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(anyhow!(
+            "Config file '{}' exceeds the {}-byte safety limit",
+            path.display(),
+            MAX_CONFIG_FILE_BYTES
+        ));
+    }
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Ok(hasher.finish())
 }
 
 pub(crate) fn edit_config_file(path: &Path) -> Result<()> {
@@ -341,5 +382,27 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(temporary_files, 0);
+    }
+
+    #[test]
+    fn oversized_config_is_rejected_before_parsing() {
+        let directory = TestDirectory::new("oversized");
+        let path = directory.0.join(CONFIG_FILE_NAME);
+        fs::write(&path, vec![b'x'; MAX_CONFIG_FILE_BYTES as usize + 1]).unwrap();
+
+        let error = load_config_from_path(&path).unwrap_err();
+        assert!(error.to_string().contains("safety limit"));
+    }
+
+    #[test]
+    fn content_changes_invalidate_the_file_stamp() {
+        let directory = TestDirectory::new("stamp");
+        let path = directory.0.join(CONFIG_FILE_NAME);
+        fs::write(&path, "trayicon = yes").unwrap();
+        let first = config_file_stamp(&path).unwrap();
+        fs::write(&path, "trayicon = no ").unwrap();
+        let second = config_file_stamp(&path).unwrap();
+
+        assert_ne!(first, second);
     }
 }
