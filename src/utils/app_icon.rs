@@ -33,6 +33,9 @@ use windows::{
 use xml::reader::XmlEvent;
 use xml::EventReader;
 
+const MAX_ICON_INPUT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+
 pub fn get_app_icon(
     override_icons: &IndexMap<String, String>,
     module_path: &str,
@@ -98,6 +101,9 @@ fn get_appx_logo_from_dir(package_dir: &Path) -> Option<PathBuf> {
 fn read_appx_logo_value(manifest_dir: &Path, executable: Option<&str>) -> Option<String> {
     let manifest_path = manifest_dir.join("AppxManifest.xml");
     let manifest_file = File::open(manifest_path).ok()?;
+    if manifest_file.metadata().ok()?.len() > MAX_MANIFEST_BYTES {
+        return None;
+    }
     let manifest_file = BufReader::new(manifest_file);
     let reader = EventReader::new(manifest_file);
     let mut logo_value = None;
@@ -166,6 +172,9 @@ pub fn load_image_as_hicon<T: AsRef<Path>>(image_path: T) -> Option<HICON> {
     if !image_path.exists() {
         return None;
     }
+    if image_path.metadata().ok()?.len() > MAX_ICON_INPUT_BYTES {
+        return None;
+    }
     if let Some("ico") = image_path.extension().and_then(|v| v.to_str()) {
         let icon_path = to_wstring(image_path.to_string_lossy().as_ref());
         unsafe {
@@ -181,9 +190,15 @@ pub fn load_image_as_hicon<T: AsRef<Path>>(image_path: T) -> Option<HICON> {
         .ok()
         .map(|v| HICON(v.0))
     } else {
-        let mut logo_file = File::open(image_path).ok()?;
+        let logo_file = File::open(image_path).ok()?;
         let mut buffer = vec![];
-        logo_file.read_to_end(&mut buffer).ok()?;
+        logo_file
+            .take(MAX_ICON_INPUT_BYTES + 1)
+            .read_to_end(&mut buffer)
+            .ok()?;
+        if buffer.len() as u64 > MAX_ICON_INPUT_BYTES {
+            return None;
+        }
         unsafe { CreateIconFromResourceEx(&buffer, true, 0x30000, 100, 100, LR_DEFAULTCOLOR) }.ok()
     }
 }

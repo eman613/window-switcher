@@ -8,8 +8,8 @@ use crate::config::{AppearanceConfig, BackgroundColor};
 use crate::layout::LayoutSnapshot;
 use crate::metrics::StageTimer;
 use crate::painter_resources::{
-    gdiplus_status, BitmapSurface, BrushGuard, FontGuard, GpBrushGuard, GpGraphicsGuard,
-    GpImageAttributesGuard, GpImageGuard, GpPathGuard, RegionGuard, ScreenDcGuard,
+    bitmap_byte_len, gdiplus_status, BitmapSurface, BrushGuard, FontGuard, GpBrushGuard,
+    GpGraphicsGuard, GpImageGuard, GpPathGuard, RegionGuard, ScreenDcGuard, MAX_SURFACE_BYTES,
 };
 use crate::utils::{get_monitor_context, is_light_theme, is_win11};
 
@@ -23,10 +23,10 @@ use windows::Win32::{
             StretchBlt, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HALFTONE, HBITMAP, HDC, SRCCOPY,
         },
         GdiPlus::{
-            GdipAddPathArc, GdipClosePathFigure, GdipDrawImageRect, GdipDrawImageRectRectI,
-            GdipFillPath, GdipFillRectangle, GdipGraphicsClear, GdipSetInterpolationMode,
-            GdipSetSmoothingMode, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBrush,
-            GpGraphics, InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias, UnitPixel,
+            GdipAddPathArc, GdipClosePathFigure, GdipDrawImageRect, GdipFillPath,
+            GdipFillRectangle, GdipGraphicsClear, GdipSetInterpolationMode, GdipSetSmoothingMode,
+            GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics,
+            InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias,
         },
     },
     UI::{
@@ -175,7 +175,15 @@ impl GdiAAPainter {
             .backdrop
             .background_alpha(self.appearance.background_opacity);
         let fg_color = rgb_to_colorref(fg_rgb);
-        let bg_color = rgb_to_colorref(bg_rgb);
+
+        validate_surface_budget(
+            width,
+            height,
+            layout.content_width,
+            layout.content_height,
+            layout.item_size,
+            self.render_scale,
+        )?;
 
         let hdc_mem = ensure_surface(&mut self.panel_surface, hdc_screen, width, height)?.dc();
 
@@ -233,7 +241,6 @@ impl GdiAAPainter {
             hdc_screen,
             selection_corner_radius,
             fg_color,
-            bg_color,
             self.appearance.show_badge,
             self.appearance.badge_max,
             self.render_scale,
@@ -244,44 +251,19 @@ impl GdiAAPainter {
         )?;
 
         let image = GpImageGuard::from_hbitmap(bitmap_icons)?;
-        if background_alpha == u8::MAX {
-            gdiplus_status(
-                unsafe {
-                    GdipDrawImageRect(
-                        graphics.get(),
-                        image.get(),
-                        layout.panel_padding as f32,
-                        layout.panel_padding as f32,
-                        layout.content_width as f32,
-                        layout.content_height as f32,
-                    )
-                },
-                "GdipDrawImageRect",
-            )?;
-        } else {
-            let image_attributes = GpImageAttributesGuard::with_color_key(argb(u8::MAX, bg_rgb))?;
-            gdiplus_status(
-                unsafe {
-                    GdipDrawImageRectRectI(
-                        graphics.get(),
-                        image.get(),
-                        layout.panel_padding,
-                        layout.panel_padding,
-                        layout.content_width,
-                        layout.content_height,
-                        0,
-                        0,
-                        layout.content_width,
-                        layout.content_height,
-                        UnitPixel,
-                        image_attributes.get(),
-                        0,
-                        std::ptr::null_mut(),
-                    )
-                },
-                "GdipDrawImageRectRectI",
-            )?;
-        }
+        gdiplus_status(
+            unsafe {
+                GdipDrawImageRect(
+                    graphics.get(),
+                    image.get(),
+                    layout.panel_padding as f32,
+                    layout.panel_padding as f32,
+                    layout.content_width as f32,
+                    layout.content_height as f32,
+                )
+            },
+            "GdipDrawImageRect",
+        )?;
         render_timer.finish();
 
         let blend = BLENDFUNCTION {
@@ -495,7 +477,6 @@ fn draw_icons(
     hdc_screen: HDC,
     selection_corner_radius: i32,
     fg_color: u32,
-    bg_color: u32,
     show_badge: bool,
     badge_max: usize,
     render_scale: i32,
@@ -534,20 +515,20 @@ fn draw_icons(
         return Err(anyhow!("Invalid icon bitmap dimensions"));
     }
 
-    let hdc_static = ensure_surface(icon_surface, hdc_screen, width, height)?.dc();
+    let static_surface = ensure_surface(icon_surface, hdc_screen, width, height)?;
+    let hdc_static = static_surface.dc();
     let frame_surface = ensure_surface(frame_icon_surface, hdc_screen, width, height)?;
     let hdc_frame = frame_surface.dc();
     let bitmap_frame = frame_surface.bitmap();
-    let hdc_scaled = ensure_surface(
+    let scaled_surface = ensure_surface(
         scaled_icon_surface,
         hdc_screen,
         scaled_item_size,
         scaled_item_size,
-    )?
-    .dc();
+    )?;
+    let hdc_scaled = scaled_surface.dc();
 
     let fg_brush = BrushGuard::new(unsafe { CreateSolidBrush(COLORREF(fg_color)) })?;
-    let bg_brush = BrushGuard::new(unsafe { CreateSolidBrush(COLORREF(bg_color)) })?;
     let has_badges = show_badge
         && layout.items.iter().any(|item| {
             state
@@ -581,9 +562,7 @@ fn draw_icons(
     };
 
     let draw_item = |entry: &crate::app::AppEntry, selected: bool| -> Result<()> {
-        if unsafe { FillRect(hdc_scaled, &rect, bg_brush.get()) } == 0 {
-            return Err(anyhow!("FillRect failed"));
-        }
+        scaled_surface.clear();
         if selected {
             if scaled_corner_diameter > 0 {
                 let region = RegionGuard::new(unsafe {
@@ -663,7 +642,6 @@ fn draw_icons(
         icon_size,
         icon_padding,
         selection_corner_radius,
-        bg_color,
         show_badge,
         badge_max,
         entries: layout
@@ -686,15 +664,7 @@ fn draw_icons(
     };
     if icon_layer_key.as_ref() != Some(&next_layer_key) {
         let static_layer_timer = StageTimer::new("static_icon_layer");
-        let static_rect = RECT {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: height,
-        };
-        if unsafe { FillRect(hdc_static, &static_rect, bg_brush.get()) } == 0 {
-            return Err(anyhow!("FillRect static icon layer failed"));
-        }
+        static_surface.clear();
         for item in &layout.items {
             let entry = state
                 .apps
@@ -769,6 +739,35 @@ fn draw_icons(
     Ok(bitmap_frame)
 }
 
+fn validate_surface_budget(
+    panel_width: i32,
+    panel_height: i32,
+    content_width: i32,
+    content_height: i32,
+    item_size: i32,
+    render_scale: i32,
+) -> Result<()> {
+    let scaled_item_size = item_size
+        .checked_mul(render_scale)
+        .ok_or_else(|| anyhow!("Scaled icon item size overflow"))?;
+    let surface_sizes = [
+        bitmap_byte_len(panel_width, panel_height)?,
+        bitmap_byte_len(content_width, content_height)?,
+        bitmap_byte_len(content_width, content_height)?,
+        bitmap_byte_len(scaled_item_size, scaled_item_size)?,
+    ];
+    let total = surface_sizes
+        .into_iter()
+        .try_fold(0usize, |total, size| total.checked_add(size))
+        .ok_or_else(|| anyhow!("Bitmap surface byte size overflow"))?;
+    if total > MAX_SURFACE_BYTES {
+        return Err(anyhow!(
+            "Bitmap surface allocation of {total} bytes exceeds the {MAX_SURFACE_BYTES}-byte limit"
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_surface(
     surface: &mut Option<BitmapSurface>,
     reference: HDC,
@@ -795,7 +794,6 @@ struct IconLayerKey {
     icon_size: i32,
     icon_padding: i32,
     selection_corner_radius: i32,
-    bg_color: u32,
     show_badge: bool,
     badge_max: usize,
     entries: Vec<(usize, isize, usize, i32, i32)>,
@@ -827,5 +825,11 @@ mod tests {
         assert_eq!(effective_corner_radius(None, false, 18, 100, 60), 0);
         assert_eq!(effective_corner_radius(Some(80), false, 18, 100, 60), 30);
         assert_eq!(effective_corner_radius(Some(0), true, 18, 100, 60), 0);
+    }
+
+    #[test]
+    fn surface_budget_rejects_unbounded_render_dimensions() {
+        assert!(validate_surface_budget(320, 120, 280, 80, 72, 6).is_ok());
+        assert!(validate_surface_budget(6_000, 6_000, 6_000, 6_000, 1_000, 6).is_err());
     }
 }

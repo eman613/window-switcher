@@ -1,20 +1,41 @@
 use anyhow::{anyhow, Result};
+use std::{ffi::c_void, mem::size_of, ptr::NonNull};
 use windows::Win32::{
     Foundation::HWND,
     Graphics::{
         Gdi::{
-            CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-            SelectObject, HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, HPALETTE, HRGN,
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+            SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HBRUSH, HDC,
+            HFONT, HGDIOBJ, HPALETTE, HRGN,
         },
         GdiPlus::{
-            ColorAdjustTypeBitmap, FillModeAlternate, GdipCreateBitmapFromHBITMAP,
-            GdipCreateFromHDC, GdipCreateImageAttributes, GdipCreatePath, GdipCreateSolidFill,
-            GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath, GdipDisposeImage,
-            GdipDisposeImageAttributes, GdipSetImageAttributesColorKeys, GpBitmap, GpBrush,
-            GpGraphics, GpImage, GpImageAttributes, GpPath, GpSolidFill, Status,
+            FillModeAlternate, GdipCreateBitmapFromHBITMAP, GdipCreateFromHDC, GdipCreatePath,
+            GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
+            GdipDisposeImage, GpBitmap, GpBrush, GpGraphics, GpImage, GpPath, GpSolidFill, Status,
         },
     },
 };
+
+pub(super) const MAX_BITMAP_BYTES: usize = 128 * 1024 * 1024;
+pub(super) const MAX_SURFACE_BYTES: usize = 256 * 1024 * 1024;
+
+pub(super) fn bitmap_byte_len(width: i32, height: i32) -> Result<usize> {
+    if width <= 0 || height <= 0 {
+        return Err(anyhow!("Bitmap dimensions must be positive"));
+    }
+    let width = usize::try_from(width).map_err(|_| anyhow!("Bitmap width is invalid"))?;
+    let height = usize::try_from(height).map_err(|_| anyhow!("Bitmap height is invalid"))?;
+    let bytes = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| anyhow!("Bitmap byte size overflow"))?;
+    if bytes > MAX_BITMAP_BYTES {
+        return Err(anyhow!(
+            "Bitmap allocation of {bytes} bytes exceeds the {MAX_BITMAP_BYTES}-byte limit"
+        ));
+    }
+    Ok(bytes)
+}
 
 pub(super) fn gdiplus_status(status: Status, operation: &str) -> Result<()> {
     if status.0 == 0 {
@@ -82,7 +103,7 @@ pub(super) struct BitmapGuard {
 impl BitmapGuard {
     pub(super) fn new(handle: HBITMAP) -> Result<Self> {
         if handle.is_invalid() {
-            return Err(anyhow!("CreateCompatibleBitmap failed"));
+            return Err(anyhow!("CreateDIBSection failed"));
         }
         Ok(Self { handle })
     }
@@ -200,6 +221,8 @@ pub(super) struct BitmapSurface {
     _selection: SelectedObjectGuard,
     bitmap: BitmapGuard,
     dc: MemoryDcGuard,
+    bits: NonNull<u8>,
+    byte_len: usize,
     width: i32,
     height: i32,
 }
@@ -209,16 +232,48 @@ impl BitmapSurface {
         if width <= 0 || height <= 0 {
             return Err(anyhow!("Invalid bitmap surface dimensions"));
         }
+        let byte_len = bitmap_byte_len(width, height)?;
         let dc = MemoryDcGuard::new(reference)?;
-        let bitmap = BitmapGuard::new(unsafe { CreateCompatibleBitmap(reference, width, height) })?;
+        let bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut::<c_void>();
+        let bitmap = BitmapGuard::new(
+            unsafe {
+                CreateDIBSection(
+                    Some(reference),
+                    &bitmap_info,
+                    DIB_RGB_COLORS,
+                    &mut bits,
+                    None,
+                    0,
+                )
+            }
+            .map_err(|err| anyhow!("CreateDIBSection failed, {err}"))?,
+        )?;
+        let bits = NonNull::new(bits.cast::<u8>())
+            .ok_or_else(|| anyhow!("CreateDIBSection returned null pixel storage"))?;
         let selection = SelectedObjectGuard::new(dc.get(), bitmap.get().into())?;
-        Ok(Self {
+        let surface = Self {
             _selection: selection,
             bitmap,
             dc,
+            bits,
+            byte_len,
             width,
             height,
-        })
+        };
+        surface.clear();
+        Ok(surface)
     }
 
     pub(super) fn matches(&self, width: i32, height: i32) -> bool {
@@ -231,6 +286,10 @@ impl BitmapSurface {
 
     pub(super) fn bitmap(&self) -> HBITMAP {
         self.bitmap.get()
+    }
+
+    pub(super) fn clear(&self) {
+        unsafe { std::ptr::write_bytes(self.bits.as_ptr(), 0, self.byte_len) };
     }
 }
 
@@ -356,46 +415,15 @@ impl Drop for GpImageGuard {
     }
 }
 
-pub(super) struct GpImageAttributesGuard(*mut GpImageAttributes);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl GpImageAttributesGuard {
-    pub(super) fn with_color_key(argb: u32) -> Result<Self> {
-        let mut ptr = std::ptr::null_mut();
-        gdiplus_status(
-            unsafe { GdipCreateImageAttributes(&mut ptr) },
-            "GdipCreateImageAttributes",
-        )?;
-        if ptr.is_null() {
-            return Err(anyhow!("GdipCreateImageAttributes returned a null pointer"));
-        }
-
-        let attributes = Self(ptr);
-        gdiplus_status(
-            unsafe {
-                GdipSetImageAttributesColorKeys(
-                    attributes.get(),
-                    ColorAdjustTypeBitmap,
-                    true,
-                    argb,
-                    argb,
-                )
-            },
-            "GdipSetImageAttributesColorKeys",
-        )?;
-        Ok(attributes)
-    }
-
-    pub(super) fn get(&self) -> *mut GpImageAttributes {
-        self.0
-    }
-}
-
-impl Drop for GpImageAttributesGuard {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                let _ = GdipDisposeImageAttributes(self.0);
-            }
-        }
+    #[test]
+    fn bitmap_byte_len_enforces_dimensions_and_budget() {
+        assert_eq!(bitmap_byte_len(1, 1).unwrap(), 4);
+        assert!(bitmap_byte_len(0, 1).is_err());
+        assert!(bitmap_byte_len(-1, 1).is_err());
+        assert!(bitmap_byte_len(16_384, 16_384).is_err());
     }
 }
