@@ -20,7 +20,14 @@ use crate::utils::{
 };
 
 use anyhow::{anyhow, Result};
-use std::collections::HashSet;
+use parking_lot::Mutex;
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        LazyLock,
+    },
+};
 use windows::core::{w, PCWSTR};
 use windows::Win32::{
     Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
@@ -52,6 +59,19 @@ pub const IDM_CONFIGURE: u32 = 3;
 const TRAY_RETRY_TIMER_ID: usize = 1;
 const TRAY_RETRY_DELAY_MS: u32 = 3_000;
 const RELOAD_EXIT_CODE: usize = 1;
+const DEFERRED_MESSAGE_CAPACITY: usize = 256;
+
+static APP_CALLBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DEFERRED_MESSAGES: LazyLock<Mutex<VecDeque<DeferredMessage>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(DEFERRED_MESSAGE_CAPACITY)));
+
+#[derive(Clone, Copy, Debug)]
+struct DeferredMessage {
+    hwnd: isize,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppExit {
@@ -370,6 +390,17 @@ impl App {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        if APP_CALLBACK_ACTIVE.load(Ordering::Acquire)
+            && !matches!(msg, WM_CLOSE | WM_DESTROY | WM_NCDESTROY)
+        {
+            defer_message(DeferredMessage {
+                hwnd: hwnd.0 as isize,
+                msg,
+                wparam,
+                lparam,
+            });
+            return LRESULT(0);
+        }
         match Self::handle_message(hwnd, msg, wparam, lparam, 0) {
             Ok(ret) => ret,
             Err(err) => {
@@ -906,17 +937,75 @@ fn take_app(hwnd: HWND) -> Result<Option<Box<App>>> {
 }
 
 fn with_app<T>(hwnd: HWND, callback: impl FnOnce(&mut App) -> Result<T>) -> Result<T> {
-    let ptr = check_error(|| get_window_user_data(hwnd))
-        .map_err(|err| anyhow!("Failed to get window ptr, {err}"))? as isize;
+    if APP_CALLBACK_ACTIVE.swap(true, Ordering::AcqRel) {
+        return Err(anyhow!("Reentrant application callback was deferred"));
+    }
+    let ptr = match check_error(|| get_window_user_data(hwnd)) {
+        Ok(ptr) => ptr,
+        Err(err) => {
+            APP_CALLBACK_ACTIVE.store(false, Ordering::Release);
+            return Err(anyhow!("Failed to get window ptr, {err}"));
+        }
+    };
     if ptr == 0 {
+        APP_CALLBACK_ACTIVE.store(false, Ordering::Release);
         return Err(anyhow!("Window app pointer is null"));
     }
 
     let app = unsafe { &mut *(ptr as *mut App) };
     if app.hwnd != hwnd {
+        APP_CALLBACK_ACTIVE.store(false, Ordering::Release);
         return Err(anyhow!("Window app pointer belongs to another window"));
     }
-    callback(app)
+    let result = callback(app);
+    APP_CALLBACK_ACTIVE.store(false, Ordering::Release);
+    drain_deferred_messages();
+    result
+}
+
+fn defer_message(message: DeferredMessage) {
+    let mut queue = DEFERRED_MESSAGES.lock();
+    if queue.len() >= DEFERRED_MESSAGE_CAPACITY {
+        if let Some(index) = queue
+            .iter()
+            .position(|queued| !is_terminal_message(queued.msg))
+        {
+            queue.remove(index);
+        } else {
+            queue.pop_front();
+        }
+    }
+    queue.push_back(message);
+}
+
+fn drain_deferred_messages() {
+    loop {
+        let message = DEFERRED_MESSAGES.lock().pop_front();
+        let Some(message) = message else {
+            break;
+        };
+        if let Err(err) = App::handle_message(
+            HWND(message.hwnd as _),
+            message.msg,
+            message.wparam,
+            message.lparam,
+            0,
+        ) {
+            error!("deferred message {} failed: {err}", message.msg);
+        }
+    }
+}
+
+fn is_terminal_message(msg: u32) -> bool {
+    matches!(
+        msg,
+        WM_USER_SWITCH_APPS_DONE
+            | WM_USER_SWITCH_APPS_CANCEL
+            | WM_USER_SWITCH_WINDOWS_DONE
+            | WM_CLOSE
+            | WM_DESTROY
+            | WM_NCDESTROY
+    )
 }
 
 #[derive(Debug)]
