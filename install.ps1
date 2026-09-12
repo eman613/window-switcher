@@ -2,7 +2,7 @@
 param(
     [Parameter()]
     [ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')]
-    [string] $Repository = 'sigoden/window-switcher',
+    [string] $Repository = 'eman613/window-switcher',
 
     [Parameter()]
     [string] $Tag,
@@ -26,6 +26,9 @@ $releaseTagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$'
 $temporaryDirectory = $null
 $stagedExecutable = $null
 $backupExecutable = $null
+$destinationWasExisting = $false
+$destinationInstalled = $false
+$replacementVerified = $false
 
 function Get-WindowSwitcherRequestHeaders {
     $headers = @{
@@ -269,7 +272,8 @@ try {
     $backupExecutable = Join-Path $resolvedInstallDirectory ".$commandName.$installationNonce.bak"
     Copy-Item -LiteralPath $sourceExecutable -Destination $stagedExecutable
 
-    if ([System.IO.File]::Exists($destinationExecutable)) {
+    $destinationWasExisting = [System.IO.File]::Exists($destinationExecutable)
+    if ($destinationWasExisting) {
         try {
             [System.IO.File]::Replace(
                 $stagedExecutable,
@@ -277,13 +281,26 @@ try {
                 $backupExecutable,
                 $true
             )
+            $destinationInstalled = $true
         } catch {
             throw "Failed to replace '$destinationExecutable'. Close the running application and retry: $($_.Exception.Message)"
         }
     } else {
         [System.IO.File]::Move($stagedExecutable, $destinationExecutable)
+        $destinationInstalled = $true
     }
     $stagedExecutable = $null
+
+    $installedExecutableHash = (
+        Get-FileHash -LiteralPath $destinationExecutable -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $sourceExecutableHash = (
+        Get-FileHash -LiteralPath $sourceExecutable -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($installedExecutableHash -cne $sourceExecutableHash) {
+        throw "Installed executable hash differs from the verified package."
+    }
+    $replacementVerified = $true
 
     Write-Host "SHA-256:    $actualArchiveHash"
     Write-Host 'Installation successful.'
@@ -300,11 +317,40 @@ try {
             Write-Warning "Failed to remove staged executable '$stagedExecutable': $($_.Exception.Message)"
         }
     }
-    if ($null -ne $backupExecutable -and [System.IO.File]::Exists($backupExecutable)) {
+    if (-not $replacementVerified -and
+        $null -ne $backupExecutable -and [System.IO.File]::Exists($backupExecutable)) {
+        try {
+            if ([System.IO.File]::Exists($destinationExecutable)) {
+                [System.IO.File]::Replace(
+                    $backupExecutable,
+                    $destinationExecutable,
+                    $null,
+                    $true
+                )
+            } else {
+                [System.IO.File]::Move($backupExecutable, $destinationExecutable)
+            }
+            Write-Warning "Installation verification failed; restored the previous executable."
+        } catch {
+            Write-Warning "Failed to restore backup executable '$backupExecutable': $($_.Exception.Message)"
+        }
+    }
+    if ($replacementVerified -and
+        $null -ne $backupExecutable -and [System.IO.File]::Exists($backupExecutable)) {
         try {
             [System.IO.File]::Delete($backupExecutable)
         } catch {
             Write-Warning "Failed to remove backup executable '$backupExecutable': $($_.Exception.Message)"
+        }
+    }
+    if (-not $replacementVerified -and
+        -not $destinationWasExisting -and
+        $destinationInstalled -and
+        [System.IO.File]::Exists($destinationExecutable)) {
+        try {
+            [System.IO.File]::Delete($destinationExecutable)
+        } catch {
+            Write-Warning "Failed to remove unverified executable '$destinationExecutable': $($_.Exception.Message)"
         }
     }
     if ($null -ne $temporaryDirectory -and

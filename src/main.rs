@@ -30,6 +30,7 @@ fn main() {
 
 fn run() -> Result<()> {
     configure_dpi_awareness()?;
+    let elevation_retry = std::env::args().any(|argument| argument == "--elevation-retry");
 
     let (config, source, diagnostics) = match load_config_report() {
         Ok(ConfigLoadReport {
@@ -44,6 +45,11 @@ fn run() -> Result<()> {
     };
     set_language(config.language);
     if config.run_as_admin && !is_running_as_admin()? {
+        if elevation_retry {
+            bail!(
+                "Administrator privileges were requested but the elevation retry is not elevated"
+            );
+        }
         relaunch_as_admin()?;
         return Ok(());
     }

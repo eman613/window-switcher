@@ -145,7 +145,7 @@ impl App {
         let is_admin = is_running_as_admin()?;
         debug!("is_admin {is_admin}");
 
-        let startup = Startup::init(is_admin)?;
+        let startup = Startup::init(is_admin, config.startup_enabled)?;
         let icon_cache = IconCache::new(
             hwnd,
             config.switch_apps_override_icons.clone(),

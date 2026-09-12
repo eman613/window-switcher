@@ -14,7 +14,7 @@ use crate::{
     config::Config,
     config_diagnostics::{prepare_config, ConfigDiagnostic, ConfigDiagnosticSeverity},
     metrics::StageTimer,
-    utils::get_exe_folder,
+    utils::{get_exe_folder, get_system_command_path},
 };
 
 const CONFIG_FILE_NAME: &str = "window-switcher.ini";
@@ -144,7 +144,8 @@ pub(crate) fn config_file_stamp(path: &Path) -> Result<ConfigFileStamp> {
 pub(crate) fn edit_config_file(path: &Path) -> Result<()> {
     debug!("open config file '{}'", path.display());
     ensure_default_config(path)?;
-    Command::new("notepad.exe")
+    let notepad_path = get_system_command_path("notepad.exe")?;
+    Command::new(notepad_path)
         .arg(path)
         .spawn()
         .map_err(|err| anyhow!("Failed to open config file '{}', {err}", path.display()))?;

@@ -1,14 +1,15 @@
 use super::{query_token_information, HandleWrapper};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::{
     env,
     fs::{self, OpenOptions},
-    io::{ErrorKind, Write},
+    io::{ErrorKind, Read, Write},
     os::windows::process::CommandExt,
     path::PathBuf,
-    process::{self, Command},
-    time::{SystemTime, UNIX_EPOCH},
+    process::{self, Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows::core::PWSTR;
 use windows::Win32::{
@@ -22,22 +23,31 @@ use windows::Win32::{
         Threading::{GetCurrentProcess, OpenProcessToken, CREATE_NO_WINDOW},
     },
 };
+use xml::reader::XmlEvent;
+use xml::EventReader;
+
+const SCHTASKS_TIMEOUT: Duration = Duration::from_secs(10);
+const SCHTASKS_OUTPUT_LIMIT: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScheduledTaskState {
+    pub exists: bool,
+    pub owned: bool,
+    pub enabled: bool,
+}
 
 pub fn create_scheduled_task(name: &str, exe_path: &str) -> Result<()> {
     let task_xml_path = create_task_file(name, exe_path)
         .map_err(|err| anyhow!("Failed to create scheduled task, {err}"))?;
     debug!("scheduled task file: {}", task_xml_path.display());
     let result = (|| {
-        let output = Command::new("schtasks")
-            .creation_flags(CREATE_NO_WINDOW.0)
-            .args(["/create", "/tn", name, "/xml"])
-            .arg(&task_xml_path)
-            .arg("/f")
-            .output()?;
+        let task_xml_path = task_xml_path.to_string_lossy();
+        let output = run_schtasks(&["/create", "/tn", name, "/xml", &task_xml_path, "/f"])?;
         if !output.status.success() {
             bail!(
-                "Fail to create scheduled task, {}",
-                String::from_utf8_lossy(&output.stderr)
+                "Failed to create scheduled task (exit {}): {}",
+                exit_code(&output),
+                command_error(&output)
             );
         }
         Ok(())
@@ -54,29 +64,215 @@ pub fn create_scheduled_task(name: &str, exe_path: &str) -> Result<()> {
 }
 
 pub fn delete_scheduled_task(name: &str) -> Result<()> {
-    let output = Command::new("schtasks")
-        .creation_flags(CREATE_NO_WINDOW.0) // CREATE_NO_WINDOW flag
-        .args(["/delete", "/tn", name, "/f"])
-        .output()?;
+    validate_task_name(name)?;
+    let output = run_schtasks(&["/delete", "/tn", name, "/f"])?;
     if !output.status.success() {
         bail!(
-            "Fail to delete scheduled task, {}",
-            String::from_utf8_lossy(&output.stderr)
+            "Failed to delete scheduled task (exit {}): {}",
+            exit_code(&output),
+            command_error(&output)
         );
     }
     Ok(())
 }
 
 pub fn exist_scheduled_task(name: &str) -> Result<bool> {
-    let output = Command::new("schtasks")
-        .creation_flags(CREATE_NO_WINDOW.0) // CREATE_NO_WINDOW flag
-        .args(["/query", "/tn", name])
-        .output()?;
+    validate_task_name(name)?;
+    let output = run_schtasks(&["/query", "/tn", name])?;
     if output.status.success() {
         Ok(true)
-    } else {
+    } else if is_task_not_found(&output) {
         Ok(false)
+    } else {
+        bail!(
+            "Failed to query scheduled task (exit {}): {}",
+            exit_code(&output),
+            command_error(&output)
+        )
     }
+}
+
+pub fn scheduled_task_state(name: &str, exe_path: &str) -> Result<ScheduledTaskState> {
+    validate_task_name(name)?;
+    if exe_path.is_empty() || exe_path.contains('\0') {
+        bail!("Scheduled task executable path must not be empty or contain NUL");
+    }
+
+    let output = run_schtasks(&["/query", "/tn", name, "/xml"])?;
+    if !output.status.success() {
+        if is_task_not_found(&output) {
+            return Ok(ScheduledTaskState::default());
+        }
+        bail!(
+            "Failed to query scheduled task (exit {}): {}",
+            exit_code(&output),
+            command_error(&output)
+        );
+    }
+
+    let xml = decode_command_output(&output.stdout)?;
+    let command = xml_value(&xml, "Command")
+        .ok_or_else(|| anyhow!("Scheduled task XML does not contain an action command"))?;
+    let user_id = xml_value(&xml, "UserId")
+        .ok_or_else(|| anyhow!("Scheduled task XML does not contain a user identity"))?;
+    let enabled = xml_value(&xml, "Enabled")
+        .ok_or_else(|| anyhow!("Scheduled task XML does not contain an enabled state"))?
+        .parse::<bool>()
+        .map_err(|_| anyhow!("Scheduled task XML contains an invalid enabled state"))?;
+    let (_, expected_user_id) = get_author_and_userid()?;
+
+    Ok(ScheduledTaskState {
+        exists: true,
+        owned: same_windows_path(&command, exe_path)
+            && user_id.trim().eq_ignore_ascii_case(expected_user_id.trim()),
+        enabled,
+    })
+}
+
+fn validate_task_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('\0') {
+        bail!("Scheduled task name must not be empty or contain NUL");
+    }
+    Ok(())
+}
+
+fn run_schtasks(args: &[&str]) -> Result<Output> {
+    let mut child = Command::new(super::get_system_command_path("schtasks.exe")?)
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to start schtasks.exe")?;
+    let stdout_reader = thread::spawn({
+        let stdout = child.stdout.take();
+        move || read_limited(stdout, "stdout")
+    });
+    let stderr_reader = thread::spawn({
+        let stderr = child.stderr.take();
+        move || read_limited(stderr, "stderr")
+    });
+    let deadline = Instant::now() + SCHTASKS_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "schtasks.exe timed out after {} seconds",
+                SCHTASKS_TIMEOUT.as_secs()
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow!("schtasks stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow!("schtasks stderr reader panicked"))??;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_limited(stream: Option<impl Read>, name: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    if let Some(mut stream) = stream {
+        stream
+            .by_ref()
+            .take((SCHTASKS_OUTPUT_LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("Failed to read schtasks {name}"))?;
+    }
+    if bytes.len() > SCHTASKS_OUTPUT_LIMIT {
+        bail!("schtasks {name} exceeded the {SCHTASKS_OUTPUT_LIMIT}-byte limit");
+    }
+    Ok(bytes)
+}
+
+fn command_error(output: &Output) -> String {
+    let stderr = decode_command_output(&output.stderr).unwrap_or_default();
+    if stderr.trim().is_empty() {
+        decode_command_output(&output.stdout).unwrap_or_default()
+    } else {
+        stderr
+    }
+    .trim()
+    .to_string()
+}
+
+fn exit_code(output: &Output) -> i32 {
+    output.status.code().unwrap_or(-1)
+}
+
+fn is_task_not_found(output: &Output) -> bool {
+    let message = format!(
+        "{} {}",
+        decode_command_output(&output.stdout).unwrap_or_default(),
+        decode_command_output(&output.stderr).unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    [
+        "cannot find",
+        "does not exist",
+        "not found",
+        "0x80070002",
+        "找不到",
+        "不存在",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn decode_command_output(bytes: &[u8]) -> Result<String> {
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+        return String::from_utf16(&units.collect::<Vec<_>>())
+            .map_err(|err| anyhow!("schtasks output is invalid UTF-16: {err}"));
+    }
+    if bytes.starts_with(&[0xfe, 0xff]) {
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+        return String::from_utf16(&units.collect::<Vec<_>>())
+            .map_err(|err| anyhow!("schtasks output is invalid UTF-16: {err}"));
+    }
+    Ok(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn xml_value(source: &str, target: &str) -> Option<String> {
+    let parser = EventReader::from_str(source);
+    let mut active = false;
+    let mut value = String::new();
+    for event in parser {
+        match event.ok()? {
+            XmlEvent::StartElement { name, .. } if name.local_name == target => {
+                active = true;
+                value.clear();
+            }
+            XmlEvent::Characters(text) | XmlEvent::CData(text) if active => value.push_str(&text),
+            XmlEvent::EndElement { name } if active && name.local_name == target => {
+                return Some(value.trim().to_string());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn same_windows_path(left: &str, right: &str) -> bool {
+    left.trim()
+        .trim_matches('"')
+        .replace('/', "\\")
+        .eq_ignore_ascii_case(right.trim().trim_matches('"').replace('/', "\\").as_str())
 }
 
 fn create_task_file(name: &str, exe_path: &str) -> Result<PathBuf> {
@@ -118,7 +314,7 @@ fn create_task_file(name: &str, exe_path: &str) -> Result<PathBuf> {
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>false</StartWhenAvailable>
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
@@ -363,4 +559,43 @@ fn get_current_time() -> String {
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_xml_values_are_read_without_namespace_assumptions() {
+        let source = r#"<Task xmlns="urn:test"><Actions><Exec><Command>C:\Apps\switcher.exe</Command></Exec></Actions><Settings><Enabled>true</Enabled></Settings></Task>"#;
+        assert_eq!(
+            xml_value(source, "Command").as_deref(),
+            Some(r#"C:\Apps\switcher.exe"#)
+        );
+        assert_eq!(xml_value(source, "Enabled").as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn command_output_decodes_utf16_little_and_big_endian() {
+        let text = "ERROR: not found";
+        let mut little = vec![0xff, 0xfe];
+        little.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(decode_command_output(&little).unwrap(), text);
+
+        let mut big = vec![0xfe, 0xff];
+        big.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+        assert_eq!(decode_command_output(&big).unwrap(), text);
+    }
+
+    #[test]
+    fn windows_paths_compare_case_insensitively_after_separator_normalization() {
+        assert!(same_windows_path(
+            r#""C:/Apps/Window-Switcher.exe""#,
+            r"C:\apps\window-switcher.exe"
+        ));
+        assert!(!same_windows_path(
+            r"C:\Apps\Other.exe",
+            r"C:\Apps\Window-Switcher.exe"
+        ));
+    }
 }

@@ -20,6 +20,10 @@ $testPlatform = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSA
 }
 $testArchiveName = "window-switcher-$testTag-$testPlatform.zip"
 $testAssetUri = "https://github.com/$testRepository/releases/download/$testTag/$testArchiveName"
+$installerSource = Get-Content -LiteralPath $installerPath -Raw
+if ($installerSource -notmatch '\[string\]\s+\$Repository\s*=\s*''eman613/window-switcher''') {
+    throw 'Installer default repository must point to the product fork.'
+}
 
 # Shadow the network calls only within this test script. Unexpected URLs fail.
 function Invoke-RestMethod {
@@ -107,7 +111,9 @@ function Invoke-InstallerTestCase {
         [string] $Name,
         [string] $Destination,
         [string] $ExpectedContent,
-        [string] $ExpectedError
+        [string] $ExpectedError,
+        [scriptblock] $BeforeInvoke,
+        [scriptblock] $AfterInvoke
     )
 
     $beforeFiles = @{}
@@ -116,11 +122,17 @@ function Invoke-InstallerTestCase {
             $beforeFiles[$_.Name] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
         }
     }
+    if ($BeforeInvoke) {
+        & $BeforeInvoke
+    }
     $observedError = $null
     try {
         & $installerPath -Repository $testRepository -Tag $testTag -InstallDirectory $Destination 6>$null
     } catch {
         $observedError = $_.Exception.Message
+    }
+    if ($AfterInvoke) {
+        & $AfterInvoke
     }
     if ($ExpectedError) {
         if (-not $observedError -or -not $observedError.Contains($ExpectedError)) {
@@ -177,6 +189,27 @@ try {
     Invoke-InstallerTestCase -Name 'bundle upgrade preserves current and legacy INI' -Destination $upgradeDirectory -ExpectedContent $newExecutable.Content
     Invoke-InstallerTestCase -Name 'bundle fresh install does not force portable configuration' -Destination (Join-Path $testDirectory 'fresh') -ExpectedContent $newExecutable.Content
     Invoke-InstallerTestCase -Name 'repeated bundle upgrade is atomic' -Destination $upgradeDirectory -ExpectedContent $newExecutable.Content
+
+    $lockedPath = Join-Path $upgradeDirectory 'window-switcher.exe'
+    $script:lockedDestinationStream = $null
+    try {
+        New-InstallerTestFixture -Name 'locked-destination' -Entries @($newExecutable, $template)
+        Invoke-InstallerTestCase -Name 'locked destination leaves installation unchanged' -Destination $upgradeDirectory -ExpectedError 'Failed to replace' -BeforeInvoke {
+            $script:lockedDestinationStream = [System.IO.File]::Open(
+                $lockedPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::None
+            )
+        } -AfterInvoke {
+            $script:lockedDestinationStream.Dispose()
+            $script:lockedDestinationStream = $null
+        }
+    } finally {
+        if ($null -ne $script:lockedDestinationStream) {
+            $script:lockedDestinationStream.Dispose()
+        }
+    }
 
     $invalidCases = @(
         @{ Name = 'empty archive'; Entries = @() }

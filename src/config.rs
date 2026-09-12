@@ -267,6 +267,7 @@ pub struct Config {
     pub config_version: u32,
     pub trayicon: bool,
     pub run_as_admin: bool,
+    pub startup_enabled: Option<bool>,
     pub appearance: AppearanceConfig,
     pub language: Language,
     pub performance: PerformanceConfig,
@@ -289,6 +290,7 @@ impl Default for Config {
             config_version: CURRENT_CONFIG_VERSION,
             trayicon: true,
             run_as_admin: false,
+            startup_enabled: None,
             appearance: AppearanceConfig::default(),
             language: Language::Auto,
             performance: PerformanceConfig::default(),
@@ -333,6 +335,17 @@ impl Config {
         if let Some(section) = ini_conf.section(Some("startup")) {
             if let Some(v) = section.get("run_as_admin").and_then(Config::to_bool) {
                 conf.run_as_admin = v;
+            }
+            if let Some(value) = section.get("enabled") {
+                if value.trim().eq_ignore_ascii_case("auto") {
+                    conf.startup_enabled = None;
+                } else {
+                    conf.startup_enabled = Some(parse_bool_or_default(
+                        "startup.enabled",
+                        value,
+                        conf.startup_enabled.unwrap_or(false),
+                    ));
+                }
             }
         }
 
@@ -765,7 +778,7 @@ impl Hotkey {
 }
 
 fn normalize_path_value(value: &str) -> String {
-    value.replace("\\\\", "\\")
+    value.to_string()
 }
 
 fn parse_enum_or_default<T>(name: &str, value: &str, default: T) -> T
@@ -875,6 +888,30 @@ mod tests {
 
         let ini = Ini::load_from_str("[startup]\nrun_as_admin = no\n").unwrap();
         assert!(!Config::load(&ini).unwrap().run_as_admin);
+    }
+
+    #[test]
+    fn startup_enabled_supports_auto_and_boolean_values() {
+        let ini = Ini::load_from_str("[startup]\nenabled = yes\n").unwrap();
+        assert_eq!(Config::load(&ini).unwrap().startup_enabled, Some(true));
+
+        let ini = Ini::load_from_str("[startup]\nenabled = no\n").unwrap();
+        assert_eq!(Config::load(&ini).unwrap().startup_enabled, Some(false));
+
+        let ini = Ini::load_from_str("[startup]\nenabled = auto\n").unwrap();
+        assert_eq!(Config::load(&ini).unwrap().startup_enabled, None);
+    }
+
+    #[test]
+    fn windows_path_separators_are_preserved() {
+        assert_eq!(
+            normalize_path_value(r"\\server\share\window-switcher.log"),
+            r"\\server\share\window-switcher.log"
+        );
+        assert_eq!(
+            normalize_path_value(r"\\?\C:\very\long\window-switcher.log"),
+            r"\\?\C:\very\long\window-switcher.log"
+        );
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub(crate) fn validate_setting(section: Option<&str>, key: &str, value: &str) ->
         (None, "config_version") => validate_parse::<u32>(value, "non-negative integer"),
         (None, "trayicon") => validate_bool(value),
         (Some("startup"), "run_as_admin") => validate_bool(value),
+        (Some("startup"), "enabled") => validate_auto_bool(value),
         (Some("appearance"), "monitor") => {
             validate_parse::<MonitorTarget>(value, "cursor, foreground, or primary")
         }
@@ -213,6 +214,10 @@ mod tests {
         assert_eq!(
             validate_setting(Some("appearance"), "mystery", "1"),
             SettingStatus::Unknown
+        );
+        assert_eq!(
+            validate_setting(Some("startup"), "enabled", "auto"),
+            SettingStatus::Valid
         );
     }
 }

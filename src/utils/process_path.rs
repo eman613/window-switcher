@@ -32,6 +32,26 @@ pub fn get_exe_path() -> Result<Vec<u16>> {
         .collect())
 }
 
+pub fn get_system_command_path(file_name: &str) -> Result<PathBuf> {
+    if file_name.is_empty()
+        || file_name.contains('\0')
+        || PathBuf::from(file_name).components().count() != 1
+    {
+        bail!("System command name must be a single file name");
+    }
+    let system_root = env::var_os("SystemRoot")
+        .ok_or_else(|| anyhow!("SystemRoot environment variable is not available"))?;
+    let system_root = PathBuf::from(system_root);
+    if !system_root.is_absolute() {
+        bail!("SystemRoot must be an absolute path");
+    }
+    let path = system_root.join("System32").join(file_name);
+    if !path.is_file() {
+        bail!("Trusted system command does not exist: {}", path.display());
+    }
+    Ok(path)
+}
+
 fn current_executable_path() -> Result<PathBuf> {
     env::current_exe().context("Failed to resolve current executable path")
 }

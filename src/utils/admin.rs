@@ -44,13 +44,14 @@ pub fn relaunch_as_admin() -> Result<()> {
     let directory = exe_path.parent().unwrap_or_else(|| Path::new("."));
     let directory_string = directory.to_string_lossy();
     let directory_wide = super::to_wstring(&directory_string);
+    let retry_argument = super::to_wstring("--elevation-retry");
 
     let result = unsafe {
         ShellExecuteW(
             None,
             w!("runas"),
             PCWSTR(exe_path_wide.as_ptr()),
-            PCWSTR::null(),
+            PCWSTR(retry_argument.as_ptr()),
             PCWSTR(directory_wide.as_ptr()),
             SW_SHOWNORMAL,
         )
