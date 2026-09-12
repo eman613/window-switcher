@@ -1,5 +1,6 @@
 mod admin;
 mod app_icon;
+mod app_name;
 mod check_error;
 mod handle_wrapper;
 mod process_path;
@@ -13,6 +14,7 @@ mod windows_version;
 
 pub use admin::*;
 pub use app_icon::*;
+pub(crate) use app_name::*;
 pub use check_error::*;
 pub use handle_wrapper::*;
 pub use process_path::*;

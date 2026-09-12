@@ -108,7 +108,8 @@ pub(crate) fn load_config_from_path(path: &Path) -> Result<ConfigLoadReport> {
             ),
         });
     }
-    let config = Config::load(&ini)?;
+    let mut config = Config::load(&ini)?;
+    config.resolve_relative_paths(path.parent());
 
     Ok(ConfigLoadReport {
         config,
@@ -366,6 +367,23 @@ mod tests {
         assert_eq!(report.config.language, crate::localization::Language::ZhCn);
         assert_eq!(report.warning_count(), 1);
         assert_eq!(report.diagnostics[0].line, Some(2));
+    }
+
+    #[test]
+    fn relative_private_font_path_resolves_from_active_config_directory() {
+        let directory = TestDirectory::new("font-path");
+        let path = directory.0.join(CONFIG_FILE_NAME);
+        fs::write(
+            &path,
+            "[appearance]\napp_name_font_file = fonts\\custom.ttf\n",
+        )
+        .unwrap();
+
+        let report = load_config_from_path(&path).unwrap();
+        assert_eq!(
+            report.config.appearance.app_name_font_file,
+            Some(directory.0.join("fonts").join("custom.ttf"))
+        );
     }
 
     #[test]

@@ -24,6 +24,11 @@ pub(crate) const GRID_EXTENT_MAX: usize = 256;
 pub(crate) const BADGE_MAX_MIN: usize = 2;
 pub(crate) const BADGE_MAX_MAX: usize = 9_999;
 pub(crate) const BACKGROUND_OPACITY_MAX: u8 = 100;
+pub(crate) const APP_NAME_FONT_SIZE_MIN: i32 = 8;
+pub(crate) const APP_NAME_FONT_SIZE_MAX: i32 = 72;
+pub(crate) const APP_NAME_FONT_WEIGHT_MIN: u16 = 100;
+pub(crate) const APP_NAME_FONT_WEIGHT_MAX: u16 = 900;
+const APP_NAME_FONT_FAMILY_MAX_CHARS: usize = 128;
 pub(crate) const ICON_CACHE_LIMIT_MIN: usize = 16;
 pub(crate) const ICON_CACHE_LIMIT_MAX: usize = 256;
 pub(crate) const DEFAULT_RENDER_SCALE: i32 = 6;
@@ -65,6 +70,25 @@ impl FromStr for LayoutMode {
             "single-row" => Ok(Self::SingleRow),
             "grid" => Ok(Self::Grid),
             "paged" => Ok(Self::Paged),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppNameMode {
+    #[default]
+    Off,
+    Selected,
+}
+
+impl FromStr for AppNameMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "selected" => Ok(Self::Selected),
             _ => Err(()),
         }
     }
@@ -263,6 +287,13 @@ pub struct AppearanceConfig {
     pub backdrop_fallback: BackdropFallback,
     pub show_badge: bool,
     pub badge_max: usize,
+    pub app_name_mode: AppNameMode,
+    pub app_name_font_family: String,
+    pub app_name_font_file: Option<PathBuf>,
+    pub app_name_font_size: i32,
+    pub app_name_font_weight: u16,
+    pub app_name_font_italic: bool,
+    pub app_name_color: BackgroundColor,
 }
 
 impl Default for AppearanceConfig {
@@ -287,6 +318,13 @@ impl Default for AppearanceConfig {
             backdrop_fallback: BackdropFallback::Alpha,
             show_badge: true,
             badge_max: 99,
+            app_name_mode: AppNameMode::Off,
+            app_name_font_family: "Segoe UI".to_string(),
+            app_name_font_file: None,
+            app_name_font_size: 14,
+            app_name_font_weight: 400,
+            app_name_font_italic: false,
+            app_name_color: BackgroundColor::Auto,
         }
     }
 }
@@ -523,6 +561,58 @@ impl Config {
                     conf.appearance.badge_max,
                 );
             }
+            if let Some(value) = section.get("app_name_mode") {
+                conf.appearance.app_name_mode = parse_enum_or_default(
+                    "appearance.app_name_mode",
+                    value,
+                    conf.appearance.app_name_mode,
+                );
+            }
+            if let Some(value) = section.get("app_name_font_family") {
+                let value = value.trim();
+                if !value.is_empty() && value.chars().count() <= APP_NAME_FONT_FAMILY_MAX_CHARS {
+                    conf.appearance.app_name_font_family = value.to_string();
+                } else {
+                    warn!("invalid appearance.app_name_font_family; using default");
+                }
+            }
+            if let Some(value) = section.get("app_name_font_file") {
+                let value = normalize_path_value(value.trim());
+                conf.appearance.app_name_font_file =
+                    (!value.trim().is_empty()).then(|| PathBuf::from(value));
+            }
+            if let Some(value) = section.get("app_name_font_size") {
+                conf.appearance.app_name_font_size = parse_i32_or_default(
+                    "appearance.app_name_font_size",
+                    value,
+                    APP_NAME_FONT_SIZE_MIN,
+                    APP_NAME_FONT_SIZE_MAX,
+                    conf.appearance.app_name_font_size,
+                );
+            }
+            if let Some(value) = section.get("app_name_font_weight") {
+                conf.appearance.app_name_font_weight = parse_u16_or_default(
+                    "appearance.app_name_font_weight",
+                    value,
+                    APP_NAME_FONT_WEIGHT_MIN,
+                    APP_NAME_FONT_WEIGHT_MAX,
+                    conf.appearance.app_name_font_weight,
+                );
+            }
+            if let Some(value) = section.get("app_name_font_italic") {
+                conf.appearance.app_name_font_italic = parse_bool_or_default(
+                    "appearance.app_name_font_italic",
+                    value,
+                    conf.appearance.app_name_font_italic,
+                );
+            }
+            if let Some(value) = section.get("app_name_color") {
+                conf.appearance.app_name_color = parse_enum_or_default(
+                    "appearance.app_name_color",
+                    value,
+                    conf.appearance.app_name_color,
+                );
+            }
         }
 
         if let Some(section) = ini_conf.section(Some("localization")) {
@@ -645,6 +735,14 @@ impl Config {
             }
         }
         Ok(conf)
+    }
+
+    pub(crate) fn resolve_relative_paths(&mut self, base: Option<&std::path::Path>) {
+        if let (Some(path), Some(base)) = (&self.appearance.app_name_font_file, base) {
+            if path.is_relative() {
+                self.appearance.app_name_font_file = Some(base.join(path));
+            }
+        }
     }
 
     pub fn to_hotkeys(&self) -> Vec<&Hotkey> {
@@ -867,6 +965,16 @@ fn parse_u8_or_default(name: &str, value: &str, min: u8, max: u8, default: u8) -
     }
 }
 
+fn parse_u16_or_default(name: &str, value: &str, min: u16, max: u16, default: u16) -> u16 {
+    match value.trim().parse::<u16>() {
+        Ok(parsed) if (min..=max).contains(&parsed) => parsed,
+        _ => {
+            warn!("invalid {name}={value:?}; expected {min}..={max}, using default {default}");
+            default
+        }
+    }
+}
+
 fn parse_usize_or_default(
     name: &str,
     value: &str,
@@ -969,8 +1077,8 @@ mod tests {
 
     #[test]
     fn appearance_settings_are_loaded() {
-        let ini = Ini::load_from_str(
-            "[appearance]\nmonitor = foreground\nuse_work_area = no\nicon_size = 80\nicon_padding = 6\nitem_gap = 12\npanel_padding = 16\npanel_corner_radius = 24\nselection_corner_radius = 12\nmax_width = 1200\nmax_height = 800\nlayout = grid\nmax_columns = 8\nmax_rows = 3\nbackground_color = #123abc\nbackground_opacity = 72\nbackdrop = acrylic\nbackdrop_fallback = solid\nshow_badge = no\nbadge_max = 999\n",
+        let ini = Ini::load_from_str_noescape(
+            "[appearance]\nmonitor = foreground\nuse_work_area = no\nicon_size = 80\nicon_padding = 6\nitem_gap = 12\npanel_padding = 16\npanel_corner_radius = 24\nselection_corner_radius = 12\nmax_width = 1200\nmax_height = 800\nlayout = grid\nmax_columns = 8\nmax_rows = 3\nbackground_color = #123abc\nbackground_opacity = 72\nbackdrop = acrylic\nbackdrop_fallback = solid\nshow_badge = no\nbadge_max = 999\napp_name_mode = selected\napp_name_font_family = Noto Sans CJK SC\napp_name_font_file = fonts\\custom.otf\napp_name_font_size = 18\napp_name_font_weight = 600\napp_name_font_italic = yes\napp_name_color = #abcdef\n",
         )
         .unwrap();
 
@@ -1000,6 +1108,17 @@ mod tests {
                 backdrop_fallback: BackdropFallback::Solid,
                 show_badge: false,
                 badge_max: 999,
+                app_name_mode: AppNameMode::Selected,
+                app_name_font_family: "Noto Sans CJK SC".to_string(),
+                app_name_font_file: Some(PathBuf::from(r"fonts\custom.otf")),
+                app_name_font_size: 18,
+                app_name_font_weight: 600,
+                app_name_font_italic: true,
+                app_name_color: BackgroundColor::Rgb {
+                    red: 0xab,
+                    green: 0xcd,
+                    blue: 0xef,
+                },
             }
         );
     }

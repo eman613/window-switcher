@@ -15,7 +15,10 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{DestroyIcon, PostMessageW},
 };
 
-use crate::{metrics::StageTimer, utils::try_get_app_icon};
+use crate::{
+    metrics::StageTimer,
+    utils::{app_name_fallback, try_get_app_icon, try_get_app_name},
+};
 
 pub(crate) const WM_USER_ICON_READY: u32 = 6040;
 
@@ -31,6 +34,13 @@ struct IconRequest {
     module_path: String,
     hwnd: isize,
     generation: u64,
+    kind: IconLoadKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IconLoadKind {
+    Icon,
+    Name,
 }
 
 #[derive(Debug)]
@@ -38,6 +48,8 @@ pub(crate) struct IconLoadResult {
     pub key: String,
     pub generation: u64,
     pub hicon: Option<isize>,
+    pub kind: IconLoadKind,
+    pub name: Option<String>,
 }
 
 pub(crate) struct IconLoader {
@@ -77,6 +89,39 @@ impl IconLoader {
         representative_hwnd: HWND,
         generation: u64,
     ) -> bool {
+        self.request_kind(
+            key,
+            module_path,
+            representative_hwnd,
+            generation,
+            IconLoadKind::Icon,
+        )
+    }
+
+    pub(crate) fn request_name(
+        &mut self,
+        key: &str,
+        module_path: &str,
+        representative_hwnd: HWND,
+        generation: u64,
+    ) -> bool {
+        self.request_kind(
+            key,
+            module_path,
+            representative_hwnd,
+            generation,
+            IconLoadKind::Name,
+        )
+    }
+
+    fn request_kind(
+        &mut self,
+        key: &str,
+        module_path: &str,
+        representative_hwnd: HWND,
+        generation: u64,
+        kind: IconLoadKind,
+    ) -> bool {
         if !self.ensure_worker() {
             return false;
         }
@@ -88,6 +133,7 @@ impl IconLoader {
             module_path: module_path.to_string(),
             hwnd: representative_hwnd.0 as isize,
             generation,
+            kind,
         };
         match request_tx.try_send(request) {
             Ok(()) => true,
@@ -211,15 +257,35 @@ fn run_worker(
 
         let mut should_wake = false;
         loop {
-            let _timer = StageTimer::new("icon_load");
+            let _timer = StageTimer::new(match request.kind {
+                IconLoadKind::Icon => "icon_load",
+                IconLoadKind::Name => "app_name_load",
+            });
             let representative_hwnd = HWND(request.hwnd as _);
-            let hicon =
-                try_get_app_icon(&override_icons, &request.module_path, representative_hwnd)
+            let (hicon, name) = match request.kind {
+                IconLoadKind::Icon => {
+                    let hicon = try_get_app_icon(
+                        &override_icons,
+                        &request.module_path,
+                        representative_hwnd,
+                    )
                     .and_then(|icon| (!icon.is_invalid()).then_some(icon.0 as isize));
+                    (hicon, None)
+                }
+                IconLoadKind::Name => (
+                    None,
+                    Some(
+                        try_get_app_name(&request.module_path)
+                            .unwrap_or_else(|| app_name_fallback(&request.module_path)),
+                    ),
+                ),
+            };
             let result = IconLoadResult {
                 key: request.key,
                 generation: request.generation,
                 hicon,
+                kind: request.kind,
+                name,
             };
 
             should_wake |= send_result(&result_tx, result, &stop);

@@ -26,8 +26,8 @@ mod trayicon;
 
 pub use crate::app::{start, start_with_config, AppExit};
 pub use crate::config::{
-    AppearanceConfig, BackdropFallback, BackdropMode, BackgroundColor, Config, ConfigReloadMode,
-    CornerRadius, LayoutMode, MonitorTarget, PerformanceConfig, RenderScale,
+    AppNameMode, AppearanceConfig, BackdropFallback, BackdropMode, BackgroundColor, Config,
+    ConfigReloadMode, CornerRadius, LayoutMode, MonitorTarget, PerformanceConfig, RenderScale,
     CURRENT_CONFIG_VERSION,
 };
 pub use crate::config_diagnostics::{ConfigDiagnostic, ConfigDiagnosticSeverity};

@@ -4,10 +4,12 @@ use log::LevelFilter;
 
 use crate::{
     config::{
-        BackdropFallback, BackdropMode, BackgroundColor, Config, ConfigReloadMode, CornerRadius,
-        Hotkey, LayoutMode, MonitorTarget, RenderScale, BACKGROUND_OPACITY_MAX, BADGE_MAX_MAX,
-        BADGE_MAX_MIN, GRID_EXTENT_MAX, ICON_CACHE_LIMIT_MAX, ICON_CACHE_LIMIT_MIN, ICON_SIZE_MAX,
-        ICON_SIZE_MIN, PANEL_EXTENT_MAX, SPACING_MAX,
+        AppNameMode, BackdropFallback, BackdropMode, BackgroundColor, Config, ConfigReloadMode,
+        CornerRadius, Hotkey, LayoutMode, MonitorTarget, RenderScale, APP_NAME_FONT_SIZE_MAX,
+        APP_NAME_FONT_SIZE_MIN, APP_NAME_FONT_WEIGHT_MAX, APP_NAME_FONT_WEIGHT_MIN,
+        BACKGROUND_OPACITY_MAX, BADGE_MAX_MAX, BADGE_MAX_MIN, GRID_EXTENT_MAX,
+        ICON_CACHE_LIMIT_MAX, ICON_CACHE_LIMIT_MIN, ICON_SIZE_MAX, ICON_SIZE_MIN, PANEL_EXTENT_MAX,
+        SPACING_MAX,
     },
     localization::Language,
 };
@@ -77,6 +79,27 @@ pub(crate) fn validate_setting(section: Option<&str>, key: &str, value: &str) ->
             }
         }
         (Some("appearance"), "badge_max") => validate_usize(value, BADGE_MAX_MIN, BADGE_MAX_MAX),
+        (Some("appearance"), "app_name_mode") => {
+            validate_parse::<AppNameMode>(value, "off or selected")
+        }
+        (Some("appearance"), "app_name_font_family") => {
+            if !value.trim().is_empty() && value.chars().count() <= 128 {
+                SettingStatus::Valid
+            } else {
+                SettingStatus::Invalid("a non-empty font family name up to 128 characters")
+            }
+        }
+        (Some("appearance"), "app_name_font_file") => SettingStatus::Valid,
+        (Some("appearance"), "app_name_font_size") => {
+            validate_i32(value, APP_NAME_FONT_SIZE_MIN, APP_NAME_FONT_SIZE_MAX)
+        }
+        (Some("appearance"), "app_name_font_weight") => {
+            validate_u16(value, APP_NAME_FONT_WEIGHT_MIN, APP_NAME_FONT_WEIGHT_MAX)
+        }
+        (Some("appearance"), "app_name_font_italic") => validate_bool(value),
+        (Some("appearance"), "app_name_color") => {
+            validate_parse::<BackgroundColor>(value, "auto or #RRGGBB")
+        }
         (Some("localization"), "language") => {
             validate_parse::<Language>(value, "auto, zh-CN, or en-US")
         }
@@ -177,6 +200,13 @@ fn validate_u8(value: &str, min: u8, max: u8) -> SettingStatus {
     }
 }
 
+fn validate_u16(value: &str, min: u16, max: u16) -> SettingStatus {
+    match value.trim().parse::<u16>() {
+        Ok(parsed) if (min..=max).contains(&parsed) => SettingStatus::Valid,
+        _ => SettingStatus::Invalid("integer outside the supported range"),
+    }
+}
+
 fn validate_usize(value: &str, min: usize, max: usize) -> SettingStatus {
     match value.trim().parse::<usize>() {
         Ok(parsed) if (min..=max).contains(&parsed) => SettingStatus::Valid,
@@ -210,6 +240,18 @@ mod tests {
             validate_setting(Some("appearance"), "selection_corner_radius", "24"),
             SettingStatus::Valid
         );
+        assert_eq!(
+            validate_setting(Some("appearance"), "app_name_mode", "selected"),
+            SettingStatus::Valid
+        );
+        assert_eq!(
+            validate_setting(Some("appearance"), "app_name_font_weight", "600"),
+            SettingStatus::Valid
+        );
+        assert!(matches!(
+            validate_setting(Some("appearance"), "app_name_font_size", "7"),
+            SettingStatus::Invalid(_)
+        ));
         assert!(matches!(
             validate_setting(Some("appearance"), "panel_corner_radius", "-1"),
             SettingStatus::Invalid(_)

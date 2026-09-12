@@ -1,23 +1,27 @@
 use anyhow::{anyhow, Result};
-use std::{ffi::c_void, mem::size_of, ptr::NonNull};
+use std::{ffi::c_void, mem::size_of, path::Path, ptr::NonNull};
 use windows::Win32::{
     Foundation::HWND,
     Graphics::{
         Gdi::{
-            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-            SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HBRUSH, HDC,
-            HFONT, HGDIOBJ, HPALETTE, HRGN,
+            AddFontResourceExW, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject,
+            GetDC, ReleaseDC, RemoveFontResourceExW, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
+            DIB_RGB_COLORS, FR_PRIVATE, HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, HPALETTE, HRGN,
         },
         GdiPlus::{
-            FillModeAlternate, GdipCreateBitmapFromHBITMAP, GdipCreateFromHDC, GdipCreatePath,
-            GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
-            GdipDisposeImage, GpBitmap, GpBrush, GpGraphics, GpImage, GpPath, GpSolidFill, Status,
+            FillModeAlternate, FontStyle, GdipCreateBitmapFromHBITMAP, GdipCreateFont,
+            GdipCreateFontFamilyFromName, GdipCreateFromHDC, GdipCreatePath, GdipCreateSolidFill,
+            GdipCreateStringFormat, GdipDeleteBrush, GdipDeleteFont, GdipDeleteFontFamily,
+            GdipDeleteGraphics, GdipDeletePath, GdipDeleteStringFormat, GdipDisposeImage, GpBitmap,
+            GpBrush, GpFont, GpFontFamily, GpGraphics, GpImage, GpPath, GpSolidFill,
+            GpStringFormat, Status, UnitPixel,
         },
     },
 };
 
 pub(super) const MAX_BITMAP_BYTES: usize = 128 * 1024 * 1024;
 pub(super) const MAX_SURFACE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_PRIVATE_FONT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(super) fn bitmap_byte_len(width: i32, height: i32) -> Result<usize> {
     if width <= 0 || height <= 0 {
@@ -156,6 +160,56 @@ impl FontGuard {
 
     pub(super) fn get(&self) -> HFONT {
         self.0
+    }
+}
+
+pub(super) struct PrivateFontGuard {
+    path: Vec<u16>,
+}
+
+impl PrivateFontGuard {
+    pub(super) fn new(path: &Path) -> Result<Self> {
+        let metadata = std::fs::metadata(path)
+            .map_err(|err| anyhow!("Failed to inspect private font '{}': {err}", path.display()))?;
+        let supported_extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("ttf") || extension.eq_ignore_ascii_case("otf")
+            });
+        if !supported_extension {
+            return Err(anyhow!(
+                "Private font '{}' must use a .ttf or .otf extension",
+                path.display()
+            ));
+        }
+        if !metadata.is_file() || metadata.len() > MAX_PRIVATE_FONT_BYTES {
+            return Err(anyhow!(
+                "Private font '{}' is missing, not a file, or exceeds the {}-byte limit",
+                path.display(),
+                MAX_PRIVATE_FONT_BYTES
+            ));
+        }
+        let display_path = path.display().to_string();
+        let path = crate::utils::to_wstring(&display_path);
+        let added =
+            unsafe { AddFontResourceExW(windows::core::PCWSTR(path.as_ptr()), FR_PRIVATE, None) };
+        if added <= 0 {
+            return Err(anyhow!("AddFontResourceExW failed for '{display_path}'"));
+        }
+        Ok(Self { path })
+    }
+}
+
+impl Drop for PrivateFontGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = RemoveFontResourceExW(
+                windows::core::PCWSTR(self.path.as_ptr()),
+                FR_PRIVATE.0,
+                None,
+            );
+        }
     }
 }
 
@@ -340,6 +394,103 @@ impl GpBrushGuard {
 
     pub(super) fn get(&self) -> *mut GpBrush {
         self.0
+    }
+}
+
+pub(super) struct GpFontFamilyGuard(*mut GpFontFamily);
+
+impl GpFontFamilyGuard {
+    pub(super) fn from_name(name: &str) -> Result<Self> {
+        let name = crate::utils::to_wstring(name);
+        let mut ptr = std::ptr::null_mut();
+        gdiplus_status(
+            unsafe {
+                GdipCreateFontFamilyFromName(
+                    windows::core::PCWSTR(name.as_ptr()),
+                    std::ptr::null_mut(),
+                    &mut ptr,
+                )
+            },
+            "GdipCreateFontFamilyFromName",
+        )?;
+        if ptr.is_null() {
+            return Err(anyhow!("GdipCreateFontFamilyFromName returned null"));
+        }
+        Ok(Self(ptr))
+    }
+
+    pub(super) fn get(&self) -> *mut GpFontFamily {
+        self.0
+    }
+}
+
+impl Drop for GpFontFamilyGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = GdipDeleteFontFamily(self.0);
+            }
+        }
+    }
+}
+
+pub(super) struct GpFontGuard(*mut GpFont);
+
+impl GpFontGuard {
+    pub(super) fn new(family: *mut GpFontFamily, size: f32, style: FontStyle) -> Result<Self> {
+        let mut ptr = std::ptr::null_mut();
+        gdiplus_status(
+            unsafe { GdipCreateFont(family, size, style.0, UnitPixel, &mut ptr) },
+            "GdipCreateFont",
+        )?;
+        if ptr.is_null() {
+            return Err(anyhow!("GdipCreateFont returned null"));
+        }
+        Ok(Self(ptr))
+    }
+
+    pub(super) fn get(&self) -> *mut GpFont {
+        self.0
+    }
+}
+
+impl Drop for GpFontGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = GdipDeleteFont(self.0);
+            }
+        }
+    }
+}
+
+pub(super) struct GpStringFormatGuard(*mut GpStringFormat);
+
+impl GpStringFormatGuard {
+    pub(super) fn new() -> Result<Self> {
+        let mut ptr = std::ptr::null_mut();
+        gdiplus_status(
+            unsafe { GdipCreateStringFormat(0, 0, &mut ptr) },
+            "GdipCreateStringFormat",
+        )?;
+        if ptr.is_null() {
+            return Err(anyhow!("GdipCreateStringFormat returned null"));
+        }
+        Ok(Self(ptr))
+    }
+
+    pub(super) fn get(&self) -> *mut GpStringFormat {
+        self.0
+    }
+}
+
+impl Drop for GpStringFormatGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = GdipDeleteStringFormat(self.0);
+            }
+        }
     }
 }
 

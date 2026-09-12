@@ -1,5 +1,5 @@
 use crate::{
-    config::{AppearanceConfig, CornerRadius, LayoutMode},
+    config::{AppNameMode, AppearanceConfig, CornerRadius, LayoutMode},
     utils::MonitorContext,
 };
 
@@ -28,6 +28,8 @@ pub(crate) struct LayoutSnapshot {
     pub(crate) icon_padding: i32,
     pub(crate) item_size: i32,
     pub(crate) panel_padding: i32,
+    pub(crate) footer_top: i32,
+    pub(crate) footer_height: i32,
     /// Some means a configured DIP value converted to pixels; None keeps the
     /// platform-specific automatic radius used by the painter.
     pub(crate) panel_corner_radius: Option<i32>,
@@ -57,33 +59,43 @@ impl LayoutSnapshot {
         let icon_padding = dip_to_px(appearance.icon_padding, dpi)?;
         let item_gap = dip_to_px(appearance.item_gap, dpi)?;
         let panel_padding = dip_to_px(appearance.panel_padding, dpi)?;
+        let footer_height = app_name_footer_height(appearance, dpi)?;
 
         let minimum_item_size = checked_add(
             minimum_icon_size,
             checked_mul(icon_padding, 2, "minimum icon padding")?,
             "minimum item size",
         )?;
-        let minimum_panel_size = checked_add(
+        let minimum_content_panel_size = checked_add(
             minimum_item_size,
             checked_mul(panel_padding, 2, "minimum panel padding")?,
-            "minimum panel size",
+            "minimum content panel size",
         )?;
-        if monitor_width < minimum_panel_size || monitor_height < minimum_panel_size {
+        let minimum_panel_height = checked_add(
+            minimum_content_panel_size,
+            footer_height,
+            "minimum panel height",
+        )?;
+        if monitor_width < minimum_content_panel_size || monitor_height < minimum_panel_height {
             return Err(anyhow!(
                 "Monitor work area is too small for the minimum icon size"
             ));
         }
 
-        let max_panel_width =
-            configured_extent(monitor_width, appearance.max_width, dpi, minimum_panel_size)?;
+        let max_panel_width = configured_extent(
+            monitor_width,
+            appearance.max_width,
+            dpi,
+            minimum_content_panel_size,
+        )?;
         let max_panel_height = configured_extent(
             monitor_height,
             appearance.max_height,
             dpi,
-            minimum_panel_size,
+            minimum_panel_height,
         )?;
         let available_width = max_panel_width - panel_padding * 2;
-        let available_height = max_panel_height - panel_padding * 2;
+        let available_height = max_panel_height - panel_padding * 2 - footer_height;
 
         let icon_size = match appearance.layout {
             LayoutMode::SingleRow => {
@@ -148,8 +160,12 @@ impl LayoutSnapshot {
             "panel width",
         )?;
         let panel_height = checked_add(
-            content_height,
-            checked_mul(panel_padding, 2, "vertical panel padding")?,
+            checked_add(
+                content_height,
+                checked_mul(panel_padding, 2, "vertical panel padding")?,
+                "panel content and padding",
+            )?,
+            footer_height,
             "panel height",
         )?;
         if panel_width > max_panel_width || panel_height > max_panel_height {
@@ -209,6 +225,8 @@ impl LayoutSnapshot {
             icon_padding,
             item_size,
             panel_padding,
+            footer_top: checked_add(panel_padding, content_height, "application name footer top")?,
+            footer_height,
             panel_corner_radius,
             selection_corner_radius,
             items,
@@ -234,6 +252,14 @@ impl LayoutSnapshot {
             })
             .map(|item| item.app_index)
     }
+}
+
+fn app_name_footer_height(appearance: &AppearanceConfig, dpi: u32) -> Result<i32> {
+    if appearance.app_name_mode != AppNameMode::Selected {
+        return Ok(0);
+    }
+    let font_size = dip_to_px(appearance.app_name_font_size, dpi)?;
+    checked_add(font_size, dip_to_px(8, dpi)?, "application name footer")
 }
 
 fn configured_extent(
@@ -341,7 +367,7 @@ fn checked_mul(value: i32, multiplier: i32, name: &str) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CornerRadius, LayoutMode, MonitorTarget};
+    use crate::config::{AppNameMode, CornerRadius, LayoutMode, MonitorTarget};
     use windows::Win32::Graphics::Gdi::HMONITOR;
 
     fn monitor(rect: RECT, dpi: u32) -> MonitorContext {
@@ -622,5 +648,56 @@ mod tests {
 
         assert_eq!(layout.panel_corner_radius, Some(layout.panel_height() / 2));
         assert_eq!(layout.selection_corner_radius, Some(45));
+    }
+
+    #[test]
+    fn selected_name_reserves_fixed_footer_without_changing_icon_hit_boxes() {
+        let mut appearance = AppearanceConfig::default();
+        let base = LayoutSnapshot::new(
+            2,
+            0,
+            &appearance,
+            monitor(
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1280,
+                    bottom: 720,
+                },
+                96,
+            ),
+        )
+        .unwrap();
+        appearance.app_name_mode = AppNameMode::Selected;
+        let named = LayoutSnapshot::new(
+            2,
+            0,
+            &appearance,
+            monitor(
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1280,
+                    bottom: 720,
+                },
+                96,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(base.footer_height, 0);
+        assert!(named.footer_height > 0);
+        assert_eq!(base.items[0].x, named.items[0].x);
+        assert_eq!(base.items[0].y, named.items[0].y);
+        assert_eq!(
+            base.items[0].hit_rect.right - base.items[0].hit_rect.left,
+            named.items[0].hit_rect.right - named.items[0].hit_rect.left
+        );
+        assert!(named
+            .hit_test(POINT {
+                x: named.panel_rect.left + named.panel_padding + 1,
+                y: named.panel_rect.top + named.footer_top + 1,
+            })
+            .is_none());
     }
 }

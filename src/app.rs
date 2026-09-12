@@ -1,4 +1,4 @@
-use crate::config::{Config, ConfigReloadMode};
+use crate::config::{AppNameMode, Config, ConfigReloadMode};
 use crate::config_file::{
     config_file_stamp, current_config_source, edit_config_file, load_config_from_path,
     ConfigFileStamp, ConfigSource,
@@ -826,8 +826,14 @@ impl App {
                 valid_hwnds[0]
             };
             let module_hicon = self.icon_cache.icon_for_app(module_path, module_hwnd);
+            let app_name = if self.config.appearance.app_name_mode == AppNameMode::Selected {
+                self.icon_cache.name_for_app(module_path, module_hwnd)
+            } else {
+                String::new()
+            };
             apps.push(AppEntry {
                 module_path: module_path.clone(),
+                name: app_name,
                 icon: module_hicon,
                 representative_hwnd: module_hwnd,
                 window_count: valid_hwnds.len(),
@@ -1060,6 +1066,7 @@ fn next_window_index(index: usize, len: usize, reverse: bool) -> Option<usize> {
 #[derive(Debug)]
 pub struct AppEntry {
     pub module_path: String,
+    pub name: String,
     pub icon: HICON,
     pub representative_hwnd: HWND,
     pub window_count: usize,

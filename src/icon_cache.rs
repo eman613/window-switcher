@@ -1,8 +1,8 @@
 use crate::{
     app::SwitchAppsState,
-    icon_loader::{IconLoadResult, IconLoader},
+    icon_loader::{IconLoadKind, IconLoadResult, IconLoader},
     metrics::StageTimer,
-    utils::{get_fallback_icon, is_window_valid},
+    utils::{app_name_fallback, get_fallback_icon, is_window_valid},
 };
 
 use indexmap::IndexMap;
@@ -32,9 +32,11 @@ struct PendingIcon {
 pub(crate) struct IconCache {
     loader: IconLoader,
     pending: HashMap<String, PendingIcon>,
+    pending_names: HashMap<String, PendingIcon>,
     retryable: HashMap<String, Instant>,
     next_generation: u64,
     icons: IndexMap<String, HICON>,
+    names: HashMap<String, String>,
     limit: usize,
 }
 
@@ -43,9 +45,11 @@ impl IconCache {
         Self {
             loader: IconLoader::new(hwnd, Arc::new(override_icons)),
             pending: HashMap::new(),
+            pending_names: HashMap::new(),
             retryable: HashMap::new(),
             next_generation: 1,
             icons: IndexMap::new(),
+            names: HashMap::new(),
             limit: limit.clamp(1, MAX_SWITCH_APPS),
         }
     }
@@ -80,6 +84,30 @@ impl IconCache {
         for (key, representative_hwnd) in requests {
             self.request(&key, &key, representative_hwnd);
         }
+        if let Some(state) = state {
+            let name_requests: Vec<(String, HWND)> = state
+                .apps
+                .iter()
+                .filter(|entry| {
+                    !entry.name.is_empty()
+                        && !self.names.contains_key(&entry.module_path)
+                        && !self.pending_names.contains_key(&entry.module_path)
+                        && is_window_valid(entry.representative_hwnd)
+                })
+                .map(|entry| (entry.module_path.clone(), entry.representative_hwnd))
+                .collect();
+            for (key, representative_hwnd) in name_requests {
+                self.request_name(&key, &key, representative_hwnd);
+            }
+        }
+    }
+
+    pub(crate) fn name_for_app(&mut self, key: &str, representative_hwnd: HWND) -> String {
+        if let Some(name) = self.names.get(key) {
+            return name.clone();
+        }
+        self.request_name(key, key, representative_hwnd);
+        app_name_fallback(key)
     }
 
     pub(crate) fn apply_results(&mut self, state: Option<&mut SwitchAppsState>) -> bool {
@@ -95,8 +123,28 @@ impl IconCache {
             key,
             generation,
             hicon,
+            kind,
+            name,
         } in results
         {
+            if kind == IconLoadKind::Name {
+                if self.pending_names.get(&key).map(|item| item.generation) != Some(generation) {
+                    continue;
+                }
+                self.pending_names.remove(&key);
+                if let Some(name) = name {
+                    self.names.insert(key.clone(), name.clone());
+                    if let Some(current_state) = state.as_deref_mut() {
+                        for entry in &mut current_state.apps {
+                            if entry.module_path == key && entry.name != name {
+                                entry.name = name.clone();
+                                repaint = true;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             if self.pending.get(&key).map(|item| item.generation) != Some(generation) {
                 if let Some(raw_hicon) = hicon {
                     destroy_raw_icon(raw_hicon);
@@ -164,6 +212,11 @@ impl IconCache {
             self.schedule_retry(&key, now);
         }
         self.retryable.retain(|key, _| active_keys.contains(key));
+        self.pending_names.retain(|key, pending| {
+            active_keys.contains(key)
+                && now.saturating_duration_since(pending.requested_at) <= ICON_PENDING_TIMEOUT
+        });
+        self.names.retain(|key, _| active_keys.contains(key));
     }
 
     pub(crate) fn trim(&mut self, state: Option<&SwitchAppsState>) {
@@ -228,6 +281,25 @@ impl IconCache {
             self.retryable.remove(key);
         } else {
             self.schedule_retry(key, Instant::now() + ICON_RETRY_BACKOFF);
+        }
+    }
+
+    fn request_name(&mut self, key: &str, module_path: &str, representative_hwnd: HWND) {
+        if self.pending_names.contains_key(key) || self.names.contains_key(key) {
+            return;
+        }
+        let generation = self.allocate_generation();
+        if self
+            .loader
+            .request_name(key, module_path, representative_hwnd, generation)
+        {
+            self.pending_names.insert(
+                key.to_string(),
+                PendingIcon {
+                    generation,
+                    requested_at: Instant::now(),
+                },
+            );
         }
     }
 

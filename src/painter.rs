@@ -4,12 +4,13 @@ use crate::badge::{
     badge_geometry, badge_label, create_badge_font, draw_badge, BADGE_BACKGROUND_COLOR,
     BADGE_BORDER_COLOR,
 };
-use crate::config::{AppearanceConfig, BackgroundColor};
+use crate::config::{AppNameMode, AppearanceConfig, BackgroundColor};
 use crate::layout::LayoutSnapshot;
 use crate::metrics::StageTimer;
 use crate::painter_resources::{
     bitmap_byte_len, gdiplus_status, BitmapSurface, BrushGuard, FontGuard, GpBrushGuard,
-    GpGraphicsGuard, GpImageGuard, GpPathGuard, RegionGuard, ScreenDcGuard, MAX_SURFACE_BYTES,
+    GpFontFamilyGuard, GpFontGuard, GpGraphicsGuard, GpImageGuard, GpPathGuard,
+    GpStringFormatGuard, PrivateFontGuard, RegionGuard, ScreenDcGuard, MAX_SURFACE_BYTES,
 };
 use crate::utils::{get_monitor_context, is_light_theme, is_win11};
 
@@ -23,10 +24,14 @@ use windows::Win32::{
             StretchBlt, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HALFTONE, HBITMAP, HDC, SRCCOPY,
         },
         GdiPlus::{
-            GdipAddPathArc, GdipClosePathFigure, GdipDrawImageRect, GdipFillPath,
+            FontStyleBold, FontStyleBoldItalic, FontStyleItalic, FontStyleRegular, GdipAddPathArc,
+            GdipClosePathFigure, GdipDrawImageRect, GdipDrawString, GdipFillPath,
             GdipFillRectangle, GdipGraphicsClear, GdipSetInterpolationMode, GdipSetSmoothingMode,
-            GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics,
-            InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias,
+            GdipSetStringFormatAlign, GdipSetStringFormatFlags, GdipSetStringFormatLineAlign,
+            GdipSetStringFormatTrimming, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput,
+            GpBrush, GpGraphics, InterpolationModeHighQualityBicubic, RectF,
+            SmoothingModeAntiAlias, StringAlignmentCenter, StringFormatFlagsDirectionRightToLeft,
+            StringTrimmingEllipsisCharacter,
         },
     },
     UI::{
@@ -42,6 +47,8 @@ pub const BG_DARK_COLOR: u32 = 0x4c4c4c;
 pub const FG_DARK_COLOR: u32 = 0x3b3b3b;
 pub const BG_LIGHT_COLOR: u32 = 0xe0e0e0;
 pub const FG_LIGHT_COLOR: u32 = 0xf2f2f2;
+const APP_NAME_TEXT_LIGHT_COLOR: u32 = 0x202020;
+const APP_NAME_TEXT_DARK_COLOR: u32 = 0xf5f5f5;
 const THEME_CACHE_TTL: Duration = Duration::from_secs(1);
 
 // GDI Antialiasing Painter
@@ -61,6 +68,7 @@ pub struct GdiAAPainter {
     frame_icon_surface: Option<BitmapSurface>,
     scaled_icon_surface: Option<BitmapSurface>,
     icon_layer_key: Option<IconLayerKey>,
+    _private_font: Option<PrivateFontGuard>,
 }
 
 impl GdiAAPainter {
@@ -98,6 +106,17 @@ impl GdiAAPainter {
             appearance.background_opacity,
         );
 
+        let private_font = (appearance.app_name_mode == AppNameMode::Selected)
+            .then_some(())
+            .and(appearance.app_name_font_file.as_deref())
+            .and_then(|path| match PrivateFontGuard::new(path) {
+                Ok(font) => Some(font),
+                Err(err) => {
+                    warn!("private application-name font unavailable: {err}");
+                    None
+                }
+            });
+
         Ok(Self {
             token,
             hwnd,
@@ -114,6 +133,7 @@ impl GdiAAPainter {
             frame_icon_surface: None,
             scaled_icon_surface: None,
             icon_layer_key: None,
+            _private_font: private_font,
         })
     }
 
@@ -264,6 +284,17 @@ impl GdiAAPainter {
             },
             "GdipDrawImageRect",
         )?;
+        draw_app_name(
+            graphics.get(),
+            &layout,
+            state,
+            &self.appearance,
+            if light_theme {
+                APP_NAME_TEXT_LIGHT_COLOR
+            } else {
+                APP_NAME_TEXT_DARK_COLOR
+            },
+        )?;
         render_timer.finish();
 
         let blend = BLENDFUNCTION {
@@ -391,6 +422,99 @@ fn effective_corner_radius(
 ) -> i32 {
     let radius = configured.unwrap_or(if auto_enabled { auto_radius } else { 0 });
     radius.max(0).min(width.min(height).max(0) / 2)
+}
+
+fn draw_app_name(
+    graphics: *mut GpGraphics,
+    layout: &LayoutSnapshot,
+    state: &SwitchAppsState,
+    appearance: &AppearanceConfig,
+    automatic_color: u32,
+) -> Result<()> {
+    if appearance.app_name_mode != AppNameMode::Selected || layout.footer_height <= 0 {
+        return Ok(());
+    }
+    let Some(entry) = state.apps.get(state.index) else {
+        return Err(anyhow!(
+            "Selected app index is out of range while drawing name"
+        ));
+    };
+    let family = GpFontFamilyGuard::from_name(&appearance.app_name_font_family).or_else(|err| {
+        warn!(
+            "application-name font family {:?} unavailable: {err}; using Segoe UI",
+            appearance.app_name_font_family
+        );
+        GpFontFamilyGuard::from_name("Segoe UI")
+    })?;
+    let font_size =
+        (i64::from(appearance.app_name_font_size) * i64::from(layout.monitor.dpi.max(1)) + 48) / 96;
+    let font_size = font_size.max(1) as f32;
+    let style = match (
+        appearance.app_name_font_weight >= 700,
+        appearance.app_name_font_italic,
+    ) {
+        (true, true) => FontStyleBoldItalic,
+        (true, false) => FontStyleBold,
+        (false, true) => FontStyleItalic,
+        (false, false) => FontStyleRegular,
+    };
+    let font = GpFontGuard::new(family.get(), font_size, style)?;
+    let format = GpStringFormatGuard::new()?;
+    gdiplus_status(
+        unsafe { GdipSetStringFormatAlign(format.get(), StringAlignmentCenter) },
+        "GdipSetStringFormatAlign",
+    )?;
+    gdiplus_status(
+        unsafe { GdipSetStringFormatLineAlign(format.get(), StringAlignmentCenter) },
+        "GdipSetStringFormatLineAlign",
+    )?;
+    gdiplus_status(
+        unsafe { GdipSetStringFormatTrimming(format.get(), StringTrimmingEllipsisCharacter) },
+        "GdipSetStringFormatTrimming",
+    )?;
+
+    let color = resolve_background_color(appearance.app_name_color, automatic_color);
+    let brush = GpBrushGuard::new(argb(255, color))?;
+    let text = crate::utils::to_wstring(&entry.name);
+    let text_len = i32::try_from(text.len().saturating_sub(1))
+        .map_err(|_| anyhow!("Application name is too long to draw"))?;
+    let rect = RectF {
+        X: layout.panel_padding as f32,
+        Y: layout.footer_top as f32,
+        Width: layout.content_width as f32,
+        Height: layout.footer_height as f32,
+    };
+    if contains_rtl(&entry.name) {
+        gdiplus_status(
+            unsafe {
+                GdipSetStringFormatFlags(format.get(), StringFormatFlagsDirectionRightToLeft.0)
+            },
+            "GdipSetStringFormatFlags",
+        )?;
+    }
+    gdiplus_status(
+        unsafe {
+            GdipDrawString(
+                graphics,
+                windows::core::PCWSTR(text.as_ptr()),
+                text_len,
+                font.get(),
+                &rect,
+                format.get(),
+                brush.get(),
+            )
+        },
+        "GdipDrawString application name",
+    )
+}
+
+fn contains_rtl(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x0590..=0x08ff | 0xfb1d..=0xfdff | 0xfe70..=0xfefc
+        )
+    })
 }
 
 fn draw_round_rect(
