@@ -139,11 +139,20 @@ impl GdiAAPainter {
         let height = layout.panel_height();
         layout_timer.finish();
 
-        let corner_radius = if self.rounded_corner {
-            layout.item_size / 4
-        } else {
-            0
-        };
+        let panel_corner_radius = effective_corner_radius(
+            layout.panel_corner_radius,
+            self.rounded_corner,
+            layout.item_size / 4,
+            width,
+            height,
+        );
+        let selection_corner_radius = effective_corner_radius(
+            layout.selection_corner_radius,
+            self.rounded_corner,
+            layout.item_size / 4,
+            layout.item_size,
+            layout.item_size,
+        );
 
         let hwnd = self.hwnd;
         let hdc_screen = self.hdc_screen.get();
@@ -189,7 +198,10 @@ impl GdiAAPainter {
 
         let bg_brush = GpBrushGuard::new(argb(background_alpha, bg_rgb))?;
 
-        if self.rounded_corner {
+        if panel_corner_radius > 0 {
+            let panel_corner_diameter = panel_corner_radius
+                .checked_mul(2)
+                .ok_or_else(|| anyhow!("Panel corner diameter overflow"))?;
             draw_round_rect(
                 graphics.get(),
                 bg_brush.get(),
@@ -197,7 +209,7 @@ impl GdiAAPainter {
                 0.0,
                 width as f32,
                 height as f32,
-                corner_radius as f32,
+                panel_corner_diameter as f32,
             )?;
         } else {
             gdiplus_status(
@@ -219,7 +231,7 @@ impl GdiAAPainter {
             state,
             &layout,
             hdc_screen,
-            corner_radius,
+            selection_corner_radius,
             fg_color,
             bg_color,
             self.appearance.show_badge,
@@ -388,6 +400,17 @@ const fn argb(alpha: u8, rgb: u32) -> u32 {
     ((alpha as u32) << 24) | (rgb & 0x00ff_ffff)
 }
 
+fn effective_corner_radius(
+    configured: Option<i32>,
+    auto_enabled: bool,
+    auto_radius: i32,
+    width: i32,
+    height: i32,
+) -> i32 {
+    let radius = configured.unwrap_or(if auto_enabled { auto_radius } else { 0 });
+    radius.max(0).min(width.min(height).max(0) / 2)
+}
+
 fn draw_round_rect(
     graphic_ptr: *mut GpGraphics,
     brush_ptr: *mut GpBrush,
@@ -395,7 +418,7 @@ fn draw_round_rect(
     top: f32,
     right: f32,
     bottom: f32,
-    corner_radius: f32,
+    corner_diameter: f32,
 ) -> Result<()> {
     let path = GpPathGuard::new()?;
     let path_ptr = path.get();
@@ -405,8 +428,8 @@ fn draw_round_rect(
                 path_ptr,
                 left,
                 top,
-                corner_radius,
-                corner_radius,
+                corner_diameter,
+                corner_diameter,
                 180.0,
                 90.0,
             )
@@ -417,10 +440,10 @@ fn draw_round_rect(
         unsafe {
             GdipAddPathArc(
                 path_ptr,
-                right - corner_radius,
+                right - corner_diameter,
                 top,
-                corner_radius,
-                corner_radius,
+                corner_diameter,
+                corner_diameter,
                 270.0,
                 90.0,
             )
@@ -431,10 +454,10 @@ fn draw_round_rect(
         unsafe {
             GdipAddPathArc(
                 path_ptr,
-                right - corner_radius,
-                bottom - corner_radius,
-                corner_radius,
-                corner_radius,
+                right - corner_diameter,
+                bottom - corner_diameter,
+                corner_diameter,
+                corner_diameter,
                 0.0,
                 90.0,
             )
@@ -446,9 +469,9 @@ fn draw_round_rect(
             GdipAddPathArc(
                 path_ptr,
                 left,
-                bottom - corner_radius,
-                corner_radius,
-                corner_radius,
+                bottom - corner_diameter,
+                corner_diameter,
+                corner_diameter,
                 90.0,
                 90.0,
             )
@@ -470,7 +493,7 @@ fn draw_icons(
     state: &SwitchAppsState,
     layout: &LayoutSnapshot,
     hdc_screen: HDC,
-    corner_radius: i32,
+    selection_corner_radius: i32,
     fg_color: u32,
     bg_color: u32,
     show_badge: bool,
@@ -494,9 +517,12 @@ fn draw_icons(
         .item_size
         .checked_mul(render_scale)
         .ok_or_else(|| anyhow!("Scaled icon item size overflow"))?;
-    let scaled_corner_radius = corner_radius
+    let scaled_corner_radius = selection_corner_radius
         .checked_mul(render_scale)
         .ok_or_else(|| anyhow!("Scaled corner radius overflow"))?;
+    let scaled_corner_diameter = scaled_corner_radius
+        .checked_mul(2)
+        .ok_or_else(|| anyhow!("Scaled corner diameter overflow"))?;
     let scaled_padding = icon_padding
         .checked_mul(render_scale)
         .ok_or_else(|| anyhow!("Scaled icon padding overflow"))?;
@@ -559,19 +585,23 @@ fn draw_icons(
             return Err(anyhow!("FillRect failed"));
         }
         if selected {
-            let region = RegionGuard::new(unsafe {
-                CreateRoundRectRgn(
-                    0,
-                    0,
-                    scaled_item_size,
-                    scaled_item_size,
-                    scaled_corner_radius,
-                    scaled_corner_radius,
-                )
-            })?;
-            unsafe { FillRgn(hdc_scaled, region.get(), fg_brush.get()) }
-                .ok()
-                .map_err(|err| anyhow!("FillRgn failed, {err}"))?;
+            if scaled_corner_diameter > 0 {
+                let region = RegionGuard::new(unsafe {
+                    CreateRoundRectRgn(
+                        0,
+                        0,
+                        scaled_item_size,
+                        scaled_item_size,
+                        scaled_corner_diameter,
+                        scaled_corner_diameter,
+                    )
+                })?;
+                unsafe { FillRgn(hdc_scaled, region.get(), fg_brush.get()) }
+                    .ok()
+                    .map_err(|err| anyhow!("FillRgn failed, {err}"))?;
+            } else if unsafe { FillRect(hdc_scaled, &rect, fg_brush.get()) } == 0 {
+                return Err(anyhow!("FillRect selection failed"));
+            }
         }
 
         unsafe {
@@ -632,6 +662,7 @@ fn draw_icons(
         height,
         icon_size,
         icon_padding,
+        selection_corner_radius,
         bg_color,
         show_badge,
         badge_max,
@@ -763,6 +794,7 @@ struct IconLayerKey {
     height: i32,
     icon_size: i32,
     icon_padding: i32,
+    selection_corner_radius: i32,
     bg_color: u32,
     show_badge: bool,
     badge_max: usize,
@@ -787,5 +819,13 @@ mod tests {
         assert_eq!(rgb, 0x12_34_56);
         assert_eq!(argb(0x80, rgb), 0x80_12_34_56);
         assert_eq!(rgb_to_colorref(rgb), 0x56_34_12);
+    }
+
+    #[test]
+    fn effective_corner_radius_preserves_auto_and_clamps_custom_values() {
+        assert_eq!(effective_corner_radius(None, true, 18, 100, 60), 18);
+        assert_eq!(effective_corner_radius(None, false, 18, 100, 60), 0);
+        assert_eq!(effective_corner_radius(Some(80), false, 18, 100, 60), 30);
+        assert_eq!(effective_corner_radius(Some(0), true, 18, 100, 60), 0);
     }
 }

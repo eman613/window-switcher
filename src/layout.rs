@@ -1,5 +1,5 @@
 use crate::{
-    config::{AppearanceConfig, LayoutMode},
+    config::{AppearanceConfig, CornerRadius, LayoutMode},
     utils::MonitorContext,
 };
 
@@ -28,6 +28,10 @@ pub(crate) struct LayoutSnapshot {
     pub(crate) icon_padding: i32,
     pub(crate) item_size: i32,
     pub(crate) panel_padding: i32,
+    /// Some means a configured DIP value converted to pixels; None keeps the
+    /// platform-specific automatic radius used by the painter.
+    pub(crate) panel_corner_radius: Option<i32>,
+    pub(crate) selection_corner_radius: Option<i32>,
     pub(crate) items: Vec<LayoutItem>,
 }
 
@@ -152,6 +156,19 @@ impl LayoutSnapshot {
             return Err(anyhow!("Calculated panel exceeds the configured bounds"));
         }
 
+        let panel_corner_radius = resolve_corner_radius(
+            appearance.panel_corner_radius,
+            dpi,
+            panel_width,
+            panel_height,
+        )?;
+        let selection_corner_radius = resolve_corner_radius(
+            appearance.selection_corner_radius,
+            dpi,
+            item_size,
+            item_size,
+        )?;
+
         let panel_left = monitor.rect.left + (monitor_width - panel_width) / 2;
         let panel_top = monitor.rect.top + (monitor_height - panel_height) / 2;
         let panel_rect = RECT {
@@ -192,6 +209,8 @@ impl LayoutSnapshot {
             icon_padding,
             item_size,
             panel_padding,
+            panel_corner_radius,
+            selection_corner_radius,
             items,
         })
     }
@@ -287,6 +306,21 @@ fn dip_to_px(value: i32, dpi: u32) -> Result<i32> {
     i32::try_from(pixels).map_err(|_| anyhow!("DIP conversion overflow"))
 }
 
+fn resolve_corner_radius(
+    configured: CornerRadius,
+    dpi: u32,
+    width: i32,
+    height: i32,
+) -> Result<Option<i32>> {
+    match configured {
+        CornerRadius::Auto => Ok(None),
+        CornerRadius::Dip(dip) => {
+            let radius = dip_to_px(dip, dpi)?;
+            Ok(Some(radius.min(width.min(height) / 2)))
+        }
+    }
+}
+
 fn positive_extent(start: i32, end: i32, name: &str) -> Result<i32> {
     end.checked_sub(start)
         .filter(|value| *value > 0)
@@ -307,7 +341,7 @@ fn checked_mul(value: i32, multiplier: i32, name: &str) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LayoutMode, MonitorTarget};
+    use crate::config::{CornerRadius, LayoutMode, MonitorTarget};
     use windows::Win32::Graphics::Gdi::HMONITOR;
 
     fn monitor(rect: RECT, dpi: u32) -> MonitorContext {
@@ -561,5 +595,32 @@ mod tests {
             assert_eq!(layout.icon_size, expected_icon_size);
             assert_eq!(layout.item_size, expected_item_size);
         }
+    }
+
+    #[test]
+    fn corner_radius_scales_and_is_limited_by_rectangle() {
+        let appearance = AppearanceConfig {
+            panel_corner_radius: CornerRadius::Dip(1000),
+            selection_corner_radius: CornerRadius::Dip(30),
+            ..AppearanceConfig::default()
+        };
+        let layout = LayoutSnapshot::new(
+            1,
+            0,
+            &appearance,
+            monitor(
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                144,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(layout.panel_corner_radius, Some(layout.panel_height() / 2));
+        assert_eq!(layout.selection_corner_radius, Some(45));
     }
 }

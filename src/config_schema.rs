@@ -4,8 +4,8 @@ use log::LevelFilter;
 
 use crate::{
     config::{
-        BackdropFallback, BackdropMode, BackgroundColor, Config, ConfigReloadMode, Hotkey,
-        LayoutMode, MonitorTarget, RenderScale, BACKGROUND_OPACITY_MAX, BADGE_MAX_MAX,
+        BackdropFallback, BackdropMode, BackgroundColor, Config, ConfigReloadMode, CornerRadius,
+        Hotkey, LayoutMode, MonitorTarget, RenderScale, BACKGROUND_OPACITY_MAX, BADGE_MAX_MAX,
         BADGE_MAX_MIN, GRID_EXTENT_MAX, ICON_CACHE_LIMIT_MAX, ICON_CACHE_LIMIT_MIN, ICON_SIZE_MAX,
         ICON_SIZE_MIN, PANEL_EXTENT_MAX, SPACING_MAX,
     },
@@ -49,6 +49,9 @@ pub(crate) fn validate_setting(section: Option<&str>, key: &str, value: &str) ->
         (Some("appearance"), "icon_size") => validate_i32(value, ICON_SIZE_MIN, ICON_SIZE_MAX),
         (Some("appearance"), "icon_padding" | "item_gap" | "panel_padding") => {
             validate_i32(value, 0, SPACING_MAX)
+        }
+        (Some("appearance"), "panel_corner_radius" | "selection_corner_radius") => {
+            validate_parse::<CornerRadius>(value, "auto or a non-negative DIP radius")
         }
         (Some("appearance"), "max_width" | "max_height") => {
             validate_i32(value, 0, PANEL_EXTENT_MAX)
@@ -199,6 +202,18 @@ mod tests {
             validate_setting(Some("performance"), "render_scale", "4"),
             SettingStatus::Valid
         );
+        assert_eq!(
+            validate_setting(Some("appearance"), "panel_corner_radius", "auto"),
+            SettingStatus::Valid
+        );
+        assert_eq!(
+            validate_setting(Some("appearance"), "selection_corner_radius", "24"),
+            SettingStatus::Valid
+        );
+        assert!(matches!(
+            validate_setting(Some("appearance"), "panel_corner_radius", "-1"),
+            SettingStatus::Invalid(_)
+        ));
     }
 
     #[test]

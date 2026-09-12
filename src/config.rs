@@ -19,6 +19,7 @@ pub(crate) const ICON_SIZE_MIN: i32 = 24;
 pub(crate) const ICON_SIZE_MAX: i32 = 256;
 pub(crate) const SPACING_MAX: i32 = 256;
 pub(crate) const PANEL_EXTENT_MAX: i32 = 32_768;
+pub(crate) const CORNER_RADIUS_MAX: i32 = PANEL_EXTENT_MAX / 2;
 pub(crate) const GRID_EXTENT_MAX: usize = 256;
 pub(crate) const BADGE_MAX_MIN: usize = 2;
 pub(crate) const BADGE_MAX_MAX: usize = 9_999;
@@ -99,6 +100,30 @@ impl FromStr for BackgroundColor {
             green: ((rgb >> 8) & 0xff) as u8,
             blue: (rgb & 0xff) as u8,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CornerRadius {
+    #[default]
+    Auto,
+    Dip(i32),
+}
+
+impl FromStr for CornerRadius {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        let dip = value.parse::<i32>().map_err(|_| ())?;
+        if (0..=CORNER_RADIUS_MAX).contains(&dip) {
+            Ok(Self::Dip(dip))
+        } else {
+            Err(())
+        }
     }
 }
 
@@ -225,6 +250,8 @@ pub struct AppearanceConfig {
     pub icon_padding: i32,
     pub item_gap: i32,
     pub panel_padding: i32,
+    pub panel_corner_radius: CornerRadius,
+    pub selection_corner_radius: CornerRadius,
     pub max_width: i32,
     pub max_height: i32,
     pub layout: LayoutMode,
@@ -247,6 +274,8 @@ impl Default for AppearanceConfig {
             icon_padding: 4,
             item_gap: 8,
             panel_padding: 10,
+            panel_corner_radius: CornerRadius::Auto,
+            selection_corner_radius: CornerRadius::Auto,
             max_width: 0,
             max_height: 0,
             layout: LayoutMode::SingleRow,
@@ -395,6 +424,20 @@ impl Config {
                     0,
                     SPACING_MAX,
                     conf.appearance.panel_padding,
+                );
+            }
+            if let Some(value) = section.get("panel_corner_radius") {
+                conf.appearance.panel_corner_radius = parse_enum_or_default(
+                    "appearance.panel_corner_radius",
+                    value,
+                    conf.appearance.panel_corner_radius,
+                );
+            }
+            if let Some(value) = section.get("selection_corner_radius") {
+                conf.appearance.selection_corner_radius = parse_enum_or_default(
+                    "appearance.selection_corner_radius",
+                    value,
+                    conf.appearance.selection_corner_radius,
                 );
             }
             if let Some(value) = section.get("max_width") {
@@ -927,7 +970,7 @@ mod tests {
     #[test]
     fn appearance_settings_are_loaded() {
         let ini = Ini::load_from_str(
-            "[appearance]\nmonitor = foreground\nuse_work_area = no\nicon_size = 80\nicon_padding = 6\nitem_gap = 12\npanel_padding = 16\nmax_width = 1200\nmax_height = 800\nlayout = grid\nmax_columns = 8\nmax_rows = 3\nbackground_color = #123abc\nbackground_opacity = 72\nbackdrop = acrylic\nbackdrop_fallback = solid\nshow_badge = no\nbadge_max = 999\n",
+            "[appearance]\nmonitor = foreground\nuse_work_area = no\nicon_size = 80\nicon_padding = 6\nitem_gap = 12\npanel_padding = 16\npanel_corner_radius = 24\nselection_corner_radius = 12\nmax_width = 1200\nmax_height = 800\nlayout = grid\nmax_columns = 8\nmax_rows = 3\nbackground_color = #123abc\nbackground_opacity = 72\nbackdrop = acrylic\nbackdrop_fallback = solid\nshow_badge = no\nbadge_max = 999\n",
         )
         .unwrap();
 
@@ -940,6 +983,8 @@ mod tests {
                 icon_padding: 6,
                 item_gap: 12,
                 panel_padding: 16,
+                panel_corner_radius: CornerRadius::Dip(24),
+                selection_corner_radius: CornerRadius::Dip(12),
                 max_width: 1200,
                 max_height: 800,
                 layout: LayoutMode::Grid,
@@ -962,7 +1007,7 @@ mod tests {
     #[test]
     fn invalid_appearance_settings_keep_safe_defaults() {
         let ini = Ini::load_from_str(
-            "[appearance]\nmonitor = elsewhere\nicon_size = 0\nitem_gap = -1\nlayout = diagonal\nmax_columns = 999\nbackground_color = red\nbackground_opacity = 101\nbackdrop = glass\nbackdrop_fallback = blur\nbadge_max = 1\n",
+            "[appearance]\nmonitor = elsewhere\nicon_size = 0\nitem_gap = -1\npanel_corner_radius = -1\nselection_corner_radius = 20000\nlayout = diagonal\nmax_columns = 999\nbackground_color = red\nbackground_opacity = 101\nbackdrop = glass\nbackdrop_fallback = blur\nbadge_max = 1\n",
         )
         .unwrap();
 
@@ -970,6 +1015,17 @@ mod tests {
             Config::load(&ini).unwrap().appearance,
             AppearanceConfig::default()
         );
+    }
+
+    #[test]
+    fn corner_radius_parser_accepts_auto_and_non_negative_dip_values() {
+        assert_eq!("auto".parse::<CornerRadius>(), Ok(CornerRadius::Auto));
+        assert_eq!("24".parse::<CornerRadius>(), Ok(CornerRadius::Dip(24)));
+        assert!("-1".parse::<CornerRadius>().is_err());
+        assert!((CORNER_RADIUS_MAX + 1)
+            .to_string()
+            .parse::<CornerRadius>()
+            .is_err());
     }
 
     #[test]
