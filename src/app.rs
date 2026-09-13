@@ -282,7 +282,13 @@ impl App {
         // hide caption
         let mut style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
         style &= !WS_CAPTION.0;
-        unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, style as _) };
+        if let Err(err) = check_error(|| unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, style as _) })
+        {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            return Err(anyhow!("Failed to hide window caption, {err}"));
+        }
 
         Ok(hwnd)
     }
