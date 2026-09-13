@@ -356,7 +356,22 @@ impl GdiAAPainter {
 
     pub fn invalidate_environment(&mut self) {
         self.theme_cache = None;
+        self.refresh_backdrop();
         self.invalidate_layout();
+    }
+
+    fn refresh_backdrop(&mut self) {
+        let light_theme = is_light_theme();
+        let (_, default_bg_color) = theme_color(light_theme);
+        let bg_color = resolve_background_color(self.appearance.background_color, default_bg_color);
+        self.backdrop.clear();
+        self.backdrop = BackdropController::new(
+            self.hwnd,
+            self.appearance.backdrop,
+            self.appearance.backdrop_fallback,
+            bg_color,
+            self.appearance.background_opacity,
+        );
     }
 
     fn release_surfaces(&mut self) {

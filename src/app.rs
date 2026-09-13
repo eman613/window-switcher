@@ -612,7 +612,7 @@ impl App {
                 return Ok(LRESULT(0));
             }
             WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
-                let environment_changed = msg == WM_SETTINGCHANGE;
+                let environment_changed = matches!(msg, WM_DISPLAYCHANGE | WM_SETTINGCHANGE);
                 with_app(hwnd, |app| {
                     if environment_changed {
                         app.painter.invalidate_environment();

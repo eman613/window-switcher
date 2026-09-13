@@ -261,7 +261,7 @@ impl BackdropController {
         .map_err(|err| anyhow!("DwmSetWindowAttribute failed: {err}"))
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         match self.applied {
             AppliedBackdrop::SwcaBlur | AppliedBackdrop::SwcaAcrylic => {
                 let _ = self.disable_accent();
