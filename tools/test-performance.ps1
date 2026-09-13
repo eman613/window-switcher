@@ -63,6 +63,28 @@ Invoke-PerformanceTest 'log diagnostics ignore severity words inside messages' {
     }
 }
 
+Invoke-PerformanceTest 'keyboard metrics preserve sequence stages and p99' {
+    $lines = @(
+        '[00:00:00.001] (abc) INFO   perf stage=keyboard_hook sequence=7 elapsed_us=4 dropped_metrics=0',
+        '[00:00:00.001] (abc) INFO   perf stage=keyboard_enqueue sequence=7 elapsed_us=2 dropped_metrics=0',
+        '[00:00:00.002] (abc) INFO   perf stage=keyboard_queue_wait sequence=7 elapsed_us=15 dropped_metrics=0',
+        '[00:00:00.003] (abc) INFO   perf stage=keyboard_ui_dispatch sequence=7 elapsed_us=8 dropped_metrics=0',
+        '[00:00:00.004] (abc) INFO   perf stage=keyboard_end_to_end sequence=7 elapsed_us=20 dropped_metrics=0',
+        '[00:00:00.005] (abc) INFO   perf stage=keyboard_hook sequence=8 elapsed_us=5 dropped_metrics=0',
+        '[00:00:00.005] (abc) INFO   perf stage=keyboard_enqueue sequence=8 elapsed_us=3 dropped_metrics=0',
+        '[00:00:00.006] (abc) INFO   perf stage=keyboard_queue_wait sequence=8 elapsed_us=10 dropped_metrics=0',
+        '[00:00:00.007] (abc) INFO   perf stage=keyboard_ui_dispatch sequence=8 elapsed_us=9 dropped_metrics=0',
+        '[00:00:00.008] (abc) INFO   perf stage=keyboard_end_to_end sequence=8 elapsed_us=30 dropped_metrics=0'
+    )
+    $metrics = Get-WindowSwitcherKeyboardMetrics -Lines $lines
+    Assert-PerformanceTest $metrics.Measured 'Keyboard metrics were not marked as measured.'
+    Assert-PerformanceTest ($metrics.SequenceCount -eq 2) 'Keyboard sequence count was not deduplicated.'
+    Assert-PerformanceTest ($metrics.MissingStages.Count -eq 0) 'A complete keyboard stage set was marked incomplete.'
+    Assert-PerformanceTest ($metrics.StageCounts.keyboard_hook -eq 2 -and
+        $metrics.StageCounts.keyboard_end_to_end -eq 2) 'Keyboard stage counts were incorrect.'
+    Assert-PerformanceTest ($metrics.EndToEndP99Microseconds -eq 30) 'Keyboard end-to-end P99 was incorrect.'
+}
+
 Invoke-PerformanceTest 'complete cycles distinguish warmup, acknowledgements and visibility' {
     $target = [WindowSwitcher.Performance.Tests.FakeCycleTarget]::new()
     $options = New-PerformanceTestOptions

@@ -125,6 +125,7 @@ function Get-WindowSwitcherApplicationLogDiagnostics {
             Warnings = @()
             Errors = @()
             MetricDropCount = 0
+            KeyboardMetrics = Get-WindowSwitcherKeyboardMetrics -Lines @()
         }
     }
     $lines = @(Get-Content -LiteralPath $Path -Encoding UTF8)
@@ -144,6 +145,51 @@ function Get-WindowSwitcherApplicationLogDiagnostics {
         Warnings = $warnings
         Errors = $errors
         MetricDropCount = $metricDropCount
+        KeyboardMetrics = Get-WindowSwitcherKeyboardMetrics -Lines $lines
+    }
+}
+
+function Get-WindowSwitcherKeyboardMetrics {
+    param([AllowEmptyCollection()][string[]] $Lines)
+
+    $requiredStages = @(
+        'keyboard_hook', 'keyboard_enqueue', 'keyboard_queue_wait',
+        'keyboard_ui_dispatch', 'keyboard_end_to_end'
+    )
+    $stageSamples = @{}
+    foreach ($stage in $requiredStages) { $stageSamples[$stage] = [Collections.Generic.List[double]]::new() }
+    $sequences = [Collections.Generic.HashSet[long]]::new()
+    $pattern = '\bperf stage=(?<stage>keyboard_[a-z_]+)\s+sequence=(?<sequence>\d+)\s+elapsed_us=(?<elapsed>\d+)\b'
+    foreach ($line in $Lines) {
+        $match = [regex]::Match($line, $pattern)
+        if (-not $match.Success) { continue }
+        $stage = $match.Groups['stage'].Value
+        if (-not $stageSamples.ContainsKey($stage)) { continue }
+        $sequence = [long]$match.Groups['sequence'].Value
+        $elapsed = [double]$match.Groups['elapsed'].Value
+        $null = $stageSamples[$stage].Add($elapsed)
+        $null = $sequences.Add($sequence)
+    }
+    $p99 = $null
+    $endToEnd = @($stageSamples['keyboard_end_to_end'])
+    if ($endToEnd.Count -gt 0) {
+        $ordered = @($endToEnd | Sort-Object)
+        $index = [int][math]::Ceiling($ordered.Count * 0.99) - 1
+        $p99 = $ordered[[math]::Max(0, $index)]
+    }
+    $missingStages = @($requiredStages | Where-Object { $stageSamples[$_].Count -eq 0 })
+    [pscustomobject]@{
+        Measured = $stageSamples['keyboard_hook'].Count -gt 0
+        SequenceCount = $sequences.Count
+        StageCounts = [ordered]@{
+            keyboard_hook = $stageSamples['keyboard_hook'].Count
+            keyboard_enqueue = $stageSamples['keyboard_enqueue'].Count
+            keyboard_queue_wait = $stageSamples['keyboard_queue_wait'].Count
+            keyboard_ui_dispatch = $stageSamples['keyboard_ui_dispatch'].Count
+            keyboard_end_to_end = $stageSamples['keyboard_end_to_end'].Count
+        }
+        MissingStages = $missingStages
+        EndToEndP99Microseconds = $p99
     }
 }
 
@@ -161,6 +207,7 @@ function Write-WindowSwitcherPerformanceReport {
     $logPresent = $logDiagnostics.Present
     $logLineCount = $logDiagnostics.LineCount
     $metricDropCount = $logDiagnostics.MetricDropCount
+    $keyboardMetrics = $logDiagnostics.KeyboardMetrics
     $droppedSamples = if ($Samples.Count -gt 0) {
         [long](($Samples | Measure-Object DroppedSamples -Maximum).Maximum)
     } else { 0 }
@@ -227,7 +274,8 @@ function Write-WindowSwitcherPerformanceReport {
         OriginalConfigurationsPreserved = $Session.OriginalConfigurationsPreserved
         Originals = @($Session.Originals.ToArray())
         IsolatedRuntimeRemoved = $Session.RuntimeRemoved
-        KeyboardHookMeasured = $false
+        KeyboardHookMeasured = $keyboardMetrics.Measured
+        KeyboardMetrics = $keyboardMetrics
         PhysicalFrameLatencyMeasured = $false
         CounterPath = $counterPath
         CheckpointPath = $checkpointPath
