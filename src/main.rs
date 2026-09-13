@@ -1,7 +1,7 @@
 #![windows_subsystem = "windows"]
 
 use anyhow::{anyhow, bail, Context, Result};
-use log::{info, warn};
+use log::{error, info, warn};
 use std::{
     fs::{File, OpenOptions},
     path::Path,
@@ -23,6 +23,7 @@ use window_switcher::{
 fn main() {
     set_language(Language::Auto);
     if let Err(err) = run() {
+        error!("application startup failed: {err:#}");
         alert!("{err}");
         std::process::exit(1);
     }

@@ -14,6 +14,7 @@ use std::{
 use windows::core::PWSTR;
 use windows::Win32::{
     Foundation::{LocalFree, ERROR_INSUFFICIENT_BUFFER, HLOCAL},
+    Globalization::{GetACP, GetOEMCP, MultiByteToWideChar},
     Security::{
         Authorization::ConvertSidToStringSidW, GetLengthSid, IsValidSid, LookupAccountSidW,
         TokenUser, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
@@ -245,7 +246,32 @@ fn decode_command_output(bytes: &[u8]) -> Result<String> {
         return String::from_utf16(&units.collect::<Vec<_>>())
             .map_err(|err| anyhow!("schtasks output is invalid UTF-16: {err}"));
     }
+    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+        return Ok(text);
+    }
+
+    for codepage in [unsafe { GetOEMCP() }, unsafe { GetACP() }] {
+        if let Some(text) = decode_code_page(bytes, codepage) {
+            return Ok(text);
+        }
+    }
+
     Ok(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn decode_code_page(bytes: &[u8], codepage: u32) -> Option<String> {
+    let required = unsafe { MultiByteToWideChar(codepage, Default::default(), bytes, None) };
+    if required <= 0 {
+        return None;
+    }
+    let mut units = vec![0u16; usize::try_from(required).ok()?];
+    let written =
+        unsafe { MultiByteToWideChar(codepage, Default::default(), bytes, Some(&mut units)) };
+    if written <= 0 {
+        return None;
+    }
+    units.truncate(usize::try_from(written).ok()?);
+    String::from_utf16(&units).ok()
 }
 
 fn xml_value(source: &str, target: &str) -> Option<String> {
@@ -585,6 +611,18 @@ mod tests {
         let mut big = vec![0xfe, 0xff];
         big.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
         assert_eq!(decode_command_output(&big).unwrap(), text);
+    }
+
+    #[test]
+    fn command_output_decodes_oem_code_page_text() {
+        let bytes = [
+            0xB4, 0xED, 0xCE, 0xF3, 0x3A, 0x20, 0xCF, 0xB5, 0xCD, 0xB3, 0xD5, 0xD2, 0xB2, 0xBB,
+            0xB5, 0xBD, 0xD6, 0xB8, 0xB6, 0xA8, 0xB5, 0xC4, 0xCE, 0xC4, 0xBC, 0xFE, 0xA1, 0xA3,
+        ];
+        assert_eq!(
+            decode_code_page(&bytes, 936).as_deref(),
+            Some("错误: 系统找不到指定的文件。")
+        );
     }
 
     #[test]
