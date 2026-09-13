@@ -13,9 +13,8 @@ use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
         Graphics::Gdi::{
-            CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC,
-            SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HDC,
-            HGDIOBJ, RGBQUAD,
+            DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+            BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, RGBQUAD,
         },
         Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
         UI::{
@@ -475,15 +474,6 @@ fn is_topleft_icon(bounds: &IconBounds) -> bool {
     small_content && top_left
 }
 
-struct HdcGuard(HDC);
-impl Drop for HdcGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = DeleteDC(self.0);
-        }
-    }
-}
-
 struct ScreenDcGuard(HDC);
 impl Drop for ScreenDcGuard {
     fn drop(&mut self) {
@@ -530,11 +520,6 @@ fn get_icon_bounds(hicon: HICON) -> Option<IconBounds> {
         let screen_dc = GetDC(None);
         let _screen_guard = ScreenDcGuard(screen_dc);
 
-        let mem_dc = CreateCompatibleDC(Some(screen_dc));
-        let _dc_guard = HdcGuard(mem_dc);
-
-        let old_bmp = SelectObject(mem_dc, HGDIOBJ(icon_info.hbmColor.0 as _));
-
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -561,7 +546,7 @@ fn get_icon_bounds(hicon: HICON) -> Option<IconBounds> {
         let mut pixels: Vec<u8> = vec![0; buf_size];
 
         if 0 == GetDIBits(
-            mem_dc,
+            screen_dc,
             icon_info.hbmColor,
             0,
             height as u32,
@@ -569,30 +554,26 @@ fn get_icon_bounds(hicon: HICON) -> Option<IconBounds> {
             &mut bmi,
             DIB_RGB_COLORS,
         ) {
-            SelectObject(mem_dc, old_bmp);
             return None;
         }
 
         let (mut bounds, has_semi_transparent) = scan_alpha_bounds(&pixels, width, height);
 
         // Fallback to mask when no alpha channel and no visible pixels found
-        if !has_semi_transparent && bounds.is_none() {
-            SelectObject(mem_dc, HGDIOBJ(icon_info.hbmMask.0 as _));
-
-            if 0 != GetDIBits(
-                mem_dc,
+        if !has_semi_transparent
+            && bounds.is_none()
+            && 0 != GetDIBits(
+                screen_dc,
                 icon_info.hbmMask,
                 0,
                 height as u32,
                 Some(pixels.as_mut_ptr() as *mut _),
                 &mut bmi,
                 DIB_RGB_COLORS,
-            ) {
-                bounds = scan_mask_bounds(&pixels, width, height);
-            }
+            )
+        {
+            bounds = scan_mask_bounds(&pixels, width, height);
         }
-        SelectObject(mem_dc, old_bmp);
-
         bounds
     }
 }
