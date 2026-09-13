@@ -34,6 +34,7 @@ pub(crate) struct IconCache {
     pending: HashMap<String, PendingIcon>,
     pending_names: HashMap<String, PendingIcon>,
     retryable: HashMap<String, Instant>,
+    fallback_keys: HashSet<String>,
     next_generation: u64,
     icons: IndexMap<String, HICON>,
     names: HashMap<String, String>,
@@ -47,6 +48,7 @@ impl IconCache {
             pending: HashMap::new(),
             pending_names: HashMap::new(),
             retryable: HashMap::new(),
+            fallback_keys: HashSet::new(),
             next_generation: 1,
             icons: IndexMap::new(),
             names: HashMap::new(),
@@ -61,6 +63,7 @@ impl IconCache {
         }
 
         let icon = get_fallback_icon();
+        self.fallback_keys.insert(module_path.to_string());
         self.schedule_retry(module_path, Instant::now());
         self.insert(module_path, icon);
         self.request(module_path, module_path, representative_hwnd);
@@ -168,6 +171,7 @@ impl IconCache {
             }
 
             self.retryable.remove(&key);
+            self.fallback_keys.remove(&key);
             self.insert(&key, icon);
             if let Some(current_state) = state.as_deref_mut() {
                 for entry in &mut current_state.apps {
@@ -212,6 +216,8 @@ impl IconCache {
             self.schedule_retry(&key, now);
         }
         self.retryable.retain(|key, _| active_keys.contains(key));
+        self.fallback_keys
+            .retain(|key| self.icons.contains_key(key));
         self.pending_names.retain(|key, pending| {
             active_keys.contains(key)
                 && now.saturating_duration_since(pending.requested_at) <= ICON_PENDING_TIMEOUT
@@ -239,6 +245,7 @@ impl IconCache {
                 break;
             };
             if let Some((_, icon)) = self.icons.shift_remove_entry(&candidate) {
+                self.fallback_keys.remove(&candidate);
                 destroy_hicon(icon);
             }
         }
@@ -257,12 +264,13 @@ impl IconCache {
             if Instant::now() < *retry_at {
                 return;
             }
-        } else if self
-            .icons
-            .get(key)
-            .map(|icon| !icon.is_invalid())
-            .unwrap_or(false)
-        {
+        } else if cached_icon_is_ready(
+            self.icons
+                .get(key)
+                .map(|icon| !icon.is_invalid())
+                .unwrap_or(false),
+            self.fallback_keys.contains(key),
+        ) {
             return;
         }
 
@@ -365,4 +373,20 @@ fn destroy_raw_icon(raw_hicon: isize) {
         return;
     }
     destroy_hicon(HICON(raw_hicon as _));
+}
+
+fn cached_icon_is_ready(has_valid_icon: bool, is_fallback: bool) -> bool {
+    has_valid_icon && !is_fallback
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cached_icon_is_ready;
+
+    #[test]
+    fn fallback_icons_remain_retryable_after_reopen() {
+        assert!(!cached_icon_is_ready(true, true));
+        assert!(cached_icon_is_ready(true, false));
+        assert!(!cached_icon_is_ready(false, false));
+    }
 }

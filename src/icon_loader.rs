@@ -5,7 +5,7 @@ use std::{
         Arc,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use indexmap::IndexMap;
@@ -27,6 +27,8 @@ const ICON_RESULT_CAPACITY: usize = 64;
 const ICON_RESULT_SEND_RETRIES: usize = 100;
 const ICON_RESULT_SEND_DELAY: Duration = Duration::from_millis(1);
 const ICON_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const ICON_WORKER_STOP_BUDGET: Duration = Duration::from_secs(2);
+const ICON_WORKER_STOP_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Debug)]
 struct IconRequest {
@@ -213,7 +215,13 @@ impl IconLoader {
         self.request_rx.take();
         self.result_tx.take();
         if let Some(worker) = self.worker.take() {
-            if let Err(err) = worker.join() {
+            if !wait_for_worker(&worker, ICON_WORKER_STOP_BUDGET) {
+                warn!(
+                    "icon loader worker did not stop within {:?}; detaching thread",
+                    ICON_WORKER_STOP_BUDGET
+                );
+                std::mem::forget(worker);
+            } else if let Err(err) = worker.join() {
                 warn!("icon loader worker panicked: {err:?}");
             }
         }
@@ -224,6 +232,17 @@ impl IconLoader {
         }
         self.wake_pending.store(false, Ordering::Release);
     }
+}
+
+fn wait_for_worker(worker: &JoinHandle<()>, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    while !worker.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(ICON_WORKER_STOP_POLL);
+    }
+    true
 }
 
 impl Drop for IconLoader {
@@ -371,5 +390,22 @@ fn destroy_icon(raw_hicon: isize) {
         let _ = DestroyIcon(windows::Win32::UI::WindowsAndMessaging::HICON(
             raw_hicon as _,
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_worker;
+    use std::{thread, time::Duration};
+
+    #[test]
+    fn worker_stop_wait_has_a_bounded_budget() {
+        let worker = thread::spawn(|| thread::sleep(Duration::from_millis(20)));
+        assert!(!wait_for_worker(&worker, Duration::ZERO));
+        worker.join().unwrap();
+
+        let worker = thread::spawn(|| {});
+        assert!(wait_for_worker(&worker, Duration::from_secs(1)));
+        worker.join().unwrap();
     }
 }

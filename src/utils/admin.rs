@@ -10,9 +10,9 @@ use windows::Win32::{
     Foundation::HANDLE,
     Security::{
         GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid,
-        TokenElevation, TokenElevationType, TokenElevationTypeFull, TokenIntegrityLevel,
-        TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL,
-        TOKEN_QUERY,
+        TokenElevation, TokenElevationType, TokenElevationTypeDefault, TokenElevationTypeFull,
+        TokenElevationTypeLimited, TokenIntegrityLevel, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE,
+        TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
     },
     System::Threading::{
         GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -127,11 +127,25 @@ fn query_token_elevated(token: HANDLE) -> Result<bool> {
     }
     let rid = unsafe { *rid_ptr };
 
-    Ok(matches!(
+    Ok(is_admin_token(
+        elevation_type,
+        elevation.TokenIsElevated != 0,
         rid,
-        SECURITY_MANDATORY_HIGH_RID | SECURITY_MANDATORY_SYSTEM_RID
-    ) && elevation.TokenIsElevated != 0
-        && elevation_type == TokenElevationTypeFull)
+    ))
+}
+
+#[allow(non_upper_case_globals)]
+fn is_admin_token(elevation_type: TOKEN_ELEVATION_TYPE, is_elevated: bool, rid: u32) -> bool {
+    is_elevated
+        && matches!(
+            rid,
+            SECURITY_MANDATORY_HIGH_RID | SECURITY_MANDATORY_SYSTEM_RID
+        )
+        && matches!(
+            elevation_type,
+            TokenElevationTypeDefault | TokenElevationTypeFull
+        )
+        && elevation_type != TokenElevationTypeLimited
 }
 
 fn query_fixed_token_information<T: Copy>(
@@ -158,4 +172,36 @@ fn query_fixed_token_information<T: Copy>(
 
 pub fn is_elevated(handle: HANDLE) -> Result<bool> {
     get_process_elevation_info(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_admin_token, SECURITY_MANDATORY_HIGH_RID};
+    use windows::Win32::Security::{
+        TokenElevationTypeDefault, TokenElevationTypeFull, TokenElevationTypeLimited,
+    };
+
+    #[test]
+    fn admin_detection_accepts_elevated_default_and_full_tokens() {
+        assert!(is_admin_token(
+            TokenElevationTypeDefault,
+            true,
+            SECURITY_MANDATORY_HIGH_RID
+        ));
+        assert!(is_admin_token(
+            TokenElevationTypeFull,
+            true,
+            SECURITY_MANDATORY_HIGH_RID
+        ));
+        assert!(!is_admin_token(
+            TokenElevationTypeLimited,
+            true,
+            SECURITY_MANDATORY_HIGH_RID
+        ));
+        assert!(!is_admin_token(
+            TokenElevationTypeFull,
+            false,
+            SECURITY_MANDATORY_HIGH_RID
+        ));
+    }
 }

@@ -14,7 +14,7 @@ use crate::painter::GdiAAPainter;
 use crate::startup::Startup;
 use crate::trayicon::TrayIcon;
 use crate::utils::{
-    check_error, get_foreground_window, get_window_user_data, is_iconic_window,
+    check_error, get_foreground_window, get_window_pid, get_window_user_data, is_iconic_window,
     is_running_as_admin, is_window_valid, list_windows_with_cache, set_foreground_window,
     set_window_user_data, ProcessMetadataCache,
 };
@@ -22,7 +22,8 @@ use crate::utils::{
 use anyhow::{anyhow, Result};
 use parking_lot::Mutex;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
+    fs::OpenOptions,
     sync::{
         atomic::{AtomicBool, Ordering},
         LazyLock,
@@ -64,6 +65,8 @@ const DEFERRED_MESSAGE_CAPACITY: usize = 256;
 static APP_CALLBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DEFERRED_MESSAGES: LazyLock<Mutex<VecDeque<DeferredMessage>>> =
     LazyLock::new(|| Mutex::new(VecDeque::with_capacity(DEFERRED_MESSAGE_CAPACITY)));
+static PENDING_APP_DROPS: LazyLock<Mutex<Vec<PendingAppDrop>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 #[derive(Clone, Copy, Debug)]
 struct DeferredMessage {
@@ -71,6 +74,12 @@ struct DeferredMessage {
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingAppDrop {
+    hwnd: isize,
+    app_ptr: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,7 +371,17 @@ impl App {
         }
 
         match load_config_from_path(&source.path) {
-            Ok(_) => {
+            Ok(report) => {
+                if let Err(err) = validate_restart_config(&report.config) {
+                    error!("failed to validate runtime configuration before restart: {err:#}");
+                    alert!(
+                        "{}\n{}\n{err:#}",
+                        text(TextId::ConfigReloadFailed),
+                        source.path.display()
+                    );
+                    self.failed_reload_stamp = Some(current);
+                    return Ok(false);
+                }
                 info!(
                     "configuration changed; requesting restart path={}",
                     source.path.display()
@@ -390,9 +409,11 @@ impl App {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        if APP_CALLBACK_ACTIVE.load(Ordering::Acquire)
-            && !matches!(msg, WM_CLOSE | WM_DESTROY | WM_NCDESTROY)
-        {
+        if should_defer_message(APP_CALLBACK_ACTIVE.load(Ordering::Acquire), msg) {
+            if msg == WM_NCDESTROY {
+                defer_app_drop(hwnd);
+                return LRESULT(0);
+            }
             defer_message(DeferredMessage {
                 hwnd: hwnd.0 as isize,
                 msg,
@@ -557,8 +578,10 @@ impl App {
                 return Ok(LRESULT(0));
             }
             WM_NCDESTROY => {
-                if let Ok(Some(owner)) = take_app(hwnd) {
-                    drop(owner);
+                match take_app(hwnd) {
+                    Ok(Some(owner)) => drop(owner),
+                    Ok(None) => {}
+                    Err(err) => return Err(err),
                 }
                 return Ok(LRESULT(0));
             }
@@ -658,19 +681,28 @@ impl App {
                     .map(|(window, _)| *window)
                     .filter(|window| is_window_valid(*window))
                     .collect();
+                let current_pids: HashMap<isize, u32> = current_windows
+                    .iter()
+                    .filter_map(|window| {
+                        let pid = get_window_pid(*window);
+                        (pid != 0).then_some((window.0 as isize, pid))
+                    })
+                    .collect();
                 let windows_len = current_windows.len();
                 if windows_len < 2 {
                     self.switch_windows_state.cache = None;
                     return Ok(false);
                 }
                 let current_id = current_windows[0];
-                let mut index = 1.min(windows_len - 1);
+                let mut index = initial_window_index(windows_len, reverse);
                 let mut state_id = current_id;
                 let mut state_windows = current_windows.clone();
                 if let Some(cache) = self.switch_windows_state.cache.as_ref() {
                     if cache.module_path == module_path {
                         if self.switch_windows_state.modifier_released {
-                            if cache.active_hwnd != current_id {
+                            if cache.active_hwnd != current_id
+                                || !cached_window_is_current(cache, cache.active_hwnd)
+                            {
                                 if let Some(i) = current_windows
                                     .iter()
                                     .position(|window| *window == cache.active_hwnd)
@@ -679,12 +711,27 @@ impl App {
                                 }
                             }
                         } else {
-                            state_id = if current_windows.contains(&cache.active_hwnd) {
+                            state_id = if current_windows.contains(&cache.active_hwnd)
+                                && cached_window_is_current(cache, cache.active_hwnd)
+                            {
                                 cache.active_hwnd
                             } else {
                                 current_id
                             };
-                            state_windows = merge_window_order(&cache.windows, &current_windows);
+                            let cached_windows: Vec<HWND> = cache
+                                .windows
+                                .iter()
+                                .copied()
+                                .filter(|window| {
+                                    current_pids.get(&(window.0 as isize)).copied().is_some_and(
+                                        |pid| {
+                                            cache.window_pids.get(&(window.0 as isize)).copied()
+                                                == Some(pid)
+                                        },
+                                    )
+                                })
+                                .collect();
+                            state_windows = merge_window_order(&cached_windows, &current_windows);
                             index = next_window_index(cache.index, state_windows.len(), reverse)
                                 .unwrap_or(0);
                         }
@@ -712,6 +759,7 @@ impl App {
                     active_hwnd: state_id,
                     index,
                     windows: state_windows,
+                    window_pids: current_pids,
                 });
                 self.switch_windows_state.modifier_released = false;
                 if sequence != 0 {
@@ -726,7 +774,13 @@ impl App {
         let Some(mut cache) = self.switch_windows_state.cache.take() else {
             return false;
         };
-        cache.windows.retain(|window| is_window_valid(*window));
+        let cached_pids = cache.window_pids.clone();
+        cache.windows.retain(|window| {
+            cached_pids
+                .get(&(window.0 as isize))
+                .copied()
+                .is_some_and(|pid| is_window_identity_current(*window, pid))
+        });
         if cache.windows.len() < 2 {
             return false;
         }
@@ -760,12 +814,29 @@ impl App {
         );
         if let Some(mut state) = self.switch_apps_state.take() {
             state.apps.retain_mut(|entry| {
-                entry.windows.retain(|window| is_window_valid(*window));
+                let mut valid_windows = Vec::with_capacity(entry.windows.len());
+                let mut valid_pids = Vec::with_capacity(entry.window_pids.len());
+                for (window, pid) in entry.windows.iter().zip(entry.window_pids.iter()) {
+                    if is_window_identity_current(*window, *pid) {
+                        valid_windows.push(*window);
+                        valid_pids.push(*pid);
+                    }
+                }
+                entry.windows = valid_windows;
+                entry.window_pids = valid_pids;
                 if entry.windows.is_empty() {
                     return false;
                 }
-                if !entry.windows.contains(&entry.representative_hwnd) {
+                if entry
+                    .windows
+                    .iter()
+                    .zip(entry.window_pids.iter())
+                    .all(|(window, pid)| {
+                        *window != entry.representative_hwnd || *pid != entry.representative_pid
+                    })
+                {
                     entry.representative_hwnd = entry.windows[0];
+                    entry.representative_pid = entry.window_pids[0];
                 }
                 entry.window_count = entry.windows.len();
                 true
@@ -836,7 +907,12 @@ impl App {
                 name: app_name,
                 icon: module_hicon,
                 representative_hwnd: module_hwnd,
+                representative_pid: get_window_pid(module_hwnd),
                 window_count: valid_hwnds.len(),
+                window_pids: valid_hwnds
+                    .iter()
+                    .map(|window| get_window_pid(*window))
+                    .collect(),
                 windows: valid_hwnds,
             });
         }
@@ -896,10 +972,14 @@ impl App {
     fn do_switch_app(&mut self) {
         if let Some(state) = self.switch_apps_state.take() {
             if let Some(entry) = state.apps.get(state.index) {
-                if !set_foreground_window(entry.representative_hwnd) {
+                if is_window_identity_current(entry.representative_hwnd, entry.representative_pid)
+                    && set_foreground_window(entry.representative_hwnd)
+                {
+                    // The PID check prevents an HWND reused by another process from being activated.
+                } else {
                     warn!(
-                        "switch app target is no longer valid: {:?}",
-                        entry.representative_hwnd
+                        "switch app target is no longer valid or was reused: hwnd={:?} pid={}",
+                        entry.representative_hwnd, entry.representative_pid
                     );
                 }
             }
@@ -946,27 +1026,103 @@ fn with_app<T>(hwnd: HWND, callback: impl FnOnce(&mut App) -> Result<T>) -> Resu
     if APP_CALLBACK_ACTIVE.swap(true, Ordering::AcqRel) {
         return Err(anyhow!("Reentrant application callback was deferred"));
     }
+    let _callback_guard = AppCallbackGuard;
     let ptr = match check_error(|| get_window_user_data(hwnd)) {
         Ok(ptr) => ptr,
-        Err(err) => {
-            APP_CALLBACK_ACTIVE.store(false, Ordering::Release);
-            return Err(anyhow!("Failed to get window ptr, {err}"));
-        }
+        Err(err) => return Err(anyhow!("Failed to get window ptr, {err}")),
     };
     if ptr == 0 {
-        APP_CALLBACK_ACTIVE.store(false, Ordering::Release);
         return Err(anyhow!("Window app pointer is null"));
     }
 
     let app = unsafe { &mut *(ptr as *mut App) };
     if app.hwnd != hwnd {
-        APP_CALLBACK_ACTIVE.store(false, Ordering::Release);
         return Err(anyhow!("Window app pointer belongs to another window"));
     }
-    let result = callback(app);
-    APP_CALLBACK_ACTIVE.store(false, Ordering::Release);
-    drain_deferred_messages();
-    result
+    callback(app)
+}
+
+struct AppCallbackGuard;
+
+impl Drop for AppCallbackGuard {
+    fn drop(&mut self) {
+        APP_CALLBACK_ACTIVE.store(false, Ordering::Release);
+        release_pending_app_drops();
+        drain_deferred_messages();
+    }
+}
+
+fn defer_app_drop(hwnd: HWND) {
+    let already_pending = PENDING_APP_DROPS
+        .lock()
+        .iter()
+        .any(|pending| pending.hwnd == hwnd.0 as isize);
+    if already_pending {
+        return;
+    }
+
+    match take_app(hwnd) {
+        Ok(Some(owner)) => {
+            let app_ptr = Box::into_raw(owner) as usize;
+            PENDING_APP_DROPS.lock().push(PendingAppDrop {
+                hwnd: hwnd.0 as isize,
+                app_ptr,
+            });
+            debug!("deferred app drop hwnd={:?}", hwnd);
+        }
+        Ok(None) => {}
+        Err(err) => error!("failed to defer app drop hwnd={hwnd:?}: {err}"),
+    }
+}
+
+fn release_pending_app_drops() {
+    let pending = std::mem::take(&mut *PENDING_APP_DROPS.lock());
+    for pending in pending {
+        discard_deferred_messages_for(pending.hwnd);
+        unsafe {
+            drop(Box::from_raw(pending.app_ptr as *mut App));
+        }
+        debug!("released deferred app hwnd={}", pending.hwnd);
+    }
+}
+
+fn discard_deferred_messages_for(hwnd: isize) {
+    DEFERRED_MESSAGES
+        .lock()
+        .retain(|message| message.hwnd != hwnd);
+}
+
+fn should_defer_message(callback_active: bool, msg: u32) -> bool {
+    callback_active && !matches!(msg, WM_CLOSE | WM_DESTROY)
+}
+
+fn is_window_identity_current(hwnd: HWND, expected_pid: u32) -> bool {
+    expected_pid != 0 && is_window_valid(hwnd) && get_window_pid(hwnd) == expected_pid
+}
+
+fn validate_restart_config(config: &Config) -> Result<()> {
+    let Some(log_file) = config.log_file.as_ref() else {
+        return Ok(());
+    };
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .map(|_| ())
+        .map_err(|err| {
+            anyhow!(
+                "configured log file '{}' is not writable: {err}",
+                log_file.display()
+            )
+        })
+}
+
+fn cached_window_is_current(cache: &SwitchWindowsCache, hwnd: HWND) -> bool {
+    cache
+        .window_pids
+        .get(&(hwnd.0 as isize))
+        .copied()
+        .is_some_and(|pid| is_window_identity_current(hwnd, pid))
 }
 
 fn defer_message(message: DeferredMessage) {
@@ -1027,6 +1183,7 @@ struct SwitchWindowsCache {
     active_hwnd: HWND,
     index: usize,
     windows: Vec<HWND>,
+    window_pids: HashMap<isize, u32>,
 }
 
 fn merge_window_order(cached: &[HWND], current: &[HWND]) -> Vec<HWND> {
@@ -1063,13 +1220,26 @@ fn next_window_index(index: usize, len: usize, reverse: bool) -> Option<usize> {
     })
 }
 
+fn initial_window_index(len: usize, reverse: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if reverse {
+        len - 1
+    } else {
+        1.min(len - 1)
+    }
+}
+
 #[derive(Debug)]
 pub struct AppEntry {
     pub module_path: String,
     pub name: String,
     pub icon: HICON,
     pub representative_hwnd: HWND,
+    representative_pid: u32,
     pub window_count: usize,
+    window_pids: Vec<u32>,
     pub windows: Vec<HWND>,
 }
 
@@ -1082,7 +1252,10 @@ pub struct SwitchAppsState {
 
 #[cfg(test)]
 mod tests {
-    use super::next_window_index;
+    use super::{
+        initial_window_index, next_window_index, should_defer_message, WM_CLOSE, WM_DESTROY,
+        WM_NCDESTROY,
+    };
 
     #[test]
     fn next_window_index_handles_empty_lists() {
@@ -1100,5 +1273,21 @@ mod tests {
     fn next_window_index_wraps_in_both_directions() {
         assert_eq!(next_window_index(0, 3, true), Some(2));
         assert_eq!(next_window_index(2, 3, false), Some(0));
+    }
+
+    #[test]
+    fn initial_window_index_honors_first_reverse_navigation() {
+        assert_eq!(initial_window_index(0, false), 0);
+        assert_eq!(initial_window_index(1, true), 0);
+        assert_eq!(initial_window_index(3, false), 1);
+        assert_eq!(initial_window_index(3, true), 2);
+    }
+
+    #[test]
+    fn reentrant_ncdestroy_is_deferred_until_callback_finishes() {
+        assert!(should_defer_message(true, WM_NCDESTROY));
+        assert!(!should_defer_message(true, WM_CLOSE));
+        assert!(!should_defer_message(true, WM_DESTROY));
+        assert!(!should_defer_message(false, WM_NCDESTROY));
     }
 }
