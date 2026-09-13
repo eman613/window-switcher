@@ -738,7 +738,16 @@ impl WindowSnapshot {
 }
 
 fn is_valid_module_path(module_path: &str) -> bool {
-    !module_path.is_empty() && module_path != "C:\\Windows\\System32\\ApplicationFrameHost.exe"
+    if module_path.is_empty() {
+        return false;
+    }
+    let executable = module_path
+        .split("::")
+        .next()
+        .unwrap_or(module_path)
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    !executable.ends_with("\\applicationframehost.exe")
 }
 
 extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -749,7 +758,7 @@ extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
 
 #[cfg(test)]
 mod tests {
-    use super::ProcessMetadataCache;
+    use super::{is_valid_module_path, ProcessMetadataCache};
     use std::collections::HashSet;
 
     #[test]
@@ -799,5 +808,16 @@ mod tests {
 
         assert!(cache.module_paths.is_empty());
         assert!(cache.elevations.is_empty());
+    }
+
+    #[test]
+    fn module_path_filter_is_drive_and_separator_agnostic() {
+        assert!(!is_valid_module_path(
+            r"D:\Windows\System32\ApplicationFrameHost.exe"
+        ));
+        assert!(!is_valid_module_path(
+            r"C:/Windows/System32/ApplicationFrameHost.exe::appx::package"
+        ));
+        assert!(is_valid_module_path(r"E:\Apps\Example\app.exe"));
     }
 }

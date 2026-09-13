@@ -72,7 +72,9 @@ pub(crate) fn try_get_app_icon(
         return Some(icon);
     }
 
-    if module_path.starts_with("C:\\Program Files\\WindowsApps") {
+    let base_path = module_path.split("::").next().unwrap_or(module_path);
+    let normalized_base = base_path.replace('/', "\\").to_ascii_lowercase();
+    if normalized_base.contains("\\windowsapps\\") {
         if let Some(icon) =
             get_appx_logo_path(module_path).and_then(|image_path| load_image_as_hicon(&image_path))
         {
@@ -80,7 +82,6 @@ pub(crate) fn try_get_app_icon(
         }
     }
 
-    let base_path = module_path.split("::").next().unwrap_or(module_path);
     get_exe_icon(base_path).or_else(|| get_window_icon(hwnd))
 }
 
