@@ -9,7 +9,7 @@ use crate::icon_cache::{IconCache, MAX_SWITCH_APPS};
 use crate::icon_loader::WM_USER_ICON_READY;
 use crate::keyboard::{drain_keyboard_messages, KeyboardListener};
 use crate::localization::{text, TextId};
-use crate::metrics::StageTimer;
+use crate::metrics::{enabled as performance_metrics_enabled, record_keyboard_elapsed, StageTimer};
 use crate::painter::GdiAAPainter;
 use crate::startup::Startup;
 use crate::trayicon::TrayIcon;
@@ -28,6 +28,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         LazyLock,
     },
+    time::Instant,
 };
 use windows::core::{w, PCWSTR};
 use windows::Win32::{
@@ -462,13 +463,31 @@ impl App {
             }
             WM_USER_KEYBOARD_QUEUE => {
                 for message in drain_keyboard_messages() {
-                    if let Err(err) = Self::handle_message(
+                    let dispatch_started = performance_metrics_enabled().then(Instant::now);
+                    let sequence = message.sequence;
+                    let captured_at = message.captured_at;
+                    let result = Self::handle_message(
                         hwnd,
                         message.msg,
                         message.wparam,
                         message.lparam,
-                        message.sequence,
-                    ) {
+                        sequence,
+                    );
+                    if let Some(dispatch_started) = dispatch_started {
+                        record_keyboard_elapsed(
+                            "keyboard_ui_dispatch",
+                            sequence,
+                            dispatch_started.elapsed(),
+                        );
+                    }
+                    if let Some(captured_at) = captured_at {
+                        record_keyboard_elapsed(
+                            "keyboard_end_to_end",
+                            sequence,
+                            captured_at.elapsed(),
+                        );
+                    }
+                    if let Err(err) = result {
                         error!("queued keyboard message {} failed: {err}", message.msg);
                     }
                 }

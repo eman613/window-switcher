@@ -18,11 +18,18 @@ static ENABLED: OnceLock<bool> = OnceLock::new();
 static LOGGING_READY: AtomicBool = AtomicBool::new(false);
 static DROPPED_METRICS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DROP_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
-static PENDING: Mutex<Vec<(&'static str, Duration)>> = Mutex::new(Vec::new());
-static METRIC_TX: OnceLock<SyncSender<(&'static str, Duration)>> = OnceLock::new();
+static PENDING: Mutex<Vec<MetricSample>> = Mutex::new(Vec::new());
+static METRIC_TX: OnceLock<SyncSender<MetricSample>> = OnceLock::new();
 
 const METRIC_QUEUE_CAPACITY: usize = 256;
 const PENDING_QUEUE_CAPACITY: usize = 256;
+
+#[derive(Clone, Copy)]
+struct MetricSample {
+    stage: &'static str,
+    elapsed: Duration,
+    sequence: Option<u64>,
+}
 
 pub(crate) fn enabled() -> bool {
     *ENABLED.get_or_init(|| {
@@ -45,8 +52,8 @@ pub(crate) fn mark_logging_ready() {
     match thread::Builder::new()
         .name("window-switcher-metrics".to_string())
         .spawn(move || {
-            while let Ok((stage, elapsed)) = rx.recv() {
-                write_duration_now(stage, elapsed);
+            while let Ok(sample) = rx.recv() {
+                write_sample_now(sample);
             }
         }) {
         Ok(_) => {
@@ -61,8 +68,8 @@ pub(crate) fn mark_logging_ready() {
         LOGGING_READY.store(true, Ordering::Release);
         pending.drain(..).collect::<Vec<_>>()
     };
-    for (stage, elapsed) in pending {
-        write_duration(stage, elapsed);
+    for sample in pending {
+        write_sample(sample);
     }
 }
 
@@ -97,41 +104,69 @@ impl Drop for StageTimer {
 }
 
 fn log_duration(stage: &'static str, elapsed: Duration) {
+    log_sample(MetricSample {
+        stage,
+        elapsed,
+        sequence: None,
+    });
+}
+
+fn log_sample(sample: MetricSample) {
     if !LOGGING_READY.load(Ordering::Acquire) {
         let mut pending = PENDING
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !LOGGING_READY.load(Ordering::Acquire) {
             if pending.len() < PENDING_QUEUE_CAPACITY {
-                pending.push((stage, elapsed));
+                pending.push(sample);
             } else {
                 record_metric_drop("pending metric queue full");
             }
             return;
         }
     }
-    write_duration(stage, elapsed);
+    write_sample(sample);
 }
 
-fn write_duration(stage: &'static str, elapsed: Duration) {
+pub(crate) fn record_keyboard_elapsed(stage: &'static str, sequence: u64, elapsed: Duration) {
+    if !enabled() || sequence == 0 {
+        return;
+    }
+    log_sample(MetricSample {
+        stage,
+        elapsed,
+        sequence: Some(sequence),
+    });
+}
+
+fn write_sample(sample: MetricSample) {
     if let Some(tx) = METRIC_TX.get() {
-        match tx.try_send((stage, elapsed)) {
+        match tx.try_send(sample) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => record_metric_drop("metric queue full"),
             Err(TrySendError::Disconnected(_)) => record_metric_drop("metric writer stopped"),
         }
     } else {
-        write_duration_now(stage, elapsed);
+        write_sample_now(sample);
     }
 }
 
-fn write_duration_now(stage: &'static str, elapsed: Duration) {
-    info!(
-        "perf stage={} elapsed_us={} dropped_metrics={}",
-        stage,
-        elapsed.as_micros(),
-        DROPPED_METRICS.load(Ordering::Relaxed)
-    );
+fn write_sample_now(sample: MetricSample) {
+    match sample.sequence {
+        Some(sequence) => info!(
+            "perf stage={} sequence={} elapsed_us={} dropped_metrics={}",
+            sample.stage,
+            sequence,
+            sample.elapsed.as_micros(),
+            DROPPED_METRICS.load(Ordering::Relaxed)
+        ),
+        None => info!(
+            "perf stage={} elapsed_us={} dropped_metrics={}",
+            sample.stage,
+            sample.elapsed.as_micros(),
+            DROPPED_METRICS.load(Ordering::Relaxed)
+        ),
+    }
 }
 
 fn record_metric_drop(reason: &str) {

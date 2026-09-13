@@ -5,6 +5,7 @@ use crate::{
     },
     config::{Hotkey, SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID},
     foreground::IS_FOREGROUND_IN_BLACKLIST,
+    metrics::{enabled as performance_metrics_enabled, record_keyboard_elapsed},
 };
 
 use anyhow::{anyhow, Result};
@@ -16,7 +17,7 @@ use std::{
         mpsc, LazyLock,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
@@ -46,6 +47,7 @@ pub(crate) struct KeyboardMessage {
     pub(crate) wparam: WPARAM,
     pub(crate) lparam: LPARAM,
     pub(crate) sequence: u64,
+    pub(crate) captured_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -374,25 +376,24 @@ fn keyboard_message(msg: u32, lparam: isize, sequence: u64) -> KeyboardMessage {
         wparam: WPARAM(0),
         lparam: LPARAM(lparam),
         sequence,
+        captured_at: None,
     }
 }
 
-fn queue_message(msg: u32, wparam: WPARAM, lparam: LPARAM, sequence: u64) -> bool {
+fn queue_message(message: KeyboardMessage) -> bool {
     let Some(mut queue) = KEYBOARD_MESSAGES.try_lock() else {
-        debug!("keyboard message queue lock unavailable; dropping message {msg}");
+        debug!(
+            "keyboard message queue lock unavailable; dropping message {}",
+            message.msg
+        );
         return false;
     };
 
-    if !enqueue_message(
-        &mut queue,
-        KeyboardMessage {
-            msg,
-            wparam,
-            lparam,
-            sequence,
-        },
-    ) {
-        debug!("keyboard message queue full; dropping message {msg}");
+    if !enqueue_message(&mut queue, message) {
+        debug!(
+            "keyboard message queue full; dropping message {}",
+            message.msg
+        );
         return false;
     }
     drop(queue);
@@ -454,6 +455,18 @@ pub(crate) fn drain_keyboard_messages() -> Vec<KeyboardMessage> {
         queue.drain(..).collect::<Vec<_>>()
     };
 
+    if performance_metrics_enabled() {
+        for message in &messages {
+            if let Some(captured_at) = message.captured_at {
+                record_keyboard_elapsed(
+                    "keyboard_queue_wait",
+                    message.sequence,
+                    captured_at.elapsed(),
+                );
+            }
+        }
+    }
+
     KEYBOARD_WAKE_PENDING.store(0, Ordering::Release);
     let has_pending = !KEYBOARD_MESSAGES.lock().is_empty();
     if has_pending && KEYBOARD_WAKE_PENDING.swap(1, Ordering::AcqRel) == 0 && !post_keyboard_wake()
@@ -483,6 +496,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, w_param: WPARAM, l_param: LPA
     let Some(kbd_data) = (l_param.0 as *const KBDLLHOOKSTRUCT).as_ref() else {
         return CallNextHookEx(None, code, w_param, l_param);
     };
+    let hook_started = performance_metrics_enabled().then(Instant::now);
     let scan_code = kbd_data.scanCode;
     let is_key_pressed = kbd_data.flags.0 & LLKHF_UP.0 == 0;
     let extended = kbd_data.flags.0 & 0x01 != 0;
@@ -497,21 +511,39 @@ unsafe extern "system" fn keyboard_proc(code: i32, w_param: WPARAM, l_param: LPA
     );
     drop(keyboard_state);
 
+    let KeyboardTransition {
+        messages,
+        intercept,
+        reset_on_delivery_failure,
+    } = transition;
     let mut delivery_failed = false;
-    for message in transition.messages {
-        if !queue_message(
-            message.msg,
-            message.wparam,
-            message.lparam,
-            message.sequence,
-        ) {
+    let captured_at = hook_started;
+    let message_sequences = performance_metrics_enabled().then(|| {
+        messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>()
+    });
+    for mut message in messages {
+        message.captured_at = captured_at;
+        let enqueue_started = performance_metrics_enabled().then(Instant::now);
+        let sequence = message.sequence;
+        let queued = queue_message(message);
+        if !queued {
             delivery_failed = true;
+        } else if let Some(enqueue_started) = enqueue_started {
+            record_keyboard_elapsed("keyboard_enqueue", sequence, enqueue_started.elapsed());
         }
     }
-    if delivery_failed && transition.reset_on_delivery_failure {
+    if let (Some(hook_started), Some(message_sequences)) = (hook_started, message_sequences) {
+        for sequence in message_sequences {
+            record_keyboard_elapsed("keyboard_hook", sequence, hook_started.elapsed());
+        }
+    }
+    if delivery_failed && reset_on_delivery_failure {
         KEYBOARD_STATE.lock().reset_active();
     }
-    if transition.intercept && !delivery_failed {
+    if intercept && !delivery_failed {
         return LRESULT(1);
     }
     CallNextHookEx(None, code, w_param, l_param)
