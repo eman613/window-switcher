@@ -11,12 +11,16 @@ function Get-WindowSwitcherSampleMedian {
 function Get-WindowSwitcherResourceTrend {
     param([AllowEmptyCollection()][object[]] $Samples, [AllowEmptyCollection()][object[]] $Checkpoints)
 
-    $baseline = $Checkpoints | Where-Object { $_.Phase -eq 'Baseline' } | Select-Object -First 1
-    $settled = $Checkpoints | Where-Object { $_.Phase -eq 'Settled' } | Select-Object -Last 1
-    if ($null -eq $baseline) { $baseline = $Samples | Select-Object -First 1 }
-    if ($null -eq $settled) { $settled = $Samples | Select-Object -Last 1 }
+    $validSamples = @($Samples | Where-Object { $null -ne $_ })
+    $validCheckpoints = @($Checkpoints | Where-Object {
+        $null -ne $_ -and $_.PSObject.Properties['Phase']
+    })
+    $baseline = $validCheckpoints | Where-Object { $_.Phase -eq 'Baseline' } | Select-Object -First 1
+    $settled = $validCheckpoints | Where-Object { $_.Phase -eq 'Settled' } | Select-Object -Last 1
+    if ($null -eq $baseline) { $baseline = $validSamples | Select-Object -First 1 }
+    if ($null -eq $settled) { $settled = $validSamples | Select-Object -Last 1 }
     if ($null -eq $baseline -or $null -eq $settled) { return @() }
-    $closed = @($Checkpoints | Where-Object { $_.Phase -eq 'Closed' } | Sort-Object CompletedCycles)
+    $closed = @($validCheckpoints | Where-Object { $_.Phase -eq 'Closed' } | Sort-Object CompletedCycles)
     $windowCount = [int][math]::Min(10, [math]::Floor($closed.Count / 2))
     $fields = @('PrivateMemoryBytes', 'WorkingSetBytes', 'HandleCount', 'GdiObjects', 'UserObjects', 'ThreadCount')
     foreach ($field in $fields) {
@@ -44,7 +48,7 @@ function Get-WindowSwitcherResourceTrend {
             Baseline = $baseline.$field
             Settled = $settled.$field
             Delta = [long] $settled.$field - [long] $baseline.$field
-            Peak = ($Samples | Measure-Object $field -Maximum).Maximum
+            Peak = ($validSamples | Measure-Object $field -Maximum).Maximum
             FirstClosedMedian = $firstMedian
             LastClosedMedian = $lastMedian
             ClosedMedianDelta = if ($null -ne $firstMedian) { $lastMedian - $firstMedian } else { $null }
@@ -199,7 +203,11 @@ function Write-WindowSwitcherPerformanceReport {
         [AllowEmptyCollection()][object[]] $Samples, [string] $RunError
     )
 
-    $checkpoints = if ($null -ne $Runner) { @($Runner.Checkpoints) } else { @() }
+    $sampleItems = @($Samples | Where-Object { $null -ne $_ })
+    $checkpoints = if ($null -ne $Runner) {
+        @($Runner.Checkpoints | Where-Object { $null -ne $_ })
+    } else { @() }
+    $checkpoints = @($checkpoints)
     $completed = if ($null -ne $Runner) { $Runner.CompletedCycles } else { 0 }
     $logDiagnostics = Get-WindowSwitcherApplicationLogDiagnostics -Path $Session.LogPath
     $warnings = @($logDiagnostics.Warnings)
@@ -208,10 +216,10 @@ function Write-WindowSwitcherPerformanceReport {
     $logLineCount = $logDiagnostics.LineCount
     $metricDropCount = $logDiagnostics.MetricDropCount
     $keyboardMetrics = $logDiagnostics.KeyboardMetrics
-    $droppedSamples = if ($Samples.Count -gt 0) {
-        [long](($Samples | Measure-Object DroppedSamples -Maximum).Maximum)
+    $droppedSamples = if ($sampleItems.Count -gt 0) {
+        [long](($sampleItems | Measure-Object DroppedSamples -Maximum).Maximum)
     } else { 0 }
-    $trend = @(Get-WindowSwitcherResourceTrend -Samples $Samples -Checkpoints $checkpoints)
+    $trend = @(Get-WindowSwitcherResourceTrend -Samples $sampleItems -Checkpoints $checkpoints)
     $trendStatus = if ($null -eq $Runner) {
         [pscustomobject]@{ Status = 'NotRun'; Failures = @(); Limits = [ordered]@{} }
     } else {
@@ -232,7 +240,7 @@ function Write-WindowSwitcherPerformanceReport {
         $diagnosticsStatus -eq 'Failed') { 'Failed' } else { 'Completed' }
     $counterPath = Join-Path $Session.RunDirectory 'resources.csv'
     $checkpointPath = Join-Path $Session.RunDirectory 'closed-checkpoints.csv'
-    if ($Samples.Count -gt 0) { $Samples | Export-Csv -LiteralPath $counterPath -NoTypeInformation -Encoding UTF8 }
+    if ($sampleItems.Count -gt 0) { $sampleItems | Export-Csv -LiteralPath $counterPath -NoTypeInformation -Encoding UTF8 }
     if ($checkpoints.Count -gt 0) { $checkpoints | Export-Csv -LiteralPath $checkpointPath -NoTypeInformation -Encoding UTF8 }
     $summary = [pscustomobject]@{
         Status = $status
@@ -254,12 +262,12 @@ function Write-WindowSwitcherPerformanceReport {
         CloseAcknowledged = if ($null -ne $Runner) { $Runner.CloseAcknowledged } else { 0 }
         OpenedVerified = if ($null -ne $Runner) { $Runner.OpenedVerified } else { 0 }
         ClosedVerified = if ($null -ne $Runner) { $Runner.ClosedVerified } else { 0 }
-        SampleCount = $Samples.Count
+        SampleCount = $sampleItems.Count
         DroppedSampleCount = $droppedSamples
         PerformanceMetricDropCount = $metricDropCount
         CheckpointCount = $checkpoints.Count
         InitializedWindowReadyMilliseconds = $Session.InputIdleMilliseconds
-        ElapsedMilliseconds = if ($null -ne $Runner) { $Runner.ElapsedMilliseconds } elseif ($Samples.Count -gt 0) { $Samples[-1].ElapsedMilliseconds } else { 0 }
+        ElapsedMilliseconds = if ($null -ne $Runner) { $Runner.ElapsedMilliseconds } elseif ($sampleItems.Count -gt 0) { $sampleItems[-1].ElapsedMilliseconds } else { 0 }
         ResourceTrend = $trend
         ResourceTrendLimits = $trendStatus.Limits
         ApplicationLogPresent = $logPresent

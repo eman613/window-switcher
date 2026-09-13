@@ -85,6 +85,14 @@ Invoke-PerformanceTest 'keyboard metrics preserve sequence stages and p99' {
     Assert-PerformanceTest ($metrics.EndToEndP99Microseconds -eq 30) 'Keyboard end-to-end P99 was incorrect.'
 }
 
+Invoke-PerformanceTest 'manual reports tolerate empty resource checkpoints' {
+    $trend = @(Get-WindowSwitcherResourceTrend -Samples @([pscustomobject]@{
+        PrivateMemoryBytes = 1; WorkingSetBytes = 1; HandleCount = 1
+        GdiObjects = 1; UserObjects = 1; ThreadCount = 1
+    }) -Checkpoints @())
+    Assert-PerformanceTest ($trend.Count -eq 6 -and $null -eq $trend[0].ClosedMedianDelta) 'Manual resource trend did not tolerate empty checkpoints.'
+}
+
 Invoke-PerformanceTest 'complete cycles distinguish warmup, acknowledgements and visibility' {
     $target = [WindowSwitcher.Performance.Tests.FakeCycleTarget]::new()
     $options = New-PerformanceTestOptions
