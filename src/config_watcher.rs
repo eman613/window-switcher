@@ -73,6 +73,7 @@ fn watch_config_file(
 ) {
     let mut candidate: Option<(ConfigFileStamp, Instant)> = None;
     let mut inspection_error_reported = false;
+    let mut notification_error_reported = false;
     loop {
         {
             let mut stopping = signal.stopping.lock();
@@ -109,9 +110,14 @@ fn watch_config_file(
                 if let Err(err) = unsafe {
                     PostMessageW(Some(hwnd), message, WPARAM::default(), LPARAM::default())
                 } {
-                    warn!("failed to notify config change: {err}");
-                    break;
+                    if !notification_error_reported {
+                        warn!("failed to notify config change: {err}");
+                        notification_error_reported = true;
+                    }
+                    candidate = Some((current, Instant::now()));
+                    continue;
                 }
+                notification_error_reported = false;
                 observed = current;
                 candidate = None;
             }
