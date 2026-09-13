@@ -11,8 +11,8 @@ use windows::Win32::{
 
 const BADGE_HEIGHT_NUMERATOR: i32 = 3;
 const BADGE_HEIGHT_DENOMINATOR: i32 = 8;
-const BADGE_EXTRA_WIDTH: i32 = 8;
-const BADGE_OFFSET: i32 = 3;
+const BADGE_EXTRA_WIDTH_DIP: i32 = 8;
+const BADGE_OFFSET_DIP: i32 = 3;
 const BADGE_BORDER_SIZE: i32 = 1;
 pub(crate) const BADGE_BACKGROUND_COLOR: u32 = colorref(107, 79, 52);
 pub(crate) const BADGE_BORDER_COLOR: u32 = colorref(245, 232, 215);
@@ -41,12 +41,20 @@ pub(crate) fn badge_label(window_count: usize, max_count: usize) -> Option<Strin
     }
 }
 
-pub(crate) fn badge_geometry(label: &str, icon_size: i32, item_size: i32) -> Option<BadgeGeometry> {
+pub(crate) fn badge_geometry(
+    label: &str,
+    icon_size: i32,
+    item_size: i32,
+    dpi: u32,
+) -> Option<BadgeGeometry> {
     if label.is_empty() || icon_size <= 0 || item_size <= 0 {
         return None;
     }
 
-    let available_size = item_size.saturating_sub(BADGE_OFFSET.saturating_mul(2));
+    let dpi = dpi.max(1);
+    let offset = dip_to_px(BADGE_OFFSET_DIP, dpi);
+    let extra_width = dip_to_px(BADGE_EXTRA_WIDTH_DIP, dpi);
+    let available_size = item_size.saturating_sub(offset.saturating_mul(2));
     if available_size <= 0 {
         return None;
     }
@@ -57,15 +65,18 @@ pub(crate) fn badge_geometry(label: &str, icon_size: i32, item_size: i32) -> Opt
         .unwrap_or(0)
         .max(1)
         .min(available_size);
-    let extra_width =
-        BADGE_EXTRA_WIDTH.saturating_mul(label.chars().count().saturating_sub(1) as i32);
+    let extra_width = extra_width.saturating_mul(label.chars().count().saturating_sub(1) as i32);
     let width = height.saturating_add(extra_width).min(available_size);
 
     (width > 0 && height > 0).then_some(BadgeGeometry {
         width,
         height,
-        offset: BADGE_OFFSET,
+        offset,
     })
+}
+
+fn dip_to_px(value: i32, dpi: u32) -> i32 {
+    ((i64::from(value) * i64::from(dpi) + 95) / 96).clamp(1, i64::from(i32::MAX)) as i32
 }
 
 pub(crate) fn create_badge_font(badge_height: i32, scale_factor: i32) -> Option<HFONT> {
@@ -247,7 +258,7 @@ mod tests {
     #[test]
     fn badge_geometry_scales_with_icon_and_clamps_to_item() {
         assert_eq!(
-            badge_geometry("2", 64, 72),
+            badge_geometry("2", 64, 72, 96),
             Some(BadgeGeometry {
                 width: 24,
                 height: 24,
@@ -255,7 +266,7 @@ mod tests {
             })
         );
         assert_eq!(
-            badge_geometry("99", 64, 72),
+            badge_geometry("99", 64, 72, 96),
             Some(BadgeGeometry {
                 width: 32,
                 height: 24,
@@ -263,14 +274,22 @@ mod tests {
             })
         );
         assert_eq!(
-            badge_geometry("99+", 16, 20),
+            badge_geometry("99+", 16, 20, 96),
             Some(BadgeGeometry {
                 width: 14,
                 height: 6,
                 offset: 3,
             })
         );
-        assert_eq!(badge_geometry("", 64, 72), None);
-        assert_eq!(badge_geometry("2", 0, 72), None);
+        assert_eq!(
+            badge_geometry("99", 64, 72, 144),
+            Some(BadgeGeometry {
+                width: 36,
+                height: 24,
+                offset: 5,
+            })
+        );
+        assert_eq!(badge_geometry("", 64, 72, 96), None);
+        assert_eq!(badge_geometry("2", 0, 72, 96), None);
     }
 }

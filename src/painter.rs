@@ -670,7 +670,7 @@ fn draw_icons(
         .map(BrushGuard::new)
         .transpose()?;
     let badge_font = if has_badges {
-        badge_geometry("2", icon_size, item_size)
+        badge_geometry("2", icon_size, item_size, layout.monitor.dpi)
             .and_then(|geometry| create_badge_font(geometry.height, render_scale))
             .map(FontGuard::new)
             .transpose()?
@@ -724,7 +724,9 @@ fn draw_icons(
 
         if show_badge {
             if let Some(label) = badge_label(entry.window_count, badge_max) {
-                if let Some(geometry) = badge_geometry(&label, icon_size, item_size) {
+                if let Some(geometry) =
+                    badge_geometry(&label, icon_size, item_size, layout.monitor.dpi)
+                {
                     let scaled_offset = geometry.offset * render_scale;
                     let scaled_width = geometry.width * render_scale;
                     let scaled_height = geometry.height * render_scale;
