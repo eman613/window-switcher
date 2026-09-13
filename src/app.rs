@@ -813,6 +813,10 @@ impl App {
                 .unwrap_or(0)
         );
         if let Some(mut state) = self.switch_apps_state.take() {
+            let selected_key = state
+                .apps
+                .get(state.index)
+                .map(|entry| entry.module_path.clone());
             state.apps.retain_mut(|entry| {
                 let mut valid_windows = Vec::with_capacity(entry.windows.len());
                 let mut valid_pids = Vec::with_capacity(entry.window_pids.len());
@@ -853,7 +857,13 @@ impl App {
                 return Ok(());
             }
 
-            state.index = state.index.min(state.apps.len() - 1);
+            let current_keys: Vec<&str> = state
+                .apps
+                .iter()
+                .map(|entry| entry.module_path.as_str())
+                .collect();
+            state.index =
+                refreshed_selection_index(selected_key.as_deref(), &current_keys, state.index);
             if reverse {
                 if state.index == 0 {
                     state.index = state.apps.len() - 1;
@@ -1231,6 +1241,16 @@ fn initial_window_index(len: usize, reverse: bool) -> usize {
     }
 }
 
+fn refreshed_selection_index(
+    selected_key: Option<&str>,
+    current_keys: &[&str],
+    previous_index: usize,
+) -> usize {
+    selected_key
+        .and_then(|key| current_keys.iter().position(|candidate| *candidate == key))
+        .unwrap_or_else(|| previous_index.min(current_keys.len().saturating_sub(1)))
+}
+
 #[derive(Debug)]
 pub struct AppEntry {
     pub module_path: String,
@@ -1253,8 +1273,8 @@ pub struct SwitchAppsState {
 #[cfg(test)]
 mod tests {
     use super::{
-        initial_window_index, next_window_index, should_defer_message, WM_CLOSE, WM_DESTROY,
-        WM_NCDESTROY,
+        initial_window_index, next_window_index, refreshed_selection_index, should_defer_message,
+        WM_CLOSE, WM_DESTROY, WM_NCDESTROY,
     };
 
     #[test]
@@ -1281,6 +1301,13 @@ mod tests {
         assert_eq!(initial_window_index(1, true), 0);
         assert_eq!(initial_window_index(3, false), 1);
         assert_eq!(initial_window_index(3, true), 2);
+    }
+
+    #[test]
+    fn refreshed_selection_preserves_group_before_step() {
+        assert_eq!(refreshed_selection_index(Some("B"), &["B", "C"], 1), 0);
+        assert_eq!(refreshed_selection_index(Some("B"), &["A", "C"], 1), 1);
+        assert_eq!(refreshed_selection_index(None, &["A", "B"], 9), 1);
     }
 
     #[test]
