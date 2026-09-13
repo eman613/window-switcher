@@ -3,7 +3,7 @@ use windows::core::w;
 use super::RegKey;
 
 pub fn is_light_theme() -> bool {
-    let Ok(reg_key) = RegKey::new_hkcu(
+    let Ok(reg_key) = RegKey::open_hkcu_read(
         w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
         w!("SystemUsesLightTheme"),
     ) else {

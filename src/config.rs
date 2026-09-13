@@ -778,7 +778,7 @@ impl Config {
     }
 
     fn system_switcher_only_current_desktop() -> bool {
-        let alt_tab_filter = RegKey::new_hkcu(
+        let alt_tab_filter = RegKey::open_hkcu_read(
             w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"),
             w!("VirtualDesktopAltTabFilter"),
         )

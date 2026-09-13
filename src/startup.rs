@@ -124,7 +124,7 @@ impl Startup {
 }
 
 fn reg_key() -> Result<RegKey> {
-    RegKey::new_hkcu(HKEY_RUN, HKEY_NAME)
+    RegKey::open_hkcu_read(HKEY_RUN, HKEY_NAME)
 }
 
 fn reg_is_enable(exe_path: &[u16]) -> Result<bool> {
@@ -139,7 +139,7 @@ fn reg_is_enable(exe_path: &[u16]) -> Result<bool> {
 }
 
 fn reg_enable(exe_path: &[u16]) -> Result<()> {
-    let key = reg_key()?;
+    let key = RegKey::new_hkcu(HKEY_RUN, HKEY_NAME)?;
     let path = String::from_utf16_lossy(exe_path);
     let quoted = format!("\"{path}\"");
     let path_utf16 = quoted.encode_utf16().collect::<Vec<_>>();
@@ -149,7 +149,7 @@ fn reg_enable(exe_path: &[u16]) -> Result<()> {
 }
 
 fn reg_disable(exe_path: &[u16]) -> Result<()> {
-    let key = reg_key()?;
+    let key = RegKey::new_hkcu(HKEY_RUN, HKEY_NAME)?;
     let value = key.get_value()?;
     let Some(value) = value else {
         return Ok(());
