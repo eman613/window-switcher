@@ -29,6 +29,8 @@ const ICON_RESULT_SEND_DELAY: Duration = Duration::from_millis(1);
 const ICON_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const ICON_WORKER_STOP_BUDGET: Duration = Duration::from_secs(2);
 const ICON_WORKER_STOP_POLL: Duration = Duration::from_millis(10);
+const ICON_WAKE_SEND_RETRIES: usize = 5;
+const ICON_WAKE_SEND_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Debug)]
 struct IconRequest {
@@ -320,7 +322,7 @@ fn run_worker(
         if should_wake {
             // One wake drains the whole completed batch and produces a single
             // static-layer repaint instead of one repaint per icon.
-            post_icon_ready(hwnd, &wake_pending);
+            post_icon_ready(hwnd, &wake_pending, &stop);
         }
     }
 
@@ -363,23 +365,36 @@ fn destroy_result_icon(result: &IconLoadResult) {
     }
 }
 
-fn post_icon_ready(hwnd: isize, wake_pending: &AtomicBool) {
+fn post_icon_ready(hwnd: isize, wake_pending: &AtomicBool, stop: &AtomicBool) {
     if hwnd == 0 || wake_pending.swap(true, Ordering::AcqRel) {
         return;
     }
-    if unsafe {
-        PostMessageW(
-            Some(HWND(hwnd as _)),
-            WM_USER_ICON_READY,
-            WPARAM(0),
-            LPARAM(0),
-        )
+    for attempt in 0..ICON_WAKE_SEND_RETRIES {
+        if stop.load(Ordering::Acquire) {
+            wake_pending.store(false, Ordering::Release);
+            return;
+        }
+        if unsafe {
+            PostMessageW(
+                Some(HWND(hwnd as _)),
+                WM_USER_ICON_READY,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        }
+        .is_ok()
+        {
+            return;
+        }
+        if attempt + 1 < ICON_WAKE_SEND_RETRIES {
+            thread::sleep(ICON_WAKE_SEND_DELAY);
+        }
     }
-    .is_err()
-    {
-        wake_pending.store(false, Ordering::Release);
-        debug!("failed to post icon loader completion message");
-    }
+    wake_pending.store(false, Ordering::Release);
+    warn!(
+        "failed to post icon loader completion message after {} attempts",
+        ICON_WAKE_SEND_RETRIES
+    );
 }
 
 fn destroy_icon(raw_hicon: isize) {
