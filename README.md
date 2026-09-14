@@ -67,6 +67,12 @@ hotkey = alt+tab
 # Ignore minimal windows
 ignore_minimal = no
 
+# Show the number of windows in the top-right corner of app icons: yes/no
+show_badge = yes
+
+# Maximum number shown before using the `N+` format (2-9999)
+badge_max = 99
+
 # Only switch apps within the current virtual desktops: yes/no/auto
 only_current_desktop = auto
 ```

@@ -10,6 +10,9 @@ use crate::utils::{get_exe_folder, RegKey};
 
 pub const SWITCH_WINDOWS_HOTKEY_ID: u32 = 1;
 pub const SWITCH_APPS_HOTKEY_ID: u32 = 2;
+pub const DEFAULT_BADGE_MAX: u32 = 99;
+const MIN_BADGE_MAX: u32 = 2;
+const MAX_BADGE_MAX: u32 = 9999;
 
 const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 
@@ -26,6 +29,8 @@ pub struct Config {
     pub switch_apps_hotkey: Vec<Hotkey>,
     pub switch_apps_ignore_minimal: bool,
     pub switch_apps_override_icons: IndexMap<String, String>,
+    pub switch_apps_show_badge: bool,
+    pub switch_apps_badge_max: u32,
     switch_apps_only_current_desktop: Option<bool>,
 }
 
@@ -53,6 +58,8 @@ impl Default for Config {
             .unwrap()],
             switch_apps_ignore_minimal: false,
             switch_apps_override_icons: Default::default(),
+            switch_apps_show_badge: true,
+            switch_apps_badge_max: DEFAULT_BADGE_MAX,
             switch_apps_only_current_desktop: None,
         }
     }
@@ -130,6 +137,18 @@ impl Config {
                             .map(|(k, v)| (k.to_lowercase(), v.to_string()))
                     })
                     .collect();
+            }
+            if let Some(v) = section.get("show_badge").and_then(Config::to_bool) {
+                conf.switch_apps_show_badge = v;
+            }
+            if let Some(v) = section.get("badge_max") {
+                match parse_badge_max(v) {
+                    Some(max) => conf.switch_apps_badge_max = max,
+                    None => warn!(
+                        "Invalid switch-apps.badge_max '{}', using {}",
+                        v, DEFAULT_BADGE_MAX
+                    ),
+                }
             }
 
             if let Some(v) = section
@@ -362,6 +381,14 @@ fn normalize_path_value(value: &str) -> String {
     value.replace("\\\\", "\\")
 }
 
+fn parse_badge_max(value: &str) -> Option<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|value| (MIN_BADGE_MAX..=MAX_BADGE_MAX).contains(value))
+}
+
 fn parse_hotkeys(id: u32, name: &str, value: &str) -> Result<Vec<Hotkey>> {
     let parts: Vec<&str> = value.split("||").collect();
     let mut hotkeys = vec![];
@@ -401,5 +428,26 @@ mod tests {
         assert_eq!(hotkeys.len(), 1);
         assert_eq!(hotkeys[0].modifier, [0x38, 0x38]);
         assert_eq!(hotkeys[0].code, 0x29);
+    }
+
+    #[test]
+    fn test_badge_defaults_and_limits() {
+        let config = Config::load(&Ini::load_from_str("[switch-apps]\n").unwrap()).unwrap();
+        assert!(config.switch_apps_show_badge);
+        assert_eq!(config.switch_apps_badge_max, DEFAULT_BADGE_MAX);
+
+        assert_eq!(parse_badge_max("2"), Some(2));
+        assert_eq!(parse_badge_max("9999"), Some(9999));
+        assert_eq!(parse_badge_max("1"), None);
+        assert_eq!(parse_badge_max("10000"), None);
+        assert_eq!(parse_badge_max("not-a-number"), None);
+    }
+
+    #[test]
+    fn test_badge_config_values() {
+        let ini = Ini::load_from_str("[switch-apps]\nshow_badge = no\nbadge_max = 250\n").unwrap();
+        let config = Config::load(&ini).unwrap();
+        assert!(!config.switch_apps_show_badge);
+        assert_eq!(config.switch_apps_badge_max, 250);
     }
 }
