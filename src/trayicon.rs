@@ -6,8 +6,8 @@ use windows::Win32::{
     Foundation::{HWND, POINT},
     UI::{
         Shell::{
-            Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-            NOTIFYICONDATAW,
+            Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_ERROR, NIM_ADD,
+            NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
         },
         WindowsAndMessaging::{
             AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, GetCursorPos,
@@ -41,6 +41,17 @@ impl TrayIcon {
 
     pub fn exist(&mut self) -> bool {
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &self.data) }.as_bool()
+    }
+
+    pub(crate) fn notify_error(&self, message: &str) -> Result<()> {
+        let mut notification = self.data;
+        notification.uFlags = NIF_INFO;
+        notification.dwInfoFlags = NIIF_ERROR;
+        notification.szInfoTitle = notification_text("配置未应用");
+        notification.szInfo = notification_text(message);
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &notification) }
+            .ok()
+            .map_err(|err| anyhow!("Failed to show configuration notification, {err}"))
     }
 
     pub fn show(&mut self, startup: bool) -> Result<()> {
@@ -83,6 +94,7 @@ impl TrayIcon {
         tooltip.push(0);
         let tooltip: [u16; 128] = tooltip.try_into().unwrap();
         NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             uID: WM_USER_TRAYICON,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: WM_USER_TRAYICON,
@@ -102,6 +114,21 @@ impl TrayIcon {
             Ok(hmenu)
         }
     }
+}
+
+fn notification_text<const N: usize>(text: &str) -> [u16; N] {
+    let mut result = [0; N];
+    let mut length = 0;
+    for character in text.chars() {
+        let mut units = [0; 2];
+        let encoded = character.encode_utf16(&mut units);
+        if length + encoded.len() >= N {
+            break;
+        }
+        result[length..length + encoded.len()].copy_from_slice(encoded);
+        length += encoded.len();
+    }
+    result
 }
 
 impl Drop for TrayIcon {

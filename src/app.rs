@@ -1,4 +1,9 @@
-use crate::config::{edit_config_file, Config};
+use crate::badge::BadgeStyle;
+use crate::config::{
+    edit_config_file,
+    watch::{ConfigEvent, ConfigWatcher},
+    Config, LoadedConfig,
+};
 use crate::foreground::ForegroundWatcher;
 use crate::keyboard::KeyboardListener;
 use crate::painter::GdiAAPainter;
@@ -17,18 +22,19 @@ use windows::Win32::{
     Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyIcon, DispatchMessageW, GetMessageW,
-        GetWindowLongPtrW, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
+        CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetMessageW,
+        GetWindowLongPtrW, IsWindow, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
         RegisterWindowMessageW, SetWindowLongPtrW, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
         CW_USEDEFAULT, GWL_STYLE, HICON, HTCLIENT, IDC_ARROW, MSG, WINDOW_STYLE, WM_COMMAND,
-        WM_ERASEBKGND, WM_LBUTTONUP, WM_NCHITTEST, WM_RBUTTONUP, WNDCLASSW, WS_CAPTION,
-        WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCDESTROY, WM_NCHITTEST, WM_RBUTTONUP,
+        WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     },
 };
 
 pub const NAME: PCWSTR = w!("Window Switcher");
 pub const WM_USER_TRAYICON: u32 = 6000;
 pub const WM_USER_REGISTER_TRAYICON: u32 = 6001;
+pub const WM_USER_CONFIG_CHANGED: u32 = 6002;
 pub const WM_USER_SWITCH_APPS: u32 = 6010;
 pub const WM_USER_SWITCH_APPS_DONE: u32 = 6011;
 pub const WM_USER_SWITCH_APPS_CANCEL: u32 = 6012;
@@ -38,9 +44,9 @@ pub const IDM_EXIT: u32 = 1;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
 
-pub fn start(config: &Config) -> Result<()> {
-    info!("start config={config:?}");
-    App::start(config)
+pub fn start(loaded: &LoadedConfig) -> Result<()> {
+    info!("start config={:?}", loaded.config);
+    App::start(loaded)
 }
 
 /// Listen to this message to recreate the tray icon since the taskbar has been recreated.
@@ -52,6 +58,7 @@ pub struct App {
     trayicon: Option<TrayIcon>,
     startup: Startup,
     config: Config,
+    config_watcher: Option<ConfigWatcher>,
     switch_windows_state: SwitchWindowsState,
     switch_apps_state: Option<SwitchAppsState>,
     cached_icons: HashMap<String, HICON>,
@@ -59,8 +66,20 @@ pub struct App {
 }
 
 impl App {
-    pub fn start(config: &Config) -> Result<()> {
+    pub fn start(loaded: &LoadedConfig) -> Result<()> {
         let hwnd = Self::create_window()?;
+        let result = Self::run_window(hwnd, loaded);
+        set_window_user_data(hwnd, 0);
+        if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            if let Err(err) = unsafe { DestroyWindow(hwnd) } {
+                error!("Failed to destroy application window: {err}");
+            }
+        }
+        result
+    }
+
+    fn run_window(hwnd: HWND, loaded: &LoadedConfig) -> Result<()> {
+        let config = &loaded.config;
         let painter = GdiAAPainter::new(hwnd)?;
 
         let _foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist)?;
@@ -76,12 +95,13 @@ impl App {
 
         let startup = Startup::init(is_admin)?;
 
-        let mut app = App {
+        let mut app = Box::new(App {
             hwnd,
             is_admin,
             trayicon,
             startup,
             config: config.clone(),
+            config_watcher: None,
             switch_windows_state: SwitchWindowsState {
                 cache: None,
                 modifier_released: true,
@@ -89,15 +109,21 @@ impl App {
             switch_apps_state: None,
             cached_icons: Default::default(),
             painter,
-        };
+        });
 
         app.set_trayicon();
+        if config.auto_restart {
+            app.config_watcher = Some(ConfigWatcher::start(loaded, hwnd)?);
+        }
 
-        let app_ptr = Box::into_raw(Box::new(app)) as _;
+        let app_ptr = app.as_mut() as *mut App as _;
         check_error(|| set_window_user_data(hwnd, app_ptr))
             .map_err(|err| anyhow!("Failed to set window ptr, {err}"))?;
 
-        Self::eventloop()
+        let result = Self::eventloop();
+        app.config_watcher.take();
+        set_window_user_data(hwnd, 0);
+        result
     }
 
     fn eventloop() -> Result<()> {
@@ -208,6 +234,29 @@ impl App {
 
     fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<LRESULT> {
         match msg {
+            WM_USER_CONFIG_CHANGED => {
+                let app = get_app(hwnd)?;
+                match app
+                    .config_watcher
+                    .as_ref()
+                    .and_then(ConfigWatcher::next_event)
+                {
+                    Some(ConfigEvent::Changed) => match crate::restart::spawn_replacement() {
+                        Ok(_) => unsafe { PostQuitMessage(0) },
+                        Err(err) => app.report_config_error(&format!("{err:#}")),
+                    },
+                    Some(ConfigEvent::Invalid(message)) => app.report_config_error(&message),
+                    None => {}
+                }
+                return Ok(LRESULT(0));
+            }
+            WM_DESTROY => {
+                unsafe { PostQuitMessage(0) };
+                return Ok(LRESULT(0));
+            }
+            WM_NCDESTROY => {
+                set_window_user_data(hwnd, 0);
+            }
             WM_USER_TRAYICON => {
                 let app = get_app(hwnd)?;
                 if let Some(trayicon) = app.trayicon.as_mut() {
@@ -272,19 +321,14 @@ impl App {
                 let id = value & 0xffff;
                 if kind == 0 {
                     match id {
-                        IDM_EXIT => {
-                            if let Ok(app) = get_app(hwnd) {
-                                unsafe { drop(Box::from_raw(app)) }
-                            }
-                            unsafe { PostQuitMessage(0) }
-                        }
+                        IDM_EXIT => unsafe { PostQuitMessage(0) },
                         IDM_STARTUP => {
                             let app = get_app(hwnd)?;
                             app.startup.toggle()?;
                         }
                         IDM_CONFIGURE => {
                             if let Err(err) = edit_config_file() {
-                                alert!("{err}");
+                                get_app(hwnd)?.report_config_error(&format!("{err:#}"));
                             }
                         }
                         _ => {}
@@ -301,6 +345,25 @@ impl App {
             _ => {}
         }
         Ok(unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) })
+    }
+
+    fn report_config_error(&mut self, message: &str) {
+        error!("{message}");
+        if let Some(trayicon) = self.trayicon.as_ref() {
+            match trayicon.notify_error(message) {
+                Ok(()) => return,
+                Err(err) => error!("Failed to display config notification: {err}"),
+            }
+        }
+        let message = message.to_owned();
+        if let Err(err) = std::thread::Builder::new()
+            .name("config-error".into())
+            .spawn(move || {
+                alert!("{message}");
+            })
+        {
+            error!("Failed to display config error: {err}");
+        }
     }
 
     fn switch_windows(&mut self, hwnd: HWND, reverse: bool) -> Result<bool> {
@@ -452,6 +515,7 @@ impl App {
             index,
             show_badge: self.config.switch_apps_show_badge,
             badge_max: self.config.switch_apps_badge_max,
+            badge_style: BadgeStyle::from_config(&self.config),
         };
         self.switch_apps_state = Some(state);
         debug!("switch apps, new state:{:?}", self.switch_apps_state);
@@ -497,6 +561,11 @@ fn get_app(hwnd: HWND) -> Result<&'static mut App> {
     unsafe {
         let ptr = check_error(|| get_window_user_data(hwnd))
             .map_err(|err| anyhow!("Failed to get window ptr, {err}"))?;
+        if ptr == 0 {
+            return Err(anyhow!(
+                "Application window is not initialized or is closing"
+            ));
+        }
         let tx: &mut App = &mut *(ptr as *mut App);
         Ok(tx)
     }
@@ -514,6 +583,7 @@ pub struct SwitchAppsState {
     pub index: usize,
     pub show_badge: bool,
     pub badge_max: u32,
+    pub badge_style: BadgeStyle,
 }
 
 #[derive(Debug, Clone, Copy)]

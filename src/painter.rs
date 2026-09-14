@@ -1,4 +1,5 @@
 use crate::app::SwitchAppsState;
+use crate::badge::draw_badge;
 use crate::utils::{check_error, get_moinitor_rect, is_light_theme, is_win11};
 
 use anyhow::{Context, Result};
@@ -6,13 +7,10 @@ use windows::Win32::{
     Foundation::{COLORREF, HWND, POINT, RECT, SIZE},
     Graphics::{
         Gdi::{
-            CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateRoundRectRgn,
-            CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect, FillRgn, GetDC,
-            GetTextExtentPoint32W, ReleaseDC, SelectObject, SetBkMode, SetStretchBltMode,
-            SetTextColor, StretchBlt, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, CLEARTYPE_QUALITY,
-            CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE,
-            DT_VCENTER, FF_DONTCARE, FW_SEMIBOLD, HALFTONE, HBITMAP, HDC, HPALETTE,
-            OUT_DEFAULT_PRECIS, SRCCOPY, TRANSPARENT,
+            CreateCompatibleBitmap, CreateCompatibleDC, CreateRoundRectRgn, CreateSolidBrush,
+            DeleteDC, DeleteObject, FillRect, FillRgn, GetDC, ReleaseDC, SelectObject,
+            SetStretchBltMode, StretchBlt, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HALFTONE,
+            HBITMAP, HDC, HPALETTE, SRCCOPY,
         },
         GdiPlus::{
             FillModeAlternate, GdipAddPathArc, GdipClosePathFigure, GdipCreateBitmapFromHBITMAP,
@@ -39,8 +37,6 @@ pub const FG_DARK_COLOR: u32 = 0x3b3b3b;
 pub const BG_LIGHT_COLOR: u32 = 0xe0e0e0;
 pub const FG_LIGHT_COLOR: u32 = 0xf2f2f2;
 pub const ALPHA_MASK: u32 = 0xff000000;
-pub const BADGE_BG_COLOR: u32 = 0x303030;
-pub const BADGE_FG_COLOR: u32 = 0xffffff;
 pub const ICON_SIZE_BASE: i32 = 64;
 pub const WINDOW_BORDER_SIZE_BASE: i32 = 10;
 pub const ICON_BORDER_SIZE_BASE: i32 = 4;
@@ -403,15 +399,23 @@ fn draw_icons(
             );
 
             if state.show_badge {
-                draw_badge(
+                if let Err(err) = draw_badge(
                     hdc_scaled,
                     entry.window_count,
                     state.badge_max,
-                    cx,
-                    scaled_border_size,
-                    scaled_icon_inner_size,
-                    scaled_border_size,
-                );
+                    RECT {
+                        left: cx,
+                        top: scaled_border_size,
+                        right: cx + scaled_icon_inner_size,
+                        bottom: scaled_border_size + scaled_icon_inner_size,
+                    },
+                    state.badge_style,
+                ) {
+                    warn!(
+                        "Badge render failed count={} error={err:#}",
+                        entry.window_count
+                    );
+                }
             }
         }
 
@@ -437,115 +441,6 @@ fn draw_icons(
         let _ = DeleteDC(hdc_tmp);
 
         bitmap_tmp
-    }
-}
-
-pub(crate) fn format_badge_count(window_count: usize, badge_max: u32) -> Option<String> {
-    if window_count <= 1 {
-        return None;
-    }
-
-    let badge_max = badge_max.clamp(2, 9999) as usize;
-    if window_count > badge_max {
-        Some(format!("{badge_max}+"))
-    } else {
-        Some(window_count.to_string())
-    }
-}
-
-fn draw_badge(
-    hdc: HDC,
-    window_count: usize,
-    badge_max: u32,
-    icon_left: i32,
-    icon_top: i32,
-    icon_size: i32,
-    icon_border: i32,
-) {
-    let Some(text) = format_badge_count(window_count, badge_max) else {
-        return;
-    };
-    if icon_size <= 0 {
-        return;
-    }
-
-    let badge_height = (icon_size * 2 / 5).max(SCALE_FACTOR * 10).min(icon_size);
-    let font_height = -((badge_height * 2 / 3)
-        .max(SCALE_FACTOR * 3)
-        .min(badge_height));
-    let font = unsafe {
-        CreateFontW(
-            font_height,
-            0,
-            0,
-            0,
-            FW_SEMIBOLD.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
-            windows::core::w!("Segoe UI"),
-        )
-    };
-    if font.is_invalid() {
-        return;
-    }
-
-    let previous_font = unsafe { SelectObject(hdc, font.into()) };
-    let mut text_utf16: Vec<u16> = text.encode_utf16().collect();
-    let mut text_size = SIZE::default();
-    let measured = unsafe { GetTextExtentPoint32W(hdc, &text_utf16, &mut text_size) }.as_bool();
-    let padding = (badge_height / 4).max(SCALE_FACTOR);
-    let measured_width = if measured {
-        text_size.cx
-    } else {
-        font_height.abs()
-    };
-    let max_width = icon_size + icon_border * 2;
-    let badge_width = (measured_width + padding * 2)
-        .max(badge_height)
-        .min(max_width.max(badge_height));
-    let inset = (icon_size / 32).max(SCALE_FACTOR);
-    let badge_left = (icon_left + icon_size - badge_width - inset).max(icon_left);
-    let badge_top = icon_top + inset;
-    let badge_right = badge_left + badge_width;
-    let badge_bottom = badge_top + badge_height;
-    let radius = badge_height / 2;
-
-    unsafe {
-        let brush = CreateSolidBrush(COLORREF(BADGE_BG_COLOR));
-        let region = CreateRoundRectRgn(
-            badge_left,
-            badge_top,
-            badge_right,
-            badge_bottom,
-            radius,
-            radius,
-        );
-        let _ = FillRgn(hdc, region, brush);
-        let _ = DeleteObject(region.into());
-        let _ = DeleteObject(brush.into());
-
-        let mut text_rect = RECT {
-            left: badge_left,
-            top: badge_top,
-            right: badge_right,
-            bottom: badge_bottom,
-        };
-        let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(BADGE_FG_COLOR));
-        let _ = DrawTextW(
-            hdc,
-            &mut text_utf16,
-            &mut text_rect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        );
-        let _ = SelectObject(hdc, previous_font);
-        let _ = DeleteObject(font.into());
     }
 }
 
@@ -592,30 +487,5 @@ impl Coordinate {
             icon_size,
             item_size,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_badge_count;
-
-    #[test]
-    fn badge_is_hidden_for_zero_or_one_window() {
-        assert_eq!(format_badge_count(0, 99), None);
-        assert_eq!(format_badge_count(1, 99), None);
-    }
-
-    #[test]
-    fn badge_formats_counts_and_caps_values() {
-        assert_eq!(format_badge_count(2, 99).as_deref(), Some("2"));
-        assert_eq!(format_badge_count(99, 99).as_deref(), Some("99"));
-        assert_eq!(format_badge_count(100, 99).as_deref(), Some("99+"));
-        assert_eq!(format_badge_count(10_000, 9_999).as_deref(), Some("9999+"));
-    }
-
-    #[test]
-    fn badge_max_is_clamped_for_constructed_states() {
-        assert_eq!(format_badge_count(3, 0).as_deref(), Some("2+"));
-        assert_eq!(format_badge_count(10_000, 20_000).as_deref(), Some("9999+"));
     }
 }

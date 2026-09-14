@@ -1,16 +1,36 @@
-use std::{collections::HashSet, fs, path::PathBuf, process::Command};
+use std::{collections::HashSet, path::PathBuf, process::Command};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result};
 use indexmap::IndexMap;
-use ini::{Ini, ParseOption};
+use ini::Ini;
 use log::LevelFilter;
 use windows::core::w;
 
 use crate::utils::{get_exe_folder, RegKey};
 
+mod document;
+mod encoding;
+mod hotkey;
+mod storage;
+mod validation;
+pub(crate) mod watch;
+
+use hotkey::parse_hotkeys;
+pub use hotkey::Hotkey;
+pub use storage::prepare_log_file;
+
+#[cfg(test)]
+mod migration_tests;
+#[cfg(test)]
+mod validation_tests;
+
 pub const SWITCH_WINDOWS_HOTKEY_ID: u32 = 1;
 pub const SWITCH_APPS_HOTKEY_ID: u32 = 2;
 pub const DEFAULT_BADGE_MAX: u32 = 99;
+pub const DEFAULT_BADGE_COLOR: u32 = 0x4c7094;
+pub const DEFAULT_BADGE_TEXT_COLOR: u32 = 0xffffff;
+pub const DEFAULT_BADGE_FONT_SIZE: u32 = 12;
+pub const DEFAULT_RESTART_DELAY_MS: u32 = 1000;
 const MIN_BADGE_MAX: u32 = 2;
 const MAX_BADGE_MAX: u32 = 9999;
 
@@ -19,6 +39,8 @@ const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub trayicon: bool,
+    pub auto_restart: bool,
+    pub restart_delay_ms: u32,
     pub log_level: LevelFilter,
     pub log_file: Option<PathBuf>,
     pub switch_windows_hotkey: Vec<Hotkey>,
@@ -31,6 +53,9 @@ pub struct Config {
     pub switch_apps_override_icons: IndexMap<String, String>,
     pub switch_apps_show_badge: bool,
     pub switch_apps_badge_max: u32,
+    pub switch_apps_badge_color: u32,
+    pub switch_apps_badge_text_color: u32,
+    pub switch_apps_badge_font_size: u32,
     switch_apps_only_current_desktop: Option<bool>,
 }
 
@@ -38,6 +63,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             trayicon: true,
+            auto_restart: true,
+            restart_delay_ms: DEFAULT_RESTART_DELAY_MS,
             log_level: LevelFilter::Info,
             log_file: None,
             switch_windows_hotkey: vec![Hotkey::create(
@@ -60,6 +87,9 @@ impl Default for Config {
             switch_apps_override_icons: Default::default(),
             switch_apps_show_badge: true,
             switch_apps_badge_max: DEFAULT_BADGE_MAX,
+            switch_apps_badge_color: DEFAULT_BADGE_COLOR,
+            switch_apps_badge_text_color: DEFAULT_BADGE_TEXT_COLOR,
+            switch_apps_badge_font_size: DEFAULT_BADGE_FONT_SIZE,
             switch_apps_only_current_desktop: None,
         }
     }
@@ -67,10 +97,17 @@ impl Default for Config {
 
 impl Config {
     pub fn load(ini_conf: &Ini) -> Result<Self> {
+        validation::validate_values(ini_conf)?;
         let mut conf = Config::default();
         if let Some(section) = ini_conf.section(None::<String>) {
             if let Some(v) = section.get("trayicon").and_then(Config::to_bool) {
                 conf.trayicon = v;
+            }
+            if let Some(v) = section.get("auto_restart").and_then(Config::to_bool) {
+                conf.auto_restart = v;
+            }
+            if let Some(v) = section.get("restart_delay_ms").and_then(|v| v.parse().ok()) {
+                conf.restart_delay_ms = v;
             }
         }
 
@@ -78,7 +115,7 @@ impl Config {
             if let Some(level) = section.get("level").and_then(|v| v.parse().ok()) {
                 conf.log_level = level;
             }
-            if let Some(path) = section.get("path").map(normalize_path_value) {
+            if let Some(path) = section.get("path") {
                 if !path.trim().is_empty() {
                     let mut path = PathBuf::from(path);
                     if !path.is_absolute() {
@@ -98,11 +135,13 @@ impl Config {
                 }
             }
 
-            if let Some(v) = section
-                .get("blacklist")
-                .map(normalize_path_value)
-                .map(|v| v.split(',').map(|v| v.trim().to_string()).collect())
-            {
+            if let Some(v) = section.get("blacklist").map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            }) {
                 conf.switch_windows_blacklist = v;
             }
             if let Some(v) = section.get("ignore_minimal").and_then(Config::to_bool) {
@@ -128,27 +167,33 @@ impl Config {
             if let Some(v) = section.get("ignore_minimal").and_then(Config::to_bool) {
                 conf.switch_apps_ignore_minimal = v;
             }
-            if let Some(v) = section.get("override_icons").map(normalize_path_value) {
+            if let Some(v) = section.get("override_icons") {
                 conf.switch_apps_override_icons = v
                     .split([',', ';'])
                     .filter_map(|v| {
                         v.trim()
                             .split_once("=")
-                            .map(|(k, v)| (k.to_lowercase(), v.to_string()))
+                            .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_owned()))
                     })
                     .collect();
             }
             if let Some(v) = section.get("show_badge").and_then(Config::to_bool) {
                 conf.switch_apps_show_badge = v;
             }
-            if let Some(v) = section.get("badge_max") {
-                match parse_badge_max(v) {
-                    Some(max) => conf.switch_apps_badge_max = max,
-                    None => warn!(
-                        "Invalid switch-apps.badge_max '{}', using {}",
-                        v, DEFAULT_BADGE_MAX
-                    ),
-                }
+            if let Some(v) = section.get("badge_max").and_then(parse_badge_max) {
+                conf.switch_apps_badge_max = v;
+            }
+            if let Some(v) = section.get("badge_color").and_then(validation::parse_color) {
+                conf.switch_apps_badge_color = v;
+            }
+            if let Some(v) = section
+                .get("badge_text_color")
+                .and_then(validation::parse_color)
+            {
+                conf.switch_apps_badge_text_color = v;
+            }
+            if let Some(v) = section.get("badge_font_size").and_then(|v| v.parse().ok()) {
+                conf.switch_apps_badge_font_size = v;
             }
 
             if let Some(v) = section
@@ -205,180 +250,34 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Hotkey {
-    pub id: u32,
-    pub name: String,
-    pub modifier: [u32; 2],
-    pub code: u32,
+pub struct LoadedConfig {
+    pub config: Config,
+    pub path: PathBuf,
+    pub migrated: bool,
+    pub(crate) contents: Vec<u8>,
 }
 
-impl Hotkey {
-    pub fn create(id: u32, name: &str, value: &str) -> Result<Self> {
-        let (modifier, code) =
-            Self::parse(value).ok_or_else(|| anyhow!("Invalid {name} hotkey"))?;
-        Ok(Self {
-            id,
-            name: name.to_string(),
-            modifier,
-            code,
-        })
-    }
-
-    pub fn get_modifier(&self) -> u32 {
-        self.modifier[0]
-    }
-
-    pub fn parse(value: &str) -> Option<([u32; 2], u32)> {
-        let value = value
-            .to_ascii_lowercase()
-            .replace(' ', "")
-            .replace("vk_", "");
-        let keys: Vec<&str> = value.split('+').collect();
-        if keys.len() != 2 {
-            return None;
-        }
-        let modifier = match keys[0] {
-            "win" => [0x5b, 0x5c],
-            "alt" => [0x38, 0x38],
-            "ctrl" => [0x1d, 0x1d],
-            _ => {
-                return None;
-            }
-        };
-        // see <https://kbdlayout.info/kbdus/overview+scancodes>
-        let code = match keys[1] {
-            "esc" | "escape" => 0x01,
-            "1" | "!" => 0x02,
-            "2" | "@" => 0x03,
-            "3" | "#" => 0x04,
-            "4" | "$" => 0x05,
-            "5" | "%" => 0x06,
-            "6" | "^" => 0x07,
-            "7" | "&" => 0x08,
-            "8" | "*" => 0x09,
-            "9" | "(" => 0x0a,
-            "0" | ")" => 0x0b,
-            "-" | "_" | "oem_minus" => 0x0c,
-            "+" | "=" | "oem_plus" => 0x0d,
-            "bs" | "backspace" => 0x0e,
-            "tab" => 0x0f,
-            "q" => 0x10,
-            "w" => 0x11,
-            "e" => 0x12,
-            "r" => 0x13,
-            "t" => 0x14,
-            "y" => 0x15,
-            "u" => 0x16,
-            "i" => 0x17,
-            "o" => 0x18,
-            "p" => 0x19,
-            "{" | "[" | "oem_4" => 0x1a,
-            "}" | "]" | "oem_6" => 0x1b,
-            "enter" | "return" => 0x1c,
-            "a" => 0x1e,
-            "s" => 0x1f,
-            "d" => 0x20,
-            "f" => 0x21,
-            "g" => 0x22,
-            "h" => 0x23,
-            "j" => 0x24,
-            "k" => 0x25,
-            "l" => 0x26,
-            ":" | ";" | "oem_1" => 0x27,
-            "\"" | "'" | "oem_7" => 0x28,
-            "~" | "`" | "oem_3" => 0x29,
-            "|" | "\\" | "oem_5" => 0x2b,
-            "z" => 0x2c,
-            "x" => 0x2d,
-            "c" => 0x2e,
-            "v" => 0x2f,
-            "b" => 0x30,
-            "n" => 0x31,
-            "m" => 0x32,
-            "<" | "," | "oem_comma" => 0x33,
-            ">" | "." | "oem_period" => 0x34,
-            "?" | "/" | "oem_2" => 0x35,
-            "space" => 0x39,
-            "capslock" => 0x3a,
-            "f1" => 0x3b,
-            "f2" => 0x3c,
-            "f3" => 0x3d,
-            "f4" => 0x3e,
-            "f5" => 0x3f,
-            "f6" => 0x40,
-            "f7" => 0x41,
-            "f8" => 0x42,
-            "f9" => 0x43,
-            "f10" => 0x44,
-            "numlock" => 0x45,
-            "scrolllock" => 0x46,
-            "home" => 0x47,
-            "up" => 0x48,
-            "pageup" => 0x49,
-            "left" => 0x4b,
-            "right" => 0x4d,
-            "end" => 0x4f,
-            "down" => 0x50,
-            "pagedown" => 0x51,
-            "insert" => 0x52,
-            "delete" => 0x53,
-            "prtsc" | "printscreen" => 0x54,
-            "oem_102" => 0x56,
-            "f11" => 0x57,
-            "f12" => 0x58,
-            "menu" => 0x5d,
-            _ => return None,
-        };
-        Some((modifier, code))
-    }
+pub fn load_config() -> Result<LoadedConfig> {
+    storage::load_at(get_config_path()?)
 }
 
-pub fn load_config() -> Result<Config> {
-    let filepath = get_config_path()?;
-    let opt = ParseOption {
-        enabled_escape: false,
-        ..Default::default()
-    };
-    let conf = Ini::load_from_file_opt(&filepath, opt)
-        .map_err(|err| anyhow!("Failed to load config file '{}', {err}", filepath.display()))?;
-    Config::load(&conf)
-}
-
-pub(crate) fn edit_config_file() -> Result<bool> {
+pub(crate) fn edit_config_file() -> Result<()> {
     let filepath = get_config_path()?;
     debug!("open config file '{}'", filepath.display());
-    if !filepath.exists() {
-        fs::write(&filepath, DEFAULT_CONFIG).map_err(|err| {
-            anyhow!(
-                "Failed to write config file '{}', {err}",
-                filepath.display()
-            )
-        })?;
-    }
-    let exit = Command::new("notepad.exe")
+    Command::new("notepad.exe")
         .arg(&filepath)
         .spawn()
-        .map_err(|err| anyhow!("Failed to open config file '{}', {err}", filepath.display()))?
-        .wait()
-        .map_err(|err| {
-            anyhow!(
-                "Failed to close config file '{}', {err}",
+        .with_context(|| {
+            format!(
+                "无法打开配置文件 '{}'，请检查记事本是否可用",
                 filepath.display()
             )
         })?;
-
-    Ok(exit.success())
+    Ok(())
 }
 
 fn get_config_path() -> Result<PathBuf> {
-    let folder = get_exe_folder()?;
-    let config_path = folder.join("window-switcher.ini");
-    Ok(config_path)
-}
-
-fn normalize_path_value(value: &str) -> String {
-    value.replace("\\\\", "\\")
+    Ok(get_exe_folder()?.join("window-switcher.ini"))
 }
 
 fn parse_badge_max(value: &str) -> Option<u32> {
@@ -387,22 +286,6 @@ fn parse_badge_max(value: &str) -> Option<u32> {
         .parse::<u32>()
         .ok()
         .filter(|value| (MIN_BADGE_MAX..=MAX_BADGE_MAX).contains(value))
-}
-
-fn parse_hotkeys(id: u32, name: &str, value: &str) -> Result<Vec<Hotkey>> {
-    let parts: Vec<&str> = value.split("||").collect();
-    let mut hotkeys = vec![];
-    for part in parts {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        hotkeys.push(Hotkey::create(id, name, part)?);
-    }
-    if hotkeys.is_empty() {
-        return Err(anyhow!("Invalid {name} hotkey"));
-    }
-    Ok(hotkeys)
 }
 
 #[cfg(test)]
