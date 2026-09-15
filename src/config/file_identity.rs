@@ -33,6 +33,17 @@ pub(super) fn handle(file: &File) -> HANDLE {
 }
 
 impl FileIdentity {
+    pub(super) fn archive_key(self) -> String {
+        format!(
+            "{:016x}-{}",
+            self.volume,
+            self.id
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )
+    }
+
     pub(super) fn read(file: &File) -> io::Result<Self> {
         let mut info = FILE_ID_INFO::default();
         unsafe {

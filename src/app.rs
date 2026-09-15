@@ -1,10 +1,6 @@
 use crate::{
     badge::BadgeStyle,
-    config::{
-        edit_config_file,
-        watch::{ConfigEvent, ConfigWatcher},
-        Config, LoadedConfig,
-    },
+    config::{edit_config_file, watch::ConfigWatcher, Config, LoadedConfig},
     keyboard::{
         dispatch::InputDispatch,
         state::{InputAction, SwitchKind},
@@ -25,14 +21,17 @@ use windows::{
     core::{w, PCWSTR},
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
-        UI::WindowsAndMessaging::{
-            DestroyIcon, PostQuitMessage, HICON, WM_COMMAND, WM_LBUTTONUP, WM_RBUTTONUP,
-        },
+        UI::WindowsAndMessaging::{DestroyIcon, HICON, WM_COMMAND, WM_LBUTTONUP, WM_RBUTTONUP},
     },
 };
 
+mod bootstrap;
+mod feedback;
+mod lifecycle;
 mod navigation;
 mod runtime;
+
+pub use bootstrap::run;
 
 pub const NAME: PCWSTR = w!("Window Switcher");
 pub const WM_USER_TRAYICON: u32 = 6000;
@@ -43,7 +42,14 @@ pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
 
 pub fn start(loaded: &LoadedConfig) -> Result<()> {
-    runtime::run(loaded)
+    let instance = crate::utils::SingleInstance::create(crate::utils::INSTANCE_NAME)?;
+    anyhow::ensure!(instance.is_single(), "应用已经在运行，本次启动已取消");
+    runtime::run(
+        loaded,
+        instance,
+        None,
+        crate::diagnostics::Diagnostics::new(&loaded.config, std::time::Instant::now()),
+    )
 }
 
 struct App {
@@ -60,81 +66,65 @@ struct App {
     target: Arc<WindowTarget>,
     input: Arc<InputDispatch>,
     input_session: u64,
+    lifecycle: lifecycle::Lifecycle,
+    feedback: feedback::Feedback,
+    text: crate::localization::Text,
+    diagnostics: crate::diagnostics::Diagnostics,
 }
 
 impl App {
-    fn set_trayicon(&mut self) {
-        if let Some(trayicon) = self.trayicon.as_mut() {
-            match trayicon.register(self.hwnd) {
-                Ok(()) => info!("trayicon stage=registered"),
-                Err(_) if !trayicon.exist() => {
-                    warn!("trayicon stage=register retry_pending");
-                    let target = self.target.clone();
-                    if let Err(err) =
-                        std::thread::Builder::new()
-                            .name("tray-retry".into())
-                            .spawn(move || {
-                                std::thread::sleep(std::time::Duration::from_secs(3));
-                                target.try_post(WM_USER_REGISTER_TRAYICON);
-                            })
-                    {
-                        warn!("trayicon stage=retry-thread error={err}");
-                    }
-                }
-                Err(_) => {}
-            }
-        }
-    }
-
     fn handle_message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<()> {
         match msg {
             WM_USER_CONFIG_CHANGED => {
-                match self
-                    .config_watcher
-                    .as_ref()
-                    .and_then(ConfigWatcher::next_event)
-                {
-                    Some(ConfigEvent::Changed) => match crate::restart::spawn_replacement() {
-                        Ok(_) => self.quit(),
-                        Err(err) => self.report_config_error(&format!("{err:#}")),
-                    },
-                    Some(ConfigEvent::Invalid(message)) => self.report_config_error(&message),
-                    None => {}
-                }
+                self.poll_lifecycle()?;
             }
             WM_USER_TRAYICON => {
                 if matches!(lparam.0 as u32, WM_LBUTTONUP | WM_RBUTTONUP) {
                     if let Some(trayicon) = self.trayicon.as_mut() {
-                        trayicon.show(self.startup.is_enable)?;
+                        if let Some(command) =
+                            trayicon.show(self.startup.state, self.startup.busy(), self.text)?
+                        {
+                            self.handle_command(command)?;
+                        }
                     }
                 }
             }
             WM_LBUTTONUP => self.click(),
-            WM_COMMAND if (wparam.0 >> 16) & 0xffff == 0 => match wparam.0 as u32 & 0xffff {
-                IDM_EXIT => self.quit(),
-                IDM_STARTUP => self.startup.toggle()?,
-                IDM_CONFIGURE => {
-                    if let Err(err) = edit_config_file() {
-                        self.report_config_error(&format!("{err:#}"));
-                    }
-                }
-                _ => {}
-            },
+            WM_COMMAND if (wparam.0 >> 16) & 0xffff == 0 => {
+                self.handle_command(wparam.0 as u32 & 0xffff)?
+            }
             _ => {}
         }
         Ok(())
     }
 
-    fn quit(&self) {
-        self.target.close();
-        unsafe { PostQuitMessage(0) };
+    fn handle_command(&mut self, command: u32) -> Result<()> {
+        match command {
+            IDM_EXIT => self.request_exit(),
+            IDM_STARTUP => self.startup.toggle()?,
+            IDM_CONFIGURE => {
+                if let Err(err) = edit_config_file() {
+                    self.report_config_error(&format!("{err:#}"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn drain_input(&mut self) {
+        if let Err(error) = self.poll_lifecycle() {
+            self.lifecycle_error(&error);
+        }
+        if !self.target.is_live() {
+            return;
+        }
+        self.poll_feedback();
+        if self.diagnostics.tick() {
+            self.input.log_summary();
+        }
         if let Some(code) = crate::config::take_log_failure() {
-            self.report_config_error(&format!(
-                "部分诊断日志未能写入（系统错误码 {code}）。请检查日志权限及是否与 INI 指向同一文件。未向 INI 写入日志；本次运行仅提示一次。"
-            ));
+            self.notify(self.text.error_title(), &self.text.log_failure(code), true);
         }
         if self.input_session != 0 && self.input_session <= self.input.revoked() {
             self.cancel_switch_app();
@@ -199,25 +189,6 @@ impl App {
                 self.input.acknowledge(event.session);
                 self.input_session = 0;
             }
-        }
-    }
-
-    fn report_config_error(&mut self, message: &str) {
-        // Detailed paths/values may be useful in a local notification, never in logs.
-        error!("config stage=apply rejected");
-        if let Some(trayicon) = self.trayicon.as_ref() {
-            if trayicon.notify_error(message).is_ok() {
-                return;
-            }
-        }
-        let message = message.to_owned();
-        if let Err(err) = std::thread::Builder::new()
-            .name("config-error".into())
-            .spawn(move || {
-                alert!("{message}");
-            })
-        {
-            error!("config stage=notification-thread error={err}");
         }
     }
 

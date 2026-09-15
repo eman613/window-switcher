@@ -150,6 +150,7 @@ fn cancellation_before_hook_install_never_reports_ready() {
         dispatch,
         foreground.status(),
         Arc::new(AtomicBool::new(true)),
+        Arc::new(InputActivation::new(true)),
         &ready
     )
     .is_err());

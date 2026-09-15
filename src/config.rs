@@ -1,9 +1,7 @@
-use std::{collections::HashSet, path::PathBuf, process::Command};
+use std::{path::PathBuf, process::Command};
 
 use anyhow::{Context, Result};
-use indexmap::IndexMap;
 use ini::Ini;
-use log::LevelFilter;
 use windows::core::w;
 
 use crate::utils::{get_exe_folder, RegKey};
@@ -14,205 +12,64 @@ mod file_identity;
 mod hotkey;
 mod logging;
 mod metadata;
+mod notifications;
+mod parsers;
+pub(crate) mod reload;
+mod schema;
+pub(crate) mod settings;
 mod storage;
 mod transaction;
+mod types;
 mod validation;
 pub(crate) mod watch;
+mod watch_state;
 
+#[cfg(test)]
 use hotkey::parse_hotkeys;
 pub use hotkey::Hotkey;
+pub(crate) use logging::initialize_logging;
 pub use logging::prepare_log_file;
 pub(crate) use logging::take_log_failure;
 
 #[cfg(test)]
 mod migration_tests;
 #[cfg(test)]
+mod schema_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
 mod validation_tests;
 
 pub const SWITCH_WINDOWS_HOTKEY_ID: u32 = 1;
 pub const SWITCH_APPS_HOTKEY_ID: u32 = 2;
+#[cfg(test)]
 pub const DEFAULT_BADGE_MAX: u32 = 99;
+#[cfg(test)]
 pub const DEFAULT_BADGE_COLOR: u32 = 0x4c7094;
-pub const DEFAULT_BADGE_TEXT_COLOR: u32 = 0xffffff;
+#[cfg(test)]
 pub const DEFAULT_BADGE_FONT_SIZE: u32 = 12;
-pub const DEFAULT_RESTART_DELAY_MS: u32 = 1000;
+
+#[cfg(test)]
 const MIN_BADGE_MAX: u32 = 2;
+#[cfg(test)]
 const MAX_BADGE_MAX: u32 = 9999;
 
 const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Config {
-    pub trayicon: bool,
-    pub auto_restart: bool,
-    pub restart_delay_ms: u32,
-    pub log_level: LevelFilter,
-    pub log_file: Option<PathBuf>,
-    pub switch_windows_hotkey: Vec<Hotkey>,
-    pub switch_windows_blacklist: HashSet<String>,
-    pub switch_windows_ignore_minimal: bool,
-    switch_windows_only_current_desktop: Option<bool>,
-    pub switch_apps_enable: bool,
-    pub switch_apps_hotkey: Vec<Hotkey>,
-    pub switch_apps_ignore_minimal: bool,
-    pub switch_apps_override_icons: IndexMap<String, String>,
-    pub switch_apps_show_badge: bool,
-    pub switch_apps_badge_max: u32,
-    pub switch_apps_badge_color: u32,
-    pub switch_apps_badge_text_color: u32,
-    pub switch_apps_badge_font_size: u32,
-    switch_apps_only_current_desktop: Option<bool>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            trayicon: true,
-            auto_restart: true,
-            restart_delay_ms: DEFAULT_RESTART_DELAY_MS,
-            log_level: LevelFilter::Info,
-            log_file: None,
-            switch_windows_hotkey: vec![Hotkey::create(
-                SWITCH_WINDOWS_HOTKEY_ID,
-                "switch windows",
-                "alt + `",
-            )
-            .unwrap()],
-            switch_windows_blacklist: Default::default(),
-            switch_windows_ignore_minimal: false,
-            switch_windows_only_current_desktop: None,
-            switch_apps_enable: false,
-            switch_apps_hotkey: vec![Hotkey::create(
-                SWITCH_APPS_HOTKEY_ID,
-                "switch apps",
-                "alt + tab",
-            )
-            .unwrap()],
-            switch_apps_ignore_minimal: false,
-            switch_apps_override_icons: Default::default(),
-            switch_apps_show_badge: true,
-            switch_apps_badge_max: DEFAULT_BADGE_MAX,
-            switch_apps_badge_color: DEFAULT_BADGE_COLOR,
-            switch_apps_badge_text_color: DEFAULT_BADGE_TEXT_COLOR,
-            switch_apps_badge_font_size: DEFAULT_BADGE_FONT_SIZE,
-            switch_apps_only_current_desktop: None,
-        }
-    }
-}
+pub use schema::Config;
+pub use types::{BatteryPolicy, Language, RunLevel, StartupEnabled, WatchMode};
 
 impl Config {
     pub fn load(ini_conf: &Ini) -> Result<Self> {
-        validation::validate_values(ini_conf)?;
-        let mut conf = Config::default();
-        if let Some(section) = ini_conf.section(None::<String>) {
-            if let Some(v) = section.get("trayicon").and_then(Config::to_bool) {
-                conf.trayicon = v;
-            }
-            if let Some(v) = section.get("auto_restart").and_then(Config::to_bool) {
-                conf.auto_restart = v;
-            }
-            if let Some(v) = section.get("restart_delay_ms").and_then(|v| v.parse().ok()) {
-                conf.restart_delay_ms = v;
-            }
-        }
-
-        if let Some(section) = ini_conf.section(Some("log")) {
-            if let Some(level) = section.get("level").and_then(|v| v.parse().ok()) {
-                conf.log_level = level;
-            }
-            if let Some(path) = section.get("path") {
-                if !path.trim().is_empty() {
-                    let mut path = PathBuf::from(path);
-                    if !path.is_absolute() {
-                        let parent = get_exe_folder()?;
-                        path = parent.join(path);
-                    }
-                    conf.log_file = Some(path);
-                }
-            }
-        }
-
-        if let Some(section) = ini_conf.section(Some("switch-windows")) {
-            if let Some(v) = section.get("hotkey") {
-                if !v.trim().is_empty() {
-                    conf.switch_windows_hotkey =
-                        parse_hotkeys(SWITCH_WINDOWS_HOTKEY_ID, "switch windows", v)?;
-                }
-            }
-
-            if let Some(v) = section.get("blacklist").map(|v| {
-                v.split(',')
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            }) {
-                conf.switch_windows_blacklist = v;
-            }
-            if let Some(v) = section.get("ignore_minimal").and_then(Config::to_bool) {
-                conf.switch_windows_ignore_minimal = v;
-            }
-            if let Some(v) = section
-                .get("only_current_desktop")
-                .and_then(Config::to_bool)
-            {
-                conf.switch_windows_only_current_desktop = Some(v);
-            }
-        }
-        if let Some(section) = ini_conf.section(Some("switch-apps")) {
-            if let Some(v) = section.get("enable").and_then(Config::to_bool) {
-                conf.switch_apps_enable = v;
-            }
-            if let Some(v) = section.get("hotkey") {
-                if !v.trim().is_empty() {
-                    conf.switch_apps_hotkey =
-                        parse_hotkeys(SWITCH_APPS_HOTKEY_ID, "switch apps", v)?;
-                }
-            }
-            if let Some(v) = section.get("ignore_minimal").and_then(Config::to_bool) {
-                conf.switch_apps_ignore_minimal = v;
-            }
-            if let Some(v) = section.get("override_icons") {
-                conf.switch_apps_override_icons = v
-                    .split([',', ';'])
-                    .filter_map(|v| {
-                        v.trim()
-                            .split_once("=")
-                            .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_owned()))
-                    })
-                    .collect();
-            }
-            if let Some(v) = section.get("show_badge").and_then(Config::to_bool) {
-                conf.switch_apps_show_badge = v;
-            }
-            if let Some(v) = section.get("badge_max").and_then(parse_badge_max) {
-                conf.switch_apps_badge_max = v;
-            }
-            if let Some(v) = section.get("badge_color").and_then(validation::parse_color) {
-                conf.switch_apps_badge_color = v;
-            }
-            if let Some(v) = section
-                .get("badge_text_color")
-                .and_then(validation::parse_color)
-            {
-                conf.switch_apps_badge_text_color = v;
-            }
-            if let Some(v) = section.get("badge_font_size").and_then(|v| v.parse().ok()) {
-                conf.switch_apps_badge_font_size = v;
-            }
-
-            if let Some(v) = section
-                .get("only_current_desktop")
-                .and_then(Config::to_bool)
-            {
-                conf.switch_apps_only_current_desktop = Some(v);
-            }
-        }
-        Ok(conf)
+        schema::load(ini_conf)
     }
 
     pub fn to_hotkeys(&self) -> Vec<&Hotkey> {
-        let mut hotkeys: Vec<&Hotkey> = self.switch_windows_hotkey.iter().collect();
+        let mut hotkeys: Vec<&Hotkey> = self
+            .switch_windows_hotkey
+            .iter()
+            .filter(|_| self.switch_windows_enable)
+            .collect();
         if self.switch_apps_enable {
             hotkeys.extend(self.switch_apps_hotkey.iter());
         }
@@ -255,6 +112,7 @@ impl Config {
     }
 }
 
+#[derive(Clone)]
 pub struct LoadedConfig {
     pub config: Config,
     pub path: PathBuf,
@@ -264,6 +122,11 @@ pub struct LoadedConfig {
 
 pub fn load_config() -> Result<LoadedConfig> {
     storage::load_at(get_config_path()?)
+}
+
+pub(crate) fn read_config_bytes(path: &std::path::Path) -> Result<Vec<u8>> {
+    transaction::require_no_recovery(path)?;
+    storage::read_bytes(path)
 }
 
 pub(crate) fn edit_config_file() -> Result<()> {
@@ -281,10 +144,11 @@ pub(crate) fn edit_config_file() -> Result<()> {
     Ok(())
 }
 
-fn get_config_path() -> Result<PathBuf> {
+pub(crate) fn get_config_path() -> Result<PathBuf> {
     Ok(get_exe_folder()?.join("window-switcher.ini"))
 }
 
+#[cfg(test)]
 fn parse_badge_max(value: &str) -> Option<u32> {
     value
         .trim()

@@ -1,71 +1,137 @@
 use std::{
-    os::windows::process::CommandExt,
-    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        mpsc::{Receiver, SyncSender},
+        Arc,
+    },
+    time::Duration,
 };
 
-use anyhow::{bail, Context, Result};
-use windows::Win32::{
-    Foundation::{ERROR_INVALID_PARAMETER, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
-    System::Threading::{OpenProcess, WaitForSingleObject, CREATE_NO_WINDOW, PROCESS_SYNCHRONIZE},
-};
+use anyhow::{bail, Result};
 
-use crate::utils::HandleWrapper;
+use crate::{config::reload::ConfigCandidate, window_target::WindowTarget};
 
-const PARENT_ARGUMENT: &str = "--restart-parent";
-const PARENT_EXIT_TIMEOUT_MS: u32 = 15_000;
+mod child;
+mod handshake;
+mod parent;
+mod protocol;
 
-/// Called before opening the INI or acquiring the single-instance mutex.
-pub fn wait_for_restart_parent() -> Result<()> {
-    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    let Some(position) = arguments
-        .iter()
-        .position(|argument| argument == PARENT_ARGUMENT)
-    else {
-        return Ok(());
-    };
-    let parent = arguments
-        .get(position + 1)
-        .and_then(|argument| argument.to_str())
-        .context("自动重启缺少父进程编号")?
-        .parse::<u32>()
-        .context("自动重启父进程编号无效")?;
-    if parent == 0 || parent == std::process::id() {
-        bail!("自动重启父进程编号无效");
+pub(crate) use child::{ChildEvent, ChildSession};
+pub(crate) const CHILD_ARGUMENT: &str = "--restart-child";
+pub(crate) const WM_RESTART: u32 = 6004;
+const TICK: Duration = Duration::from_millis(25);
+
+#[derive(Debug)]
+pub(crate) enum ParentEvent {
+    Suspend,
+    Ready,
+    Done,
+    Failed {
+        message: String,
+        safe_to_resume: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParentCommand {
+    Suspended,
+    Commit,
+}
+
+const UNDECIDED: u8 = 0;
+const CANCELED: u8 = 1;
+const ACCEPTED: u8 = 2;
+
+#[derive(Default)]
+struct Decision(AtomicU8);
+
+impl Decision {
+    fn cancel(&self) -> bool {
+        self.0
+            .compare_exchange(UNDECIDED, CANCELED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
-    let handle = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent) } {
-        Ok(handle) => HandleWrapper::new(handle),
-        // The original process may have exited before this process was scheduled.
-        Err(err) if err.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(()),
-        Err(err) => return Err(err).context("无法等待旧进程退出；请手动重新启动应用"),
-    };
-    match unsafe { WaitForSingleObject(handle.get_handle(), PARENT_EXIT_TIMEOUT_MS) } {
-        WAIT_OBJECT_0 => Ok(()),
-        WAIT_TIMEOUT => bail!("旧进程在 15 秒内未退出；已取消新实例，请检查旧进程后重新启动"),
-        WAIT_FAILED => Err(windows::core::Error::from_win32()).context("等待旧进程退出失败"),
-        status => bail!("等待旧进程返回异常状态 {}", status.0),
+
+    fn accept(&self) -> bool {
+        self.0
+            .compare_exchange(UNDECIDED, ACCEPTED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn state(&self) -> u8 {
+        self.0.load(Ordering::Acquire)
     }
 }
 
-pub(crate) fn spawn_replacement() -> Result<u32> {
-    let executable = std::env::current_exe().context("无法获取当前程序路径")?;
-    let mut command = Command::new(&executable);
-    command
-        .arg(PARENT_ARGUMENT)
-        .arg(std::process::id().to_string())
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(directory) = executable.parent() {
-        command.current_dir(directory);
+pub(crate) struct RestartController {
+    pub(crate) candidate: ConfigCandidate,
+    events: Receiver<ParentEvent>,
+    commands: SyncSender<ParentCommand>,
+    decision: Arc<Decision>,
+}
+
+impl RestartController {
+    pub(crate) fn start(
+        candidate: ConfigCandidate,
+        path: std::path::PathBuf,
+        timeout_ms: u32,
+        latest: Arc<std::sync::atomic::AtomicU64>,
+        target: Arc<WindowTarget>,
+    ) -> Result<Self> {
+        parent::start(candidate, path, timeout_ms, latest, target)
     }
-    let child = command
-        .spawn()
-        .with_context(|| format!("无法重启 '{}'；当前进程继续运行", executable.display()))?;
-    let pid = child.id();
-    info!(
-        "config stage=restart parent_pid={} child_pid={pid}",
-        std::process::id()
-    );
-    Ok(pid)
+
+    pub(crate) fn next_event(&self) -> Option<ParentEvent> {
+        self.events.try_recv().ok()
+    }
+
+    fn send(&self, command: ParentCommand) -> Result<()> {
+        if self.decision.state() != UNDECIDED {
+            bail!("restart stage=control canceled");
+        }
+        self.commands
+            .try_send(command)
+            .map_err(|_| anyhow::anyhow!("restart stage=control unavailable"))
+    }
+
+    pub(crate) fn suspended(&self) -> Result<()> {
+        self.send(ParentCommand::Suspended)
+    }
+
+    pub(crate) fn commit(&self) -> Result<()> {
+        self.send(ParentCommand::Commit)
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.decision.cancel();
+    }
+
+    pub(crate) fn accept(&self) -> bool {
+        self.decision.accept()
+    }
+}
+
+impl Drop for RestartController {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_acceptance_and_worker_cancellation_have_exactly_one_winner() {
+        for _ in 0..128 {
+            let decision = Arc::new(Decision::default());
+            let worker = decision.clone();
+            let thread = std::thread::spawn(move || worker.cancel());
+            let accepted = decision.accept();
+            assert_ne!(accepted, thread.join().unwrap());
+            assert_eq!(decision.state(), if accepted { ACCEPTED } else { CANCELED });
+            assert!(!decision.cancel());
+            assert!(!decision.accept());
+        }
+    }
 }

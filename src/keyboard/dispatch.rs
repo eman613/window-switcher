@@ -4,7 +4,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use parking_lot::Mutex;
@@ -28,10 +28,16 @@ pub(crate) struct InputDispatch {
     rejected: AtomicU64,
     callbacks: AtomicU64,
     max_callback_us: AtomicU64,
+    metrics: bool,
 }
 
 impl InputDispatch {
+    #[cfg(test)]
     pub(crate) fn new(target: Arc<WindowTarget>) -> Self {
+        Self::with_metrics(target, true)
+    }
+
+    pub(crate) fn with_metrics(target: Arc<WindowTarget>, metrics: bool) -> Self {
         Self {
             target,
             pending: Mutex::new(PendingInput {
@@ -43,6 +49,7 @@ impl InputDispatch {
             rejected: AtomicU64::new(0),
             callbacks: AtomicU64::new(0),
             max_callback_us: AtomicU64::new(0),
+            metrics,
         }
     }
 
@@ -118,7 +125,14 @@ impl InputDispatch {
         );
     }
 
+    pub(super) fn sample_start(&self) -> Option<Instant> {
+        self.metrics.then(Instant::now)
+    }
+
     pub(crate) fn log_summary(&self) {
+        if !self.metrics {
+            return;
+        }
         info!(
             "input stage=summary callbacks={} rejected={} max_callback_us={}",
             self.callbacks.load(Ordering::Relaxed),

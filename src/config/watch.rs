@@ -1,7 +1,7 @@
 use std::{
-    path::Path,
     sync::{
-        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender},
         Arc,
     },
     thread,
@@ -9,233 +9,253 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 
-use super::{document, encoding, storage, LoadedConfig};
-use crate::app::WM_USER_CONFIG_CHANGED;
-use crate::window_target::WindowTarget;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
+use super::{
+    notifications::DirectoryNotification,
+    reload::{load_snapshot, ConfigCandidate},
+    storage,
+    watch_state::ChangeTracker,
+    LoadedConfig, WatchMode,
+};
+use crate::{app::WM_USER_CONFIG_CHANGED, window_target::WindowTarget};
 
 pub(crate) enum ConfigEvent {
-    Changed,
+    Candidate(ConfigCandidate),
     Invalid(String),
 }
 
+enum Control {
+    Stop,
+    Complete { generation: u64, applied: bool },
+}
+
+#[derive(Default)]
+struct PendingEvents {
+    candidate: Option<ConfigCandidate>,
+    invalid: Option<String>,
+    stopped: bool,
+}
+
 pub(crate) struct ConfigWatcher {
-    events: Receiver<ConfigEvent>,
-    stop: Sender<()>,
+    pending: Arc<Mutex<PendingEvents>>,
+    control: SyncSender<Control>,
+    latest: Arc<AtomicU64>,
+    #[cfg(test)]
+    stopped: Receiver<()>,
 }
 
 impl ConfigWatcher {
     pub(crate) fn start(loaded: &LoadedConfig, target: Arc<WindowTarget>) -> Result<Self> {
-        let (events_tx, events) = mpsc::channel();
-        let (stop, stop_rx) = mpsc::channel();
+        let pending = Arc::new(Mutex::new(PendingEvents::default()));
+        let latest = Arc::new(AtomicU64::new(0));
+        let (control, commands) = mpsc::sync_channel(4);
+        #[cfg(test)]
+        let (stopped_tx, stopped) = mpsc::sync_channel(1);
         let path = loaded.path.clone();
-        let delay = Duration::from_millis(u64::from(loaded.config.restart_delay_ms));
-        let mut changes = StableChange::new(loaded.contents.clone(), delay);
+        let delay = Duration::from_millis(loaded.config.restart_delay_ms.into());
+        let interval = Duration::from_millis(loaded.config.config_poll_interval_ms.into());
+        let mode = loaded.config.config_watch_mode;
+        let changes = ChangeTracker::new(
+            loaded.contents.clone(),
+            delay,
+            Duration::from_millis(loaded.config.config_retry_delay_ms.into()),
+            loaded.config.config_retry_limit,
+        );
+        let worker = WatchWorker {
+            pending: pending.clone(),
+            latest: latest.clone(),
+            target,
+            commands,
+            changes,
+        };
         thread::Builder::new()
             .name("config-watcher".into())
             .spawn(move || {
-                let mut read_error: Option<(String, Instant, bool)> = None;
-                loop {
-                    match stop_rx.recv_timeout(POLL_INTERVAL) {
-                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                        Err(RecvTimeoutError::Timeout) => {}
-                    }
-                    let bytes = match storage::read_bytes(&path) {
-                        Ok(bytes) => {
-                            read_error = None;
-                            bytes
-                        }
-                        Err(err) => {
-                            changes.clear_pending();
-                            // Editors may briefly remove or lock the file while saving it.
-                            let message = format!(
-                                "config stage=watch path={} error={err:#}；保留当前配置",
-                                path.display()
-                            );
-                            let failure = read_error
-                                .get_or_insert_with(|| (message.clone(), Instant::now(), false));
-                            if failure.0 != message {
-                                *failure = (message, Instant::now(), false);
-                            }
-                            if !failure.2 && failure.1.elapsed() >= delay {
-                                failure.2 = true;
-                                error!("config stage=watch read-failed");
-                                if !notify(
-                                    &stop_rx,
-                                    &events_tx,
-                                    &target,
-                                    ConfigEvent::Invalid(failure.0.clone()),
-                                ) {
-                                    break;
-                                }
-                            }
-                            continue;
-                        }
-                    };
-                    let Some(bytes) = changes.observe(bytes, Instant::now()) else {
-                        continue;
-                    };
-                    let result = validate_candidate(&bytes, &path).with_context(|| {
-                        format!("config stage=watch-validate path={}", path.display())
-                    });
-                    let event = match result {
-                        Ok(true) => ConfigEvent::Changed,
-                        Ok(false) => continue,
-                        Err(err) => {
-                            let message = format!("{err:#}；保留当前配置，修正并保存后会重新检测");
-                            error!("config stage=watch invalid-candidate");
-                            ConfigEvent::Invalid(message)
-                        }
-                    };
-                    if !notify(&stop_rx, &events_tx, &target, event) {
-                        break;
-                    }
-                }
+                worker.run(path, delay, interval, mode);
+                #[cfg(test)]
+                let _ = stopped_tx.try_send(());
             })
             .context("无法启动 INI 后台监测线程")?;
         info!(
-            "config stage=watch-start delay_ms={}",
-            loaded.config.restart_delay_ms
+            "config stage=watch-start delay_ms={} poll_ms={} mode={mode:?}",
+            delay.as_millis(),
+            interval.as_millis()
         );
-        Ok(Self { events, stop })
+        Ok(Self {
+            pending,
+            control,
+            latest,
+            #[cfg(test)]
+            stopped,
+        })
     }
 
     pub(crate) fn next_event(&self) -> Option<ConfigEvent> {
-        self.events.try_recv().ok()
+        let mut pending = self.pending.lock();
+        pending
+            .candidate
+            .take()
+            .map(ConfigEvent::Candidate)
+            .or_else(|| pending.invalid.take().map(ConfigEvent::Invalid))
+    }
+    pub(crate) fn latest(&self) -> Arc<AtomicU64> {
+        self.latest.clone()
+    }
+    pub(crate) fn complete(&self, generation: u64, applied: bool) {
+        if self
+            .control
+            .try_send(Control::Complete {
+                generation,
+                applied,
+            })
+            .is_err()
+        {
+            error!("config stage=watch-ack unavailable");
+        }
     }
 }
 
 impl Drop for ConfigWatcher {
     fn drop(&mut self) {
-        // Wake the background worker without waiting for filesystem IO on the UI thread.
-        let _ = self.stop.send(());
-    }
-}
-
-fn notify(
-    stop: &Receiver<()>,
-    events: &Sender<ConfigEvent>,
-    target: &WindowTarget,
-    event: ConfigEvent,
-) -> bool {
-    if !matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
-        return false;
-    }
-    if events.send(event).is_err() {
-        return false;
-    }
-    if !target.try_post(WM_USER_CONFIG_CHANGED) {
-        debug!("config stage=notify retired-or-unavailable");
-        return false;
-    }
-    true
-}
-
-fn validate_candidate(bytes: &[u8], ini_path: &Path) -> Result<bool> {
-    let (text, _) = encoding::decode(bytes)?;
-    let ini = document::parse_ini(&text)?;
-    if ini.iter().all(|(_, properties)| properties.is_empty()) {
-        return Ok(false);
-    }
-    let config = super::Config::load(&ini)?;
-    storage::validate_log_destination(ini_path, config.log_file.as_deref())?;
-    if let Some(path) = &config.log_file {
-        super::prepare_log_file(path, ini_path)
-            .with_context(|| format!("无法写入日志 '{}'；请检查目录和权限", path.display()))?;
-    }
-    Ok(true)
-}
-
-struct StableChange {
-    acknowledged: Vec<u8>,
-    pending: Option<(Vec<u8>, Instant)>,
-    delay: Duration,
-}
-
-impl StableChange {
-    fn new(acknowledged: Vec<u8>, delay: Duration) -> Self {
-        Self {
-            acknowledged,
-            pending: None,
-            delay,
-        }
-    }
-
-    fn clear_pending(&mut self) {
-        self.pending = None;
-    }
-
-    fn observe(&mut self, bytes: Vec<u8>, now: Instant) -> Option<Vec<u8>> {
-        if bytes.is_empty() || bytes == self.acknowledged {
-            self.clear_pending();
-            return None;
-        }
-        match self.pending.as_ref() {
-            Some((pending, since)) if pending == &bytes => {
-                if now.duration_since(*since) < self.delay {
-                    return None;
-                }
-                self.acknowledged.clone_from(&bytes);
-                self.clear_pending();
-                Some(bytes)
-            }
-            _ => {
-                self.pending = Some((bytes, now));
-                None
-            }
-        }
+        // Synchronize with notify so no messages are posted after stop returns.
+        *self.pending.lock() = PendingEvents {
+            stopped: true,
+            ..Default::default()
+        };
+        let _ = self.control.try_send(Control::Stop);
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[test]
-    fn repeated_saves_restart_once_after_last_change() {
-        let now = Instant::now();
-        let tick = Duration::from_millis(250);
-        let mut changes = StableChange::new(b"old".to_vec(), tick * 4);
-        assert!(changes.observe(b"first".to_vec(), now).is_none());
-        assert!(changes
-            .observe(b"second".to_vec(), now + tick * 2)
-            .is_none());
-        assert!(changes
-            .observe(b"second".to_vec(), now + tick * 5)
-            .is_none());
-        assert_eq!(
-            changes.observe(b"second".to_vec(), now + tick * 6),
-            Some(b"second".to_vec())
-        );
-        assert!(changes
-            .observe(b"second".to_vec(), now + tick * 12)
-            .is_none());
+struct WatchWorker {
+    pending: Arc<Mutex<PendingEvents>>,
+    latest: Arc<AtomicU64>,
+    target: Arc<WindowTarget>,
+    commands: Receiver<Control>,
+    changes: ChangeTracker,
+}
+
+impl WatchWorker {
+    fn run(
+        mut self,
+        path: std::path::PathBuf,
+        delay: Duration,
+        interval: Duration,
+        mode: WatchMode,
+    ) {
+        let mut notification = None;
+        let mut next_notification = Instant::now();
+        let mut next_poll = Instant::now();
+        let mut read_error: Option<Instant> = None;
+        let mut reported = false;
+        loop {
+            match self.commands.recv_timeout(Duration::from_millis(25)) {
+                Ok(Control::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(Control::Complete {
+                    generation,
+                    applied,
+                }) => {
+                    self.changes
+                        .complete(generation, applied, true, Instant::now());
+                    info!("config stage=apply-result generation={generation} applied={applied}");
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if !self.target.is_live() {
+                break;
+            }
+            let now = Instant::now();
+            if mode != WatchMode::Poll && notification.is_none() && now >= next_notification {
+                match DirectoryNotification::new(&path) {
+                    Ok(value) => notification = Some(value),
+                    Err(_) => {
+                        if mode == WatchMode::Notify {
+                            self.notify(ConfigEvent::Invalid("INI 目录通知不可用；请修复目录权限，或将 [config] watch_mode 改为 auto/poll 后重新启动。".into()));
+                            break;
+                        }
+                        warn!("config stage=notify fallback=poll");
+                        next_notification = now + Duration::from_secs(30);
+                    }
+                }
+            }
+            let changed = match notification.as_ref().map(DirectoryNotification::changed) {
+                Some(Ok(changed)) => changed,
+                Some(Err(_)) => {
+                    notification = None;
+                    next_notification = now + Duration::from_secs(30);
+                    if mode == WatchMode::Notify {
+                        self.notify(ConfigEvent::Invalid(
+                            "INI 目录通知已失效；请重新启动应用或使用 auto/poll。".into(),
+                        ));
+                        break;
+                    }
+                    warn!("config stage=notify lost fallback=poll");
+                    true
+                }
+                None => false,
+            };
+            if changed || now >= next_poll {
+                next_poll = now + interval;
+                match storage::read_bytes(&path) {
+                    Ok(bytes) => {
+                        read_error = None;
+                        reported = false;
+                        self.changes.observe(bytes, now);
+                    }
+                    Err(_) => {
+                        self.changes.unavailable();
+                        let since = read_error.get_or_insert(now);
+                        if !reported && now.duration_since(*since) >= delay {
+                            reported = true;
+                            self.notify(ConfigEvent::Invalid("INI 暂时无法读取；保留当前配置。请检查文件是否存在及读写权限，恢复后会继续检测。".into()));
+                        }
+                    }
+                }
+                self.latest.store(self.changes.observed, Ordering::Release);
+            }
+            let Some(candidate) = self.changes.next(now) else {
+                continue;
+            };
+            match load_snapshot(&candidate.contents, &path) {
+                Ok(_) => {
+                    self.changes.validate(candidate.generation);
+                    info!(
+                        "config stage=validated observed={} validated={} applied={}",
+                        self.changes.observed,
+                        self.changes.validated,
+                        self.changes.applied_generation
+                    );
+                    self.notify(ConfigEvent::Candidate(candidate));
+                }
+                Err(error) => {
+                    self.changes
+                        .complete(candidate.generation, false, false, now);
+                    error!(
+                        "config stage=watch invalid-candidate generation={}",
+                        candidate.generation
+                    );
+                    self.notify(ConfigEvent::Invalid(format!(
+                        "{error:#}；保留当前配置，修正并保存后重试"
+                    )));
+                }
+            }
+        }
     }
 
-    #[test]
-    fn same_content_and_temporary_empty_or_missing_files_do_not_restart() {
-        let now = Instant::now();
-        let delay = Duration::from_secs(1);
-        let mut changes = StableChange::new(b"initial".to_vec(), delay);
-        assert!(changes.observe(b"initial".to_vec(), now).is_none());
-        assert!(changes.observe(b"new".to_vec(), now).is_none());
-        assert!(changes.observe(Vec::new(), now + delay).is_none());
-        assert!(changes.observe(b"new".to_vec(), now + delay * 2).is_none());
-        changes.clear_pending();
-        assert!(changes.observe(b"new".to_vec(), now + delay * 3).is_none());
-        assert!(changes.observe(b"new".to_vec(), now + delay * 4).is_some());
-    }
-
-    #[test]
-    fn invalid_or_blank_candidates_cannot_restart_into_defaults() {
-        let validate = |bytes: &[u8]| validate_candidate(bytes, Path::new("window-switcher.ini"));
-        assert!(!validate(b"").unwrap());
-        assert!(!validate(b"; saving\n[switch-apps]\n").unwrap());
-        assert!(validate(b"[switch-apps\n").is_err());
-        assert!(validate(b"[switch-apps]\nenable = invalid\n").is_err());
-        assert!(validate(b"[switch-apps]\nbadge_color = black\n").is_err());
-        assert!(validate(b"[switch-apps]\nenable = yes\n").unwrap());
+    fn notify(&self, event: ConfigEvent) {
+        let mut pending = self.pending.lock();
+        if pending.stopped {
+            return;
+        }
+        match event {
+            ConfigEvent::Candidate(candidate) => pending.candidate = Some(candidate),
+            ConfigEvent::Invalid(message) => pending.invalid = Some(message),
+        }
+        // A read error must not replace an undelivered in-flight candidate: only
+        // the UI can acknowledge that candidate and unblock subsequent versions.
+        self.target.try_post(WM_USER_CONFIG_CHANGED);
     }
 }

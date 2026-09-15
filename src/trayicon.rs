@@ -1,117 +1,162 @@
-use crate::app::{IDM_CONFIGURE, IDM_EXIT, IDM_STARTUP, NAME, WM_USER_TRAYICON};
+use crate::{
+    app::{IDM_CONFIGURE, IDM_EXIT, IDM_STARTUP, NAME, WM_USER_TRAYICON},
+    localization::Text,
+    startup::StartupState,
+    utils::to_wstring,
+};
 
-use anyhow::{anyhow, Result};
-use windows::core::{w, PCWSTR};
+use anyhow::{bail, Context, Result};
+use windows::core::PCWSTR;
 use windows::Win32::{
-    Foundation::{HWND, POINT},
+    Foundation::{GetLastError, SetLastError, ERROR_SUCCESS, HWND, LPARAM, POINT, WPARAM},
     UI::{
         Shell::{
-            Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_ERROR, NIM_ADD,
-            NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+            Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_ERROR, NIIF_INFO,
+            NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
         },
         WindowsAndMessaging::{
-            AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, GetCursorPos,
-            LookupIconIdFromDirectoryEx, SetForegroundWindow, TrackPopupMenu, HMENU,
-            LR_DEFAULTCOLOR, MF_CHECKED, MF_STRING, MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+            AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, DestroyIcon, DestroyMenu,
+            GetCursorPos, LookupIconIdFromDirectoryEx, PostMessageW, SetForegroundWindow,
+            TrackPopupMenu, HMENU, LR_DEFAULTCOLOR, MF_CHECKED, MF_GRAYED, MF_STRING, MF_UNCHECKED,
+            TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, WM_NULL,
         },
     },
 };
 
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.ico");
-const TEXT_CONFIGURE: PCWSTR = w!("Configure");
-const TEXT_STARTUP: PCWSTR = w!("Startup");
-const TEXT_EXIT: PCWSTR = w!("Exit");
 
-pub struct TrayIcon {
+pub(crate) struct TrayIcon {
     data: NOTIFYICONDATAW,
 }
 
 impl TrayIcon {
-    pub fn create() -> Self {
-        let data = Self::create_nid();
-        Self { data }
+    pub(crate) fn create() -> Result<Self> {
+        let offset = unsafe {
+            LookupIconIdFromDirectoryEx(ICON_BYTES.as_ptr(), true, 0, 0, LR_DEFAULTCOLOR)
+        };
+        if offset <= 0 || offset as usize >= ICON_BYTES.len() {
+            bail!("trayicon stage=icon invalid resource");
+        }
+        let icon = unsafe {
+            CreateIconFromResourceEx(
+                &ICON_BYTES[offset as usize..],
+                true,
+                0x30000,
+                0,
+                0,
+                LR_DEFAULTCOLOR,
+            )
+        }
+        .context("trayicon stage=icon-create")?;
+        Ok(Self {
+            data: NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                uID: WM_USER_TRAYICON,
+                uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+                uCallbackMessage: WM_USER_TRAYICON,
+                hIcon: icon,
+                szTip: notification_text(&String::from_utf16_lossy(unsafe { NAME.as_wide() })),
+                ..Default::default()
+            },
+        })
     }
 
-    pub fn register(&mut self, hwnd: HWND) -> Result<()> {
+    pub(crate) fn register(&mut self, hwnd: HWND) -> Result<()> {
         self.data.hWnd = hwnd;
         unsafe { Shell_NotifyIconW(NIM_ADD, &self.data) }
             .ok()
-            .map_err(|e| anyhow!("Fail to add trayicon, {}", e))
+            .context("trayicon stage=register")
     }
 
-    pub fn exist(&mut self) -> bool {
+    pub(crate) fn exist(&mut self) -> bool {
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &self.data) }.as_bool()
     }
 
-    pub(crate) fn notify_error(&self, message: &str) -> Result<()> {
+    pub(crate) fn notify(&self, title: &str, message: &str, error: bool) -> Result<()> {
         let mut notification = self.data;
         notification.uFlags = NIF_INFO;
-        notification.dwInfoFlags = NIIF_ERROR;
-        notification.szInfoTitle = notification_text("配置未应用");
+        notification.dwInfoFlags = if error { NIIF_ERROR } else { NIIF_INFO };
+        notification.szInfoTitle = notification_text(title);
         notification.szInfo = notification_text(message);
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &notification) }
             .ok()
-            .map_err(|err| anyhow!("Failed to show configuration notification, {err}"))
+            .context("trayicon stage=notification")
     }
 
-    pub fn show(&mut self, startup: bool) -> Result<()> {
+    pub(crate) fn show(
+        &mut self,
+        startup: StartupState,
+        busy: bool,
+        text: Text,
+    ) -> Result<Option<u32>> {
         let hwnd = self.data.hWnd;
         let mut cursor = POINT::default();
-        unsafe {
-            SetForegroundWindow(hwnd)
-                .ok()
-                .map_err(|e| anyhow!("Fail to set foreground window, {}", e))?;
-            GetCursorPos(&mut cursor).map_err(|e| anyhow!("Fail to get cursor pos, {}", e))?;
-            let hmenu = self
-                .create_menu(startup)
-                .map_err(|e| anyhow!("Fail to create menu, {}", e))?;
+        unsafe { SetForegroundWindow(hwnd) }
+            .ok()
+            .context("trayicon stage=foreground")?;
+        unsafe { GetCursorPos(&mut cursor) }?;
+        let menu = self.create_menu(startup, busy, text)?;
+        unsafe { SetLastError(ERROR_SUCCESS) };
+        let command = unsafe {
             TrackPopupMenu(
-                hmenu,
-                TPM_LEFTALIGN | TPM_BOTTOMALIGN,
+                menu.0,
+                TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
                 cursor.x,
                 cursor.y,
                 None,
                 hwnd,
                 None,
             )
-            .ok()
-            .map_err(|e| anyhow!("Fail to show popup menu, {}", e))?
-        };
-        Ok(())
-    }
-
-    fn create_nid() -> NOTIFYICONDATAW {
-        let offset = unsafe {
-            LookupIconIdFromDirectoryEx(ICON_BYTES.as_ptr(), true, 0, 0, LR_DEFAULTCOLOR)
-        };
-        let icon_data = &ICON_BYTES[offset as usize..];
-        let hicon =
-            unsafe { CreateIconFromResourceEx(icon_data, true, 0x30000, 0, 0, LR_DEFAULTCOLOR) }
-                .expect("Failed to load icon resource");
-        let mut tooltip: Vec<u16> = unsafe { NAME.as_wide() }.to_vec();
-        tooltip.resize(128, 0);
-        tooltip.pop();
-        tooltip.push(0);
-        let tooltip: [u16; 128] = tooltip.try_into().unwrap();
-        NOTIFYICONDATAW {
-            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-            uID: WM_USER_TRAYICON,
-            uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
-            uCallbackMessage: WM_USER_TRAYICON,
-            hIcon: hicon,
-            szTip: tooltip,
-            ..Default::default()
         }
+        .0 as u32;
+        let error = unsafe { GetLastError() };
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)) };
+        if command == 0 && error != ERROR_SUCCESS {
+            return Err(windows::core::Error::from(error)).context("trayicon stage=menu");
+        }
+        Ok((command != 0).then_some(command))
     }
 
-    fn create_menu(&mut self, startup: bool) -> Result<HMENU> {
-        let startup_flags = if startup { MF_CHECKED } else { MF_UNCHECKED };
+    fn create_menu(&self, startup: StartupState, busy: bool, text: Text) -> Result<Menu> {
+        let menu = Menu(unsafe { CreatePopupMenu() }?);
+        let configure = to_wstring(text.configure());
+        let startup_text = to_wstring(text.startup(startup, busy));
+        let exit = to_wstring(text.exit());
+        let mut flags = if matches!(
+            startup,
+            StartupState::Ready(true) | StartupState::Saved(true)
+        ) {
+            MF_CHECKED
+        } else {
+            MF_UNCHECKED
+        };
+        if !matches!(startup, StartupState::Ready(_)) || busy {
+            flags |= MF_GRAYED;
+        }
         unsafe {
-            let hmenu = CreatePopupMenu().map_err(|err| anyhow!("Failed to create menu, {err}"))?;
-            AppendMenuW(hmenu, MF_STRING, IDM_CONFIGURE as usize, TEXT_CONFIGURE)?;
-            AppendMenuW(hmenu, startup_flags, IDM_STARTUP as usize, TEXT_STARTUP)?;
-            AppendMenuW(hmenu, MF_STRING, IDM_EXIT as usize, TEXT_EXIT)?;
-            Ok(hmenu)
+            AppendMenuW(
+                menu.0,
+                MF_STRING,
+                IDM_CONFIGURE as usize,
+                PCWSTR(configure.as_ptr()),
+            )?;
+            AppendMenuW(
+                menu.0,
+                MF_STRING | flags,
+                IDM_STARTUP as usize,
+                PCWSTR(startup_text.as_ptr()),
+            )?;
+            AppendMenuW(menu.0, MF_STRING, IDM_EXIT as usize, PCWSTR(exit.as_ptr()))?;
+        }
+        Ok(menu)
+    }
+}
+
+struct Menu(HMENU);
+impl Drop for Menu {
+    fn drop(&mut self) {
+        if let Err(error) = unsafe { DestroyMenu(self.0) } {
+            warn!("trayicon stage=menu-release code={:#x}", error.code().0);
         }
     }
 }
@@ -133,9 +178,14 @@ fn notification_text<const N: usize>(text: &str) -> [u16; N] {
 
 impl Drop for TrayIcon {
     fn drop(&mut self) {
-        debug!("trayicon destroyed");
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.data);
+            if let Err(error) = DestroyIcon(self.data.hIcon) {
+                warn!("trayicon stage=icon-release code={:#x}", error.code().0);
+            }
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

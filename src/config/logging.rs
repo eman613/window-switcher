@@ -11,6 +11,10 @@ use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHA
 
 use super::file_identity::{require_regular, FileIdentity, PinnedPath};
 
+mod rotation;
+mod worker;
+pub(crate) use worker::initialize_logging;
+
 struct LogFailure {
     recorded: AtomicBool,
     pending: AtomicBool,

@@ -129,6 +129,50 @@ pub(super) fn merge_missing(text: &str) -> Result<String> {
     Ok(merged)
 }
 
+/// Edit just the first effective assignment. Preserve all other original bytes,
+/// including duplicate assignments, comments, encoding handled by the caller,
+/// and unknown sections. Reparse to prove the intended effective value changed.
+pub(super) fn set_value(text: &str, section: &str, key: &str, value: &str) -> Result<String> {
+    if value.contains(['\r', '\n', '\0']) {
+        bail!("INI 设置值不能包含换行或 NUL");
+    }
+    let original = values(&parse_ini(text)?);
+    let merged = merge_missing(text)?;
+    let layout = scan_layout(&merged);
+    let identity = (section.to_owned(), key.to_owned());
+    let offset = *layout
+        .keys
+        .get(&identity)
+        .context("待修改 INI 键不在声明模板中")?;
+    let line_end = offset + merged[offset..].find('\n').unwrap_or(merged.len() - offset);
+    let line = &merged[offset..line_end];
+    let separator = line.find(['=', ':']).context("INI 赋值缺少分隔符")?;
+    let after = &line[separator + 1..];
+    let value_start =
+        offset + separator + 1 + (after.len() - after.trim_start_matches([' ', '\t']).len());
+    let value_end = offset + line.trim_end_matches([' ', '\t', '\r']).len();
+    let mut updated = merged.clone();
+    updated.replace_range(value_start.min(value_end)..value_end, value);
+    let parsed = parse_ini(&updated)?;
+    let updated_values = values(&parsed);
+    for (entry, before) in original {
+        if entry != identity && updated_values.get(&entry) != Some(&before) {
+            bail!("修改会改变其他 INI 项；原文件保留");
+        }
+        if entry == identity
+            && updated_values
+                .get(&entry)
+                .is_none_or(|after| after.len() != before.len() || after[1..] != before[1..])
+        {
+            bail!("修改会改变重复项的优先关系；原文件保留");
+        }
+    }
+    if parsed.get_from((!section.is_empty()).then_some(section), key) != Some(value) {
+        bail!("INI 修改无法确认生效值；原文件保留");
+    }
+    Ok(updated)
+}
+
 fn values(ini: &Ini) -> HashMap<EntryKey, Vec<String>> {
     let mut result: HashMap<EntryKey, Vec<String>> = HashMap::new();
     for (section, properties) in ini {

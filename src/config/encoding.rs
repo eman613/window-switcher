@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IniEncoding {
     Utf8,
     Utf8Bom,

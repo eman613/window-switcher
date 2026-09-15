@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::VecDeque, sync::Arc, time::Instant};
+use std::{cell::RefCell, collections::VecDeque, sync::Arc};
 
 use anyhow::{bail, Context, Result};
 use once_cell::sync::OnceCell;
@@ -23,18 +23,19 @@ use super::{
     WM_USER_TRAYICON,
 };
 use crate::{
-    config::{watch::ConfigWatcher, LoadedConfig},
+    config::LoadedConfig,
     foreground::ForegroundWatcher,
     keyboard::{
         dispatch::{InputDispatch, WM_INPUT_READY},
         KeyboardListener,
     },
     painter::GdiAAPainter,
-    startup::Startup,
+    restart::{ChildSession, WM_RESTART},
+    startup::{Startup, WM_STARTUP},
     trayicon::TrayIcon,
     utils::{
         check_error, com::ComApartment, get_window_user_data, is_running_as_admin,
-        set_window_user_data,
+        set_window_user_data, SingleInstance,
     },
     window_target::WindowTarget,
 };
@@ -43,21 +44,31 @@ const INPUT_POLL_TIMER: usize = 0xa101;
 const MAX_DEFERRED_MESSAGES: usize = 64;
 static WINDOW_CLASS: OnceCell<u16> = OnceCell::new();
 
-pub(super) fn run(loaded: &LoadedConfig) -> Result<()> {
-    let started = Instant::now();
+pub(super) fn run(
+    loaded: &LoadedConfig,
+    instance: SingleInstance,
+    child: Option<ChildSession>,
+    diagnostics: crate::diagnostics::Diagnostics,
+) -> Result<()> {
     let _com = ComApartment::sta()?;
     let window = ApplicationWindow::create()?;
     let hwnd = window.0;
     let painter = GdiAAPainter::new(hwnd)?;
     let foreground = ForegroundWatcher::init(&loaded.config.switch_windows_blacklist, hwnd)?;
     let is_admin = is_running_as_admin()?;
-    let startup = Startup::init(is_admin)?;
+    let startup = Startup::default();
     let taskbar_message = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
     if taskbar_message == 0 {
         return Err(windows::core::Error::from_win32()).context("ui stage=taskbar-message");
     }
     let target = Arc::new(WindowTarget::new(hwnd));
-    let input = Arc::new(InputDispatch::new(target.clone()));
+    let input = Arc::new(InputDispatch::with_metrics(
+        target.clone(),
+        loaded.config.metrics_enabled,
+    ));
+    let lifecycle = super::lifecycle::Lifecycle::new(instance, child, loaded);
+    lifecycle.attach(target.clone());
+    let replacement = lifecycle.is_replacement();
     let owner = Box::new(AppHost {
         app: RefCell::new(App {
             hwnd,
@@ -65,7 +76,7 @@ pub(super) fn run(loaded: &LoadedConfig) -> Result<()> {
             painter,
             startup,
             config: loaded.config.clone(),
-            trayicon: loaded.config.trayicon.then(TrayIcon::create),
+            trayicon: loaded.config.trayicon.then(TrayIcon::create).transpose()?,
             config_watcher: None,
             switch_windows_state: SwitchWindowsState {
                 modifier_released: true,
@@ -76,6 +87,10 @@ pub(super) fn run(loaded: &LoadedConfig) -> Result<()> {
             target: target.clone(),
             input: input.clone(),
             input_session: 0,
+            lifecycle,
+            feedback: Default::default(),
+            text: crate::localization::Text::new(loaded.config.language),
+            diagnostics,
         }),
         target: target.clone(),
         taskbar_message,
@@ -84,20 +99,17 @@ pub(super) fn run(loaded: &LoadedConfig) -> Result<()> {
     // A single Box owns App until the callback registration has been cleared.
     // Callback code only borrows App through RefCell for one dispatch at a time.
     let registration = AppRegistration::new(hwnd, &owner)?;
-    if loaded.config.auto_restart {
-        owner.app.borrow_mut().config_watcher = Some(ConfigWatcher::start(loaded, target.clone())?);
-    }
     let timer = InputPollTimer::new(hwnd)?;
-    let keyboard = KeyboardListener::init(
+    let keyboard = KeyboardListener::with_activation(
         input.clone(),
         foreground.status(),
         &loaded.config.to_hotkeys(),
+        !replacement,
     )?;
-    info!(
-        "startup stage=input-ready app_elapsed_us={}",
-        started.elapsed().as_micros()
-    );
-    owner.app.borrow_mut().set_trayicon();
+    owner.app.borrow_mut().lifecycle.activation = Some(keyboard.activation());
+    // Wake the owner as soon as hook readiness is confirmed; the timer remains
+    // a fallback for a full message queue, not the normal startup trigger.
+    target.try_post(WM_INPUT_READY);
     let result = eventloop();
     target.close();
     drop(keyboard);
@@ -133,6 +145,8 @@ impl AppHost {
                 | WM_USER_TRAYICON
                 | WM_USER_REGISTER_TRAYICON
                 | WM_INPUT_READY
+                | WM_RESTART
+                | WM_STARTUP
                 | WM_COMMAND
                 | WM_LBUTTONUP
         ) || msg == self.taskbar_message
@@ -174,17 +188,26 @@ impl AppHost {
         let Ok(mut app) = self.app.try_borrow_mut() else {
             return false;
         };
-        let result = if message.msg == WM_INPUT_READY || message.msg == WM_TIMER {
+        let result = if matches!(
+            message.msg,
+            WM_INPUT_READY | WM_TIMER | WM_RESTART | WM_STARTUP
+        ) {
             app.drain_input();
             Ok(())
         } else if message.msg == WM_USER_REGISTER_TRAYICON || message.msg == self.taskbar_message {
+            if message.msg == self.taskbar_message {
+                app.feedback.retry_count = 0;
+            }
             app.set_trayicon();
             Ok(())
         } else {
             app.handle_message(message.msg, message.wparam, message.lparam)
         };
         if let Err(err) = result {
-            app.report_config_error(&format!("{err:#}"));
+            app.report_failure(
+                crate::localization::FailureKind::Interface,
+                &format!("{err:#}"),
+            );
         }
         true
     }
@@ -322,7 +345,11 @@ unsafe extern "system" fn window_proc(
         if host.owns(msg, wparam) {
             if matches!(
                 msg,
-                WM_INPUT_READY | WM_USER_CONFIG_CHANGED | WM_USER_REGISTER_TRAYICON
+                WM_INPUT_READY
+                    | WM_USER_CONFIG_CHANGED
+                    | WM_USER_REGISTER_TRAYICON
+                    | WM_RESTART
+                    | WM_STARTUP
             ) && !host.target.accepts(lparam)
             {
                 return LRESULT(0);
@@ -370,6 +397,10 @@ mod tests {
                 target: target.clone(),
                 input,
                 input_session: 0,
+                lifecycle: Default::default(),
+                feedback: Default::default(),
+                text: crate::localization::Text::new(crate::config::Language::Chinese),
+                diagnostics: Default::default(),
             }),
             target: target.clone(),
             taskbar_message: 0xffff,

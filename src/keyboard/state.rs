@@ -80,6 +80,13 @@ impl InputMachine {
         }
     }
 
+    pub(super) fn reset(&mut self) -> Option<u64> {
+        self.pressed.fill(false);
+        self.consumed.fill(false);
+        // Keep the monotonic session counter: dispatch ACKs survive a rollback.
+        self.active.take().map(|gesture| gesture.session)
+    }
+
     pub(super) fn handle(
         &mut self,
         key: KeyInput,
