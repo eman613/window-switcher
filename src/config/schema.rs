@@ -50,18 +50,46 @@ settings! {
     switch_windows_enable: bool => ("switch-windows", "enable", "yes", boolean, "Config::to_hotkeys");
     switch_windows_hotkey: Vec<Hotkey> => ("switch-windows", "hotkey", "alt+`", |v| hotkeys(v, SWITCH_WINDOWS_HOTKEY_ID, "switch windows", "alt+`"), "KeyboardListener");
     switch_windows_blacklist: HashSet<String> => ("switch-windows", "blacklist", "", blacklist, "ForegroundWatcher::init");
-    switch_windows_ignore_minimal: bool => ("switch-windows", "ignore_minimal", "no", boolean, "App::switch_windows");
+    switch_windows_ignore_minimal: bool => ("switch-windows", "ignore_minimal", "no", boolean, "WindowFilter::from_config");
     switch_windows_only_current_desktop: Option<bool> => ("switch-windows", "only_current_desktop", "auto", automatic_bool, "Config::switch_windows_only_current_desktop");
+    switch_windows_include_topmost: bool => ("switch-windows", "include_topmost", "no", boolean, "WindowFilter::allows");
+    switch_windows_include_tool_windows: bool => ("switch-windows", "include_tool_windows", "no", boolean, "WindowFilter::allows");
+    switch_windows_include_untitled: bool => ("switch-windows", "include_untitled", "no", boolean, "WindowFilter::allows");
+    switch_windows_min_width: u32 => ("switch-windows", "min_width", "120", |v| integer(v, 0, 4096), "WindowFilter::allows");
+    switch_windows_min_height: u32 => ("switch-windows", "min_height", "90", |v| integer(v, 0, 4096), "WindowFilter::allows");
+    switch_windows_exclude_titles: HashSet<String> => ("switch-windows", "exclude_titles", "Windows Input Experience", titles, "WindowFilter::allows");
+    switch_windows_exclude_processes: HashSet<String> => ("switch-windows", "exclude_processes", "", blacklist, "WindowFilter::allows");
     switch_apps_enable: bool => ("switch-apps", "enable", "no", boolean, "Config::to_hotkeys");
     switch_apps_hotkey: Vec<Hotkey> => ("switch-apps", "hotkey", "alt+tab", |v| hotkeys(v, SWITCH_APPS_HOTKEY_ID, "switch apps", "alt+tab"), "KeyboardListener");
-    switch_apps_ignore_minimal: bool => ("switch-apps", "ignore_minimal", "no", boolean, "App::switch_apps");
-    switch_apps_override_icons: IndexMap<String, String> => ("switch-apps", "override_icons", "", overrides, "get_app_icon");
-    switch_apps_show_badge: bool => ("switch-apps", "show_badge", "yes", boolean, "App::switch_apps");
-    switch_apps_badge_max: u32 => ("switch-apps", "badge_max", "99", |v| integer(v, 2, 9999), "App::switch_apps");
+    switch_apps_ignore_minimal: bool => ("switch-apps", "ignore_minimal", "no", boolean, "WindowFilter::from_config");
+    switch_apps_override_icons: IndexMap<String, String> => ("switch-apps", "override_icons", "", overrides, "IconLoader::native");
+    switch_apps_show_badge: bool => ("switch-apps", "show_badge", "yes", boolean, "App::apply_app_snapshot");
+    switch_apps_badge_max: u32 => ("switch-apps", "badge_max", "99", |v| integer(v, 2, 9999), "App::apply_app_snapshot");
     switch_apps_badge_color: u32 => ("switch-apps", "badge_color", "#4C7094", color, "BadgeStyle::from_config");
     switch_apps_badge_text_color: u32 => ("switch-apps", "badge_text_color", "#FFFFFF", color, "BadgeStyle::from_config");
     switch_apps_badge_font_size: u32 => ("switch-apps", "badge_font_size", "12", |v| integer(v, 8, 24), "BadgeStyle::from_config");
     switch_apps_only_current_desktop: Option<bool> => ("switch-apps", "only_current_desktop", "auto", automatic_bool, "Config::switch_apps_only_current_desktop");
+    switch_apps_blacklist: HashSet<String> => ("switch-apps", "blacklist", "", blacklist, "ForegroundStatus::allows_apps");
+    switch_apps_include_topmost: bool => ("switch-apps", "include_topmost", "no", boolean, "WindowFilter::allows");
+    switch_apps_include_tool_windows: bool => ("switch-apps", "include_tool_windows", "no", boolean, "WindowFilter::allows");
+    switch_apps_include_untitled: bool => ("switch-apps", "include_untitled", "no", boolean, "WindowFilter::allows");
+    switch_apps_min_width: u32 => ("switch-apps", "min_width", "120", |v| integer(v, 0, 4096), "WindowFilter::allows");
+    switch_apps_min_height: u32 => ("switch-apps", "min_height", "90", |v| integer(v, 0, 4096), "WindowFilter::allows");
+    switch_apps_exclude_titles: HashSet<String> => ("switch-apps", "exclude_titles", "Windows Input Experience", titles, "WindowFilter::allows");
+    switch_apps_exclude_processes: HashSet<String> => ("switch-apps", "exclude_processes", "", blacklist, "WindowFilter::allows");
+    unknown_foreground: ForegroundPolicy => ("input", "unknown_foreground", "passthrough", str::parse::<ForegroundPolicy>, "ForegroundStatus::allows");
+    injected_events: InjectedPolicy => ("input", "injected_events", "handle", str::parse::<InjectedPolicy>, "KeyboardListener");
+    monitor: MonitorPolicy => ("appearance", "monitor", "cursor", str::parse::<MonitorPolicy>, "MonitorSnapshot::capture");
+    use_work_area: bool => ("appearance", "use_work_area", "yes", boolean, "MonitorSnapshot::capture");
+    panel_width: u32 => ("appearance", "panel_width", "0", |v| integer(v, 0, 32768), "LayoutSnapshot::calculate");
+    panel_height: u32 => ("appearance", "panel_height", "0", |v| integer(v, 0, 32768), "LayoutSnapshot::calculate");
+    icon_size: u32 => ("appearance", "icon_size", "64", |v| integer(v, 24, 256), "LayoutSnapshot::calculate");
+    icon_padding: u32 => ("appearance", "icon_padding", "4", |v| integer(v, 0, 64), "LayoutSnapshot::calculate");
+    item_gap: u32 => ("appearance", "item_gap", "0", |v| integer(v, 0, 64), "LayoutSnapshot::calculate");
+    panel_padding: u32 => ("appearance", "panel_padding", "10", |v| integer(v, 0, 128), "LayoutSnapshot::calculate");
+    max_width: u32 => ("appearance", "max_width", "0", |v| integer(v, 0, 32768), "LayoutSnapshot::calculate");
+    max_height: u32 => ("appearance", "max_height", "0", |v| integer(v, 0, 32768), "LayoutSnapshot::calculate");
+    max_columns: u32 => ("appearance", "max_columns", "0", |v| integer(v, 0, 128), "LayoutSnapshot::calculate");
     startup_enabled: StartupEnabled => ("startup", "enabled", "auto", str::parse::<StartupEnabled>, "Startup::start");
     startup_run_level: RunLevel => ("startup", "run_level", "inherit", str::parse::<RunLevel>, "Startup::start");
     startup_battery_policy: BatteryPolicy => ("startup", "battery_policy", "inherit", str::parse::<BatteryPolicy>, "Startup::start");
@@ -78,6 +106,17 @@ settings! {
     log_retained_files: u32 => ("log", "retained_files", "3", |v| integer(v, 0, 20), "RotatingLog::new");
     metrics_enabled: bool => ("performance", "metrics_enabled", "no", boolean, "Diagnostics::new");
     metrics_interval_s: u32 => ("performance", "metrics_interval_s", "60", |v| integer(v, 1, 3600), "Diagnostics::tick");
+    icon_cache_limit: u32 => ("performance", "icon_cache_limit", "256", |v| integer(v, 16, 1024), "IconCache::new");
+    icon_cache_mb: u32 => ("performance", "icon_cache_mb", "32", |v| integer(v, 4, 256), "IconCache::new");
+    icon_failure_ttl_ms: u32 => ("performance", "icon_failure_ttl_ms", "3000", |v| integer(v, 100, 60000), "IconCache::new");
+    metadata_cache_limit: u32 => ("performance", "metadata_cache_limit", "512", |v| integer(v, 16, 4096), "ProcessMetadataCache::new");
+    metadata_ttl_ms: u32 => ("performance", "metadata_ttl_ms", "5000", |v| integer(v, 100, 60000), "ProcessMetadataCache::new");
+    icon_query_timeout_ms: u32 => ("performance", "icon_query_timeout_ms", "100", |v| integer(v, 10, 500), "IconLoader::native");
+    snapshot_budget_ms: u32 => ("performance", "snapshot_budget_ms", "50", |v| integer(v, 5, 500), "SnapshotService::start");
+    render_scale: RenderScale => ("performance", "render_scale", "auto", str::parse::<RenderScale>, "RenderPlan::new");
+    render_budget_mb: u32 => ("performance", "render_budget_mb", "64", |v| integer(v, 8, 256), "RenderPlan::new");
+    chrome_user_data_dir: Option<PathBuf> => ("browser", "chrome_user_data_dir", "auto", directory, "BrowserPaths::new");
+    edge_user_data_dir: Option<PathBuf> => ("browser", "edge_user_data_dir", "auto", directory, "BrowserPaths::new");
 }
 
 impl Setting {
@@ -109,5 +148,6 @@ pub(super) fn load(ini: &Ini) -> Result<Config> {
             setting.set(&mut configuration, value)?;
         }
     }
+    crate::layout::LayoutOptions::from_config(&configuration).validate()?;
     Ok(configuration)
 }

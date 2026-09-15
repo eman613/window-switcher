@@ -65,6 +65,14 @@ pub(super) fn hotkeys(value: &str, id: u32, name: &str, default: &str) -> Result
 }
 
 pub(super) fn blacklist(value: &str) -> Result<HashSet<String>> {
+    string_list(value, 260)
+}
+
+pub(super) fn titles(value: &str) -> Result<HashSet<String>> {
+    string_list(value, 4096)
+}
+
+fn string_list(value: &str, item_limit: usize) -> Result<HashSet<String>> {
     let entries: Vec<_> = value
         .split(',')
         .map(str::trim)
@@ -73,15 +81,26 @@ pub(super) fn blacklist(value: &str) -> Result<HashSet<String>> {
     if entries.len() > 256
         || entries
             .iter()
-            .any(|item| item.contains('\0') || item.encode_utf16().count() > 260)
+            .any(|item| item.contains('\0') || item.encode_utf16().count() > item_limit)
     {
-        bail!("黑名单最多 256 个 EXE 名，每项最多 260 个 UTF-16 单元，以英文逗号分隔");
+        bail!("列表最多 256 项，每项最多 {item_limit} 个 UTF-16 单元，以英文逗号分隔");
     }
     Ok(entries.into_iter().map(str::to_owned).collect())
 }
 
+pub(super) fn directory(value: &str) -> Result<Option<PathBuf>> {
+    if value == "auto" {
+        return Ok(None);
+    }
+    if value.trim().is_empty() || value.contains('\0') || value.encode_utf16().count() > 32767 {
+        bail!("请填写 auto 或非空目录路径，最长 32767 个 UTF-16 单元");
+    }
+    Ok(Some(PathBuf::from(value)))
+}
+
 pub(super) fn overrides(value: &str) -> Result<IndexMap<String, String>> {
     let mut overrides = IndexMap::new();
+    let mut duplicates = 0;
     for entry in value
         .split([',', ';'])
         .map(str::trim)
@@ -93,7 +112,20 @@ pub(super) fn overrides(value: &str) -> Result<IndexMap<String, String>> {
         if pattern.trim().is_empty() || path.trim().is_empty() || entry.contains('\0') {
             bail!("匹配文本和图标路径不能为空或包含 NUL");
         }
-        overrides.insert(pattern.trim().to_lowercase(), path.trim().to_owned());
+        if pattern.encode_utf16().count() > 260 || path.encode_utf16().count() > 32767 {
+            bail!("图标匹配文本最多 260 个 UTF-16 单元，路径最多 32767 个");
+        }
+        duplicates += usize::from(
+            overrides
+                .insert(pattern.trim().to_lowercase(), path.trim().to_owned())
+                .is_some(),
+        );
+        if overrides.len() > 256 {
+            bail!("图标覆盖规则最多 256 项");
+        }
+    }
+    if duplicates != 0 {
+        warn!("config stage=override-precedence duplicate_patterns={duplicates} first_position_last_value=true");
     }
     Ok(overrides)
 }

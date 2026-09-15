@@ -12,19 +12,21 @@ use windows::{
             GetWindowLongPtrW, IsWindow, KillTimer, LoadCursorW, PostQuitMessage, RegisterClassW,
             RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage, CS_HREDRAW,
             CS_VREDRAW, CW_USEDEFAULT, GWL_STYLE, HTCLIENT, IDC_ARROW, MSG, WINDOW_STYLE,
-            WM_COMMAND, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCDESTROY, WM_NCHITTEST,
-            WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WM_COMMAND, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONUP,
+            WM_NCDESTROY, WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
+            WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
         },
     },
 };
 
 use super::{
-    App, SwitchWindowsState, NAME, WM_USER_CONFIG_CHANGED, WM_USER_REGISTER_TRAYICON,
-    WM_USER_TRAYICON,
+    App, SwitchWindowsState, NAME, WM_SCENE_INVALIDATED, WM_USER_CONFIG_CHANGED,
+    WM_USER_REGISTER_TRAYICON, WM_USER_TRAYICON,
 };
 use crate::{
     config::LoadedConfig,
     foreground::ForegroundWatcher,
+    icon_loader::{IconService, WM_ICON},
     keyboard::{
         dispatch::{InputDispatch, WM_INPUT_READY},
         KeyboardListener,
@@ -37,6 +39,7 @@ use crate::{
         check_error, com::ComApartment, get_window_user_data, is_running_as_admin,
         set_window_user_data, SingleInstance,
     },
+    window_snapshot::{SnapshotService, WM_SNAPSHOT},
     window_target::WindowTarget,
 };
 
@@ -53,8 +56,9 @@ pub(super) fn run(
     let _com = ComApartment::sta()?;
     let window = ApplicationWindow::create()?;
     let hwnd = window.0;
-    let painter = GdiAAPainter::new(hwnd)?;
-    let foreground = ForegroundWatcher::init(&loaded.config.switch_windows_blacklist, hwnd)?;
+    let painter = GdiAAPainter::new(hwnd, &loaded.config)?;
+    let lifetimes = Arc::new(crate::window_snapshot::lifetimes::WindowLifetimes::default());
+    let foreground = ForegroundWatcher::init(&loaded.config, hwnd, lifetimes.clone())?;
     let is_admin = is_running_as_admin()?;
     let startup = Startup::default();
     let taskbar_message = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
@@ -62,6 +66,22 @@ pub(super) fn run(
         return Err(windows::core::Error::from_win32()).context("ui stage=taskbar-message");
     }
     let target = Arc::new(WindowTarget::new(hwnd));
+    let snapshots = SnapshotService::start(
+        &loaded.config,
+        is_admin,
+        foreground.status(),
+        lifetimes.clone(),
+        target.clone(),
+    )?;
+    let icons = IconService::start(
+        &loaded.config,
+        loaded
+            .path
+            .parent()
+            .context("icon stage=config-directory")?,
+        lifetimes,
+        target.clone(),
+    )?;
     let input = Arc::new(InputDispatch::with_metrics(
         target.clone(),
         loaded.config.metrics_enabled,
@@ -83,7 +103,10 @@ pub(super) fn run(
                 ..Default::default()
             },
             switch_apps_state: None,
-            cached_icons: Default::default(),
+            snapshots,
+            icons,
+            remembered_icons: Default::default(),
+            switching: Default::default(),
             target: target.clone(),
             input: input.clone(),
             input_session: 0,
@@ -105,6 +128,7 @@ pub(super) fn run(
         foreground.status(),
         &loaded.config.to_hotkeys(),
         !replacement,
+        loaded.config.injected_events,
     )?;
     owner.app.borrow_mut().lifecycle.activation = Some(keyboard.activation());
     // Wake the owner as soon as hook readiness is confirmed; the timer remains
@@ -147,6 +171,9 @@ impl AppHost {
                 | WM_INPUT_READY
                 | WM_RESTART
                 | WM_STARTUP
+                | WM_SNAPSHOT
+                | WM_ICON
+                | WM_SCENE_INVALIDATED
                 | WM_COMMAND
                 | WM_LBUTTONUP
         ) || msg == self.taskbar_message
@@ -168,7 +195,12 @@ impl AppHost {
             let mut pending = self.pending.borrow_mut();
             if matches!(
                 message.msg,
-                WM_INPUT_READY | WM_TIMER | WM_USER_REGISTER_TRAYICON
+                WM_INPUT_READY
+                    | WM_TIMER
+                    | WM_USER_REGISTER_TRAYICON
+                    | WM_SNAPSHOT
+                    | WM_ICON
+                    | WM_SCENE_INVALIDATED
             ) && pending.iter().any(|old| old.msg == message.msg)
             {
                 return;
@@ -190,7 +222,7 @@ impl AppHost {
         };
         let result = if matches!(
             message.msg,
-            WM_INPUT_READY | WM_TIMER | WM_RESTART | WM_STARTUP
+            WM_INPUT_READY | WM_TIMER | WM_RESTART | WM_STARTUP | WM_SNAPSHOT | WM_ICON
         ) {
             app.drain_input();
             Ok(())
@@ -342,6 +374,13 @@ unsafe extern "system" fn window_proc(
         if matches!(msg, WM_DESTROY | WM_NCDESTROY) {
             host.target.close();
         }
+        if matches!(
+            msg,
+            WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE | WM_THEMECHANGED
+        ) {
+            // Never retain pointer-bearing native message parameters across a callback.
+            host.target.try_post(WM_SCENE_INVALIDATED);
+        }
         if host.owns(msg, wparam) {
             if matches!(
                 msg,
@@ -350,6 +389,9 @@ unsafe extern "system" fn window_proc(
                     | WM_USER_REGISTER_TRAYICON
                     | WM_RESTART
                     | WM_STARTUP
+                    | WM_SNAPSHOT
+                    | WM_ICON
+                    | WM_SCENE_INVALIDATED
             ) && !host.target.accepts(lparam)
             {
                 return LRESULT(0);
@@ -382,6 +424,19 @@ mod tests {
         let window = ApplicationWindow::create().unwrap();
         let target = Arc::new(WindowTarget::new(window.0));
         let input = Arc::new(InputDispatch::new(target.clone()));
+        let config = crate::config::Config::default();
+        let lifetimes = Arc::new(crate::window_snapshot::lifetimes::WindowLifetimes::default());
+        let foreground = ForegroundWatcher::init(&config, window.0, lifetimes.clone()).unwrap();
+        let snapshots = SnapshotService::start(
+            &config,
+            false,
+            foreground.status(),
+            lifetimes.clone(),
+            target.clone(),
+        )
+        .unwrap();
+        let icons =
+            IconService::start(&config, &std::env::temp_dir(), lifetimes, target.clone()).unwrap();
         let owner = Box::new(AppHost {
             app: RefCell::new(App {
                 hwnd: window.0,
@@ -392,8 +447,11 @@ mod tests {
                 config_watcher: None,
                 switch_windows_state: Default::default(),
                 switch_apps_state: None,
-                cached_icons: Default::default(),
-                painter: GdiAAPainter::new(window.0).unwrap(),
+                snapshots,
+                icons,
+                remembered_icons: Default::default(),
+                switching: Default::default(),
+                painter: GdiAAPainter::new(window.0, &config).unwrap(),
                 target: target.clone(),
                 input,
                 input_session: 0,

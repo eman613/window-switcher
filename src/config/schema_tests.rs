@@ -2,7 +2,7 @@ use super::{document, schema::SETTINGS, Config, DEFAULT_CONFIG, SWITCH_APPS_HOTK
 
 #[test]
 fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage() {
-    let cases = [
+    let mut cases = vec![
         ("", "trayicon", "no", "maybe"),
         ("", "auto_restart", "no", "maybe"),
         ("", "restart_delay_ms", "200", "199"),
@@ -42,9 +42,45 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ("log", "retained_files", "0", "21"),
         ("performance", "metrics_enabled", "yes", "maybe"),
         ("performance", "metrics_interval_s", "1", "3601"),
+        ("switch-apps", "blacklist", "Game.EXE", "bad\0.exe"),
+        ("input", "unknown_foreground", "handle", "ignore"),
+        ("input", "injected_events", "passthrough", "ignore"),
+        ("appearance", "monitor", "primary", "last"),
+        ("appearance", "use_work_area", "no", "maybe"),
+        ("appearance", "panel_width", "740", "32769"),
+        ("appearance", "panel_height", "164", "32769"),
+        ("appearance", "icon_size", "128", "23"),
+        ("appearance", "icon_padding", "8", "65"),
+        ("appearance", "item_gap", "10", "65"),
+        ("appearance", "panel_padding", "20", "129"),
+        ("appearance", "max_width", "1024", "32769"),
+        ("appearance", "max_height", "512", "32769"),
+        ("appearance", "max_columns", "10", "129"),
+        ("performance", "icon_cache_limit", "16", "15"),
+        ("performance", "icon_cache_mb", "4", "257"),
+        ("performance", "icon_failure_ttl_ms", "100", "99"),
+        ("performance", "metadata_cache_limit", "16", "15"),
+        ("performance", "metadata_ttl_ms", "100", "99"),
+        ("performance", "icon_query_timeout_ms", "10", "9"),
+        ("performance", "snapshot_budget_ms", "5", "501"),
+        ("performance", "render_scale", "2", "3"),
+        ("performance", "render_budget_mb", "8", "257"),
+        ("browser", "chrome_user_data_dir", "custom/chrome", ""),
+        ("browser", "edge_user_data_dir", "custom/edge", "bad\0dir"),
     ];
+    for section in ["switch-windows", "switch-apps"] {
+        cases.extend([
+            (section, "include_topmost", "yes", "maybe"),
+            (section, "include_tool_windows", "yes", "maybe"),
+            (section, "include_untitled", "yes", "maybe"),
+            (section, "min_width", "0", "4097"),
+            (section, "min_height", "0", "4097"),
+            (section, "exclude_titles", "", "bad\0title"),
+            (section, "exclude_processes", "app.exe", "bad\0.exe"),
+        ]);
+    }
     let template = document::parse_ini(DEFAULT_CONFIG).unwrap();
-    assert_eq!(SETTINGS.len(), 34);
+    assert_eq!(SETTINGS.len(), 73);
     assert_eq!(cases.len(), SETTINGS.len());
     assert_eq!(
         template
@@ -108,6 +144,60 @@ fn nondefault_values_reach_hotkeys_desktop_filter_and_badge_consumers() {
         crate::badge::format_badge_count(251, config.switch_apps_badge_max).as_deref(),
         Some("250+")
     );
+}
+
+#[test]
+fn stage_c_ini_sizes_and_process_exclusions_reach_their_consumers() {
+    use crate::{
+        keyboard::state::SwitchKind,
+        layout::{LayoutOptions, LayoutSnapshot, MonitorSnapshot, PixelRect},
+        window_snapshot::filter::WindowFilter,
+    };
+    let config = Config::load(&document::parse_ini("[appearance]\npanel_width=740\npanel_height=164\nicon_padding=6\npanel_padding=12\nitem_gap=8\nmax_columns=4\n[switch-apps]\nexclude_processes=EXCLUDED.EXE\n[switch-windows]\nexclude_processes=OTHER.EXE\n").unwrap()).unwrap();
+    let screen = PixelRect {
+        left: -1000,
+        top: 0,
+        right: 0,
+        bottom: 600,
+    };
+    let layout = LayoutSnapshot::calculate(
+        &LayoutOptions::from_config(&config),
+        MonitorSnapshot {
+            identity: 1,
+            screen,
+            available: screen,
+            dpi: 96,
+        },
+        9,
+        8,
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            layout.bounds.width(),
+            layout.bounds.height(),
+            layout.icon_size
+        ),
+        (740, 164, 128)
+    );
+    assert_eq!(
+        (layout.capacity, layout.page, layout.items.len()),
+        (4, 2, 1)
+    );
+    let item = &layout.items[0];
+    assert_eq!(item.icon.left - item.outer.left, 6);
+    assert_eq!(item.outer.left, 78);
+    assert_eq!(
+        layout.hit_test(
+            layout.bounds.left + item.outer.left,
+            layout.bounds.top + item.outer.top
+        ),
+        Some(8)
+    );
+    assert!(!WindowFilter::from_config(&config, SwitchKind::Apps).allows_process("excluded.exe"));
+    assert!(WindowFilter::from_config(&config, SwitchKind::Windows).allows_process("excluded.exe"));
+    assert!(!WindowFilter::from_config(&config, SwitchKind::Windows).allows_process("other.exe"));
 }
 
 #[test]

@@ -25,7 +25,6 @@ features = [
     "Win32_UI_HiDpi",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
-    "Win32_Graphics_GdiPlus",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_EnhancedStorage",

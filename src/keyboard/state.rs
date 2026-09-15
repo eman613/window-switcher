@@ -6,6 +6,22 @@ pub(crate) enum SwitchKind {
     Windows,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct InputPermissions {
+    pub(super) windows: bool,
+    pub(super) apps: bool,
+}
+
+#[cfg(test)]
+impl From<bool> for InputPermissions {
+    fn from(windows: bool) -> Self {
+        Self {
+            windows,
+            apps: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputAction {
     Cycle(SwitchKind, bool),
@@ -55,6 +71,7 @@ pub(super) struct InputMachine {
     consumed: [bool; 512],
     active: Option<Gesture>,
     next_session: u64,
+    injected_control: bool,
 }
 
 impl InputMachine {
@@ -65,6 +82,7 @@ impl InputMachine {
             consumed: [false; 512],
             active: None,
             next_session: 0,
+            injected_control: false,
         }
     }
 
@@ -83,6 +101,7 @@ impl InputMachine {
     pub(super) fn reset(&mut self) -> Option<u64> {
         self.pressed.fill(false);
         self.consumed.fill(false);
+        self.injected_control = false;
         // Keep the monotonic session counter: dispatch ACKs survive a rollback.
         self.active.take().map(|gesture| gesture.session)
     }
@@ -90,10 +109,11 @@ impl InputMachine {
     pub(super) fn handle(
         &mut self,
         key: KeyInput,
-        windows_allowed: bool,
+        permissions: impl Into<InputPermissions>,
         acknowledged: u64,
         revoked: u64,
     ) -> Decision {
+        let permissions = permissions.into();
         let Some(index) = key.index() else {
             return Decision::default();
         };
@@ -105,6 +125,23 @@ impl InputMachine {
             self.active = None;
         }
         self.pressed[index] = key.down;
+        if let Some(gesture) = self.active.as_mut() {
+            let allowed = if gesture.kind == SwitchKind::Apps {
+                permissions.apps
+            } else {
+                permissions.windows
+            };
+            if !allowed && !gesture.finishing {
+                gesture.finishing = true;
+                return Decision {
+                    consume: false,
+                    event: Some(InputEvent {
+                        session: gesture.session,
+                        action: InputAction::Cancel,
+                    }),
+                };
+            }
+        }
         if let Some(gesture) = self.active.as_ref() {
             if !gesture.finishing && !self.modifier_pressed(gesture.modifier) {
                 let event = InputEvent {
@@ -128,9 +165,11 @@ impl InputMachine {
             return Decision::default();
         }
         let matching = self.hotkeys.iter().find(|hotkey| {
-            let allowed = hotkey.id == SWITCH_APPS_HOTKEY_ID
-                || (hotkey.id == SWITCH_WINDOWS_HOTKEY_ID && windows_allowed);
+            let allowed = (hotkey.id == SWITCH_APPS_HOTKEY_ID && permissions.apps)
+                || (hotkey.id == SWITCH_WINDOWS_HOTKEY_ID && permissions.windows);
+            let altgr = self.pressed[0x38 + 256] && (self.pressed[0x1d] || self.injected_control);
             allowed
+                && !(altgr && matches!(hotkey.get_modifier(), 0x38 | 0x1d))
                 && self.modifier_pressed(hotkey.get_modifier())
                 && hotkey.code == key.scan
                 && (!matches!(key.scan, 0x47..=0x53) || key.extended)
@@ -208,6 +247,14 @@ impl InputMachine {
         self.accepted(key, false);
     }
 
+    pub(super) fn observe_injected_passthrough(&mut self, key: KeyInput) {
+        // AltGr's synthetic left-Control is observed even when injected
+        // shortcuts are passed through. It never becomes a binding modifier.
+        if key.scan == 0x1d && !key.extended {
+            self.injected_control = key.down;
+        }
+    }
+
     fn modifier_pressed(&self, modifier: u32) -> bool {
         match modifier {
             0x38 | 0x1d => self.pressed[modifier as usize] || self.pressed[modifier as usize + 256],
@@ -232,6 +279,36 @@ mod tests {
             extended,
             down,
         }
+    }
+
+    #[test]
+    fn apps_blacklist_is_independent_and_altgr_is_not_an_alt_binding() {
+        let mut state = machine();
+        let permissions = InputPermissions {
+            windows: true,
+            apps: false,
+        };
+        state.handle(key(0x38, false, true), permissions, 0, 0);
+        assert!(
+            !state
+                .handle(key(0x0f, false, true), permissions, 0, 0)
+                .consume
+        );
+        assert!(
+            state
+                .handle(key(0x29, false, true), permissions, 0, 0)
+                .consume
+        );
+        state.reset();
+        state.handle(key(0x1d, false, true), true, 0, 0);
+        state.handle(key(0x38, true, true), true, 0, 0);
+        assert!(!state.handle(key(0x0f, false, true), true, 0, 0).consume);
+        state.reset();
+        state.observe_injected_passthrough(key(0x1d, false, true));
+        state.handle(key(0x38, true, true), true, 0, 0);
+        assert!(!state.handle(key(0x0f, false, true), true, 0, 0).consume);
+        state.observe_injected_passthrough(key(0x1d, false, false));
+        assert!(state.handle(key(0x0f, false, true), true, 0, 0).consume);
     }
 
     #[test]

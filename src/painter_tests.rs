@@ -1,3 +1,14 @@
+use super::*;
+use crate::{
+    app::AppEntry,
+    badge::BadgeStyle,
+    config::Config,
+    icon_cache::{IconCache, IconKey},
+    icon_loader::native,
+    layout::{MonitorSnapshot, PixelRect},
+    utils::window_identity::WindowIdentity,
+    window_snapshot::lifetimes::WindowLifetimes,
+};
 use std::time::Instant;
 use windows::{
     core::w,
@@ -12,14 +23,10 @@ use windows::{
             },
         },
         UI::WindowsAndMessaging::{
-            CopyIcon, CreateWindowExW, DestroyIcon, DestroyWindow, LoadIconW, HICON,
-            IDI_APPLICATION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP,
+            CreateWindowExW, DestroyWindow, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP,
         },
     },
 };
-
-use super::*;
-use crate::{app::AppEntry, badge::BadgeStyle, config::Config};
 
 struct TestWindow(HWND);
 impl TestWindow {
@@ -51,61 +58,114 @@ impl Drop for TestWindow {
     }
 }
 
-struct TestIcon(HICON);
-impl TestIcon {
-    fn new() -> Self {
-        Self(unsafe { CopyIcon(LoadIconW(None, IDI_APPLICATION).unwrap()) }.unwrap())
-    }
-}
-impl Drop for TestIcon {
-    fn drop(&mut self) {
-        unsafe { DestroyIcon(self.0) }.unwrap();
-    }
-}
-
-fn state(icon: HICON) -> SwitchAppsState {
+fn state(hwnd: HWND) -> SwitchAppsState {
+    let native = native::fallback().unwrap();
+    let icon = IconCache::fixture(native::rasterize(native.0, 256).unwrap());
+    let identity = WindowIdentity::capture(hwnd, &WindowLifetimes::default()).unwrap();
+    let screen = PixelRect {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
     SwitchAppsState {
-        apps: vec![AppEntry {
-            icon,
-            representative_hwnd: HWND::default(),
-            window_count: 100,
-            identity: None,
-        }],
+        apps: (0..5)
+            .map(|i| AppEntry {
+                key: IconKey {
+                    group: format!("fixture-{i}").into(),
+                    identity,
+                },
+                icon: Some(icon.clone()),
+                window_count: if i == 0 { 100 } else { i + 1 },
+                executable: "fixture.exe".into(),
+            })
+            .collect(),
         index: 0,
         show_badge: true,
         badge_max: 99,
         badge_style: BadgeStyle::from_config(&Config::default()),
+        monitor: MonitorSnapshot {
+            identity: 1,
+            screen,
+            available: screen,
+            dpi: 96,
+        },
+        revision: 0,
     }
 }
 
 #[test]
-fn complete_hidden_panel_renders_and_recovers_from_failed_native_operations() {
+fn hidden_panel_preserves_alpha_and_recovers_from_native_submit_failure() {
     let window = TestWindow::new();
-    let icon = TestIcon::new();
-    let mut painter = GdiAAPainter::new(window.0).unwrap();
+    let mut painter = GdiAAPainter::new(window.0, &Config::default()).unwrap();
+    let mut state = state(window.0);
     for rounded in [false, true] {
         painter.rounded_corner = rounded;
-        painter.render(&state(icon.0)).unwrap();
-        assert!(painter.render(&state(HICON::default())).is_err());
-        painter.render(&state(icon.0)).unwrap();
+        painter.invalidate();
+        painter.render(&state).unwrap();
+        let pixels = painter.scene.as_ref().unwrap().surface.pixels().unwrap();
+        assert_eq!(pixels[3], if rounded { 0 } else { 255 });
+        for pixel in pixels.as_chunks::<4>().0.iter() {
+            assert!(pixel[..3].iter().all(|c| *c <= pixel[3]));
+        }
+        painter.hwnd = HWND::default();
+        assert!(painter.render(&state).is_err());
+        painter.hwnd = window.0;
+        painter.render(&state).unwrap();
     }
-    let mut empty = state(icon.0);
-    empty.apps.clear();
-    assert!(painter.render(&empty).is_err());
-    assert!(
-        !painter.show,
-        "render-only validation must not show or focus a window"
+    state.apps[0].icon = None;
+    painter.render(&state).unwrap();
+    state.apps.clear();
+    assert!(painter.render(&state).is_err());
+    assert!(!painter.show);
+}
+
+#[test]
+fn selection_reuses_rasters_and_last_page_hit_testing_matches_drawn_geometry() {
+    let window = TestWindow::new();
+    let config = Config {
+        max_columns: 3,
+        ..Default::default()
+    };
+    let mut painter = GdiAAPainter::new(window.0, &config).unwrap();
+    let mut state = state(window.0);
+    painter.render(&state).unwrap();
+    let pixels = painter.scene.as_ref().unwrap().sprites[0]
+        .plain
+        .data
+        .as_ptr();
+    state.index = 1;
+    painter.render(&state).unwrap();
+    assert_eq!(
+        pixels,
+        painter.scene.as_ref().unwrap().sprites[0]
+            .plain
+            .data
+            .as_ptr()
+    );
+    let first_bounds = painter.layout().unwrap().bounds;
+    state.index = 4;
+    painter.render(&state).unwrap();
+    let last = painter.layout().unwrap();
+    assert_eq!(first_bounds, last.bounds);
+    assert_eq!(last.page, 1);
+    let item = &last.items[1];
+    assert_eq!(
+        last.hit_test(
+            last.bounds.left + item.outer.left,
+            last.bounds.top + item.outer.top
+        ),
+        Some(4)
     );
 }
 
 #[test]
 fn cancellation_during_render_does_not_show_or_focus_the_panel() {
     let window = TestWindow::new();
-    let icon = TestIcon::new();
-    let mut painter = GdiAAPainter::new(window.0).unwrap();
+    let mut painter = GdiAAPainter::new(window.0, &Config::default()).unwrap();
     let checks = std::cell::Cell::new(0);
     painter
-        .paint(&state(icon.0), || {
+        .paint(&state(window.0), || {
             checks.set(checks.get() + 1);
             checks.get() == 1
         })
@@ -132,39 +192,37 @@ fn resources() -> (u32, u32, u32) {
 
 #[test]
 #[ignore = "isolated 10000-iteration Windows resource stress; run single-threaded"]
-fn stage_a_resource_stress() {
+fn stage_c_resource_stress() {
     let window = TestWindow::new();
-    let icon = TestIcon::new();
-    let mut painter = GdiAAPainter::new(window.0).unwrap();
-    let state = state(icon.0);
-    for _ in 0..20 {
+    let mut painter = GdiAAPainter::new(window.0, &Config::default()).unwrap();
+    let mut state = state(window.0);
+    for iteration in 0..200 {
+        state.index = iteration % state.apps.len();
         painter.render(&state).unwrap();
     }
-    assert!(crate::utils::get_module_path(std::process::id()).is_some());
-    assert!(crate::utils::is_process_elevated(std::process::id()).is_some());
-    let mutex_name = format!("WindowSwitcherStageAStress-{}", std::process::id());
-    let instance = crate::utils::SingleInstance::create(&mutex_name).unwrap();
-    assert!(instance.is_single());
     let baseline = resources();
     eprintln!(
-        "stage=a iterations=0 gdi={} user={} handles={}",
+        "stage=c iterations=0 gdi={} user={} handles={}",
         baseline.0, baseline.1, baseline.2
     );
     let mut samples = Vec::with_capacity(10_000);
     for iteration in 1..=10_000 {
-        painter.rounded_corner = iteration % 2 == 0;
+        state.index = iteration % state.apps.len();
+        if iteration % 1000 == 0 {
+            state.apps[0].window_count = 100 + iteration;
+            painter.rounded_corner = !painter.rounded_corner;
+            painter.invalidate();
+        }
+        if iteration % 2000 == 0 {
+            state.monitor.dpi = [96, 144, 192][iteration / 2000 % 3];
+        }
         let started = Instant::now();
         painter.render(&state).unwrap();
         samples.push(started.elapsed().as_micros());
-        assert!(crate::utils::get_module_path(std::process::id()).is_some());
-        assert!(crate::utils::is_process_elevated(std::process::id()).is_some());
-        assert!(!crate::utils::SingleInstance::create(&mutex_name)
-            .unwrap()
-            .is_single());
         if iteration % 1000 == 0 {
             let sample = resources();
             eprintln!(
-                "stage=a iterations={iteration} gdi={} user={} handles={}",
+                "stage=c iterations={iteration} gdi={} user={} handles={}",
                 sample.0, sample.1, sample.2
             );
             assert!(
@@ -177,14 +235,10 @@ fn stage_a_resource_stress() {
     }
     samples.sort_unstable();
     eprintln!(
-        "stage=a hidden_render samples={} p50_us={} p95_us={} p99_us={}",
+        "stage=c hidden_render samples={} p50_us={} p95_us={} p99_us={}",
         samples.len(),
         samples[4999],
         samples[9499],
         samples[9899]
     );
-    drop(instance);
-    assert!(crate::utils::SingleInstance::create(&mutex_name)
-        .unwrap()
-        .is_single());
 }

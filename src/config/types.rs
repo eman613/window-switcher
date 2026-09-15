@@ -23,3 +23,7 @@ choices!(StartupEnabled { Auto => "auto", Yes => "yes", No => "no" });
 choices!(RunLevel { Inherit => "inherit", Standard => "standard", Highest => "highest" });
 choices!(BatteryPolicy { Inherit => "inherit", Allow => "allow", Stop => "stop" });
 choices!(Language { Chinese => "zh-CN", English => "en-US", Auto => "auto" });
+choices!(MonitorPolicy { Cursor => "cursor", Foreground => "foreground", Primary => "primary" });
+choices!(ForegroundPolicy { Passthrough => "passthrough", Handle => "handle" });
+choices!(InjectedPolicy { Handle => "handle", Passthrough => "passthrough" });
+choices!(RenderScale { Auto => "auto", One => "1", Two => "2", Four => "4", Six => "6" });

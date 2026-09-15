@@ -1,10 +1,6 @@
 use anyhow::{bail, Context, Result};
-use windows::Win32::{
-    Foundation::HWND,
-    Graphics::Gdi::{
-        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-        RestoreDC, SaveDC, SelectObject, HBITMAP, HDC, HGDIOBJ,
-    },
+use windows::Win32::Graphics::Gdi::{
+    DeleteDC, DeleteObject, RestoreDC, SaveDC, SelectObject, HDC, HGDIOBJ,
 };
 
 pub(crate) struct OwnedGdiObject(pub(crate) HGDIOBJ);
@@ -53,30 +49,7 @@ impl Drop for SavedDc {
     }
 }
 
-pub(crate) struct WindowDc {
-    pub(crate) dc: HDC,
-    hwnd: Option<HWND>,
-}
-
-impl WindowDc {
-    pub(crate) fn new(hwnd: Option<HWND>) -> Result<Self> {
-        let dc = unsafe { GetDC(hwnd) };
-        if dc.is_invalid() {
-            bail!("gdi stage=get-dc failed");
-        }
-        Ok(Self { dc, hwnd })
-    }
-}
-
-impl Drop for WindowDc {
-    fn drop(&mut self) {
-        if unsafe { ReleaseDC(self.hwnd, self.dc) } == 0 {
-            warn!("gdi stage=release-dc failed");
-        }
-    }
-}
-
-struct MemoryDc(HDC);
+pub(crate) struct MemoryDc(pub(crate) HDC);
 
 impl Drop for MemoryDc {
     fn drop(&mut self) {
@@ -84,54 +57,6 @@ impl Drop for MemoryDc {
             warn!("gdi stage=delete-dc failed");
         }
     }
-}
-
-/// Field order is intentional: restore selection, delete bitmap, delete DC.
-pub(crate) struct BitmapSurface {
-    selection: SavedDc,
-    bitmap: OwnedGdiObject,
-    dc: MemoryDc,
-}
-
-impl BitmapSurface {
-    pub(crate) fn new(reference: HDC, width: i32, height: i32) -> Result<Self> {
-        checked_bitmap_bytes(width, height)?;
-        let dc = unsafe { CreateCompatibleDC(Some(reference)) };
-        if dc.is_invalid() {
-            bail!("gdi stage=create-dc failed");
-        }
-        let dc = MemoryDc(dc);
-        let bitmap = OwnedGdiObject::new(
-            unsafe { CreateCompatibleBitmap(reference, width, height) }.into(),
-            "create-bitmap",
-        )?;
-        let selection = SavedDc::new(dc.0)?;
-        selection.select(bitmap.0)?;
-        Ok(Self {
-            selection,
-            bitmap,
-            dc,
-        })
-    }
-
-    pub(crate) fn dc(&self) -> HDC {
-        self.dc.0
-    }
-
-    pub(crate) fn into_bitmap(self) -> OwnedGdiObject {
-        let Self {
-            selection,
-            bitmap,
-            dc,
-        } = self;
-        drop(selection);
-        drop(dc);
-        bitmap
-    }
-}
-
-pub(crate) fn as_bitmap(bitmap: &OwnedGdiObject) -> HBITMAP {
-    HBITMAP(bitmap.0 .0)
 }
 
 pub(crate) fn checked_bitmap_bytes(width: i32, height: i32) -> Result<usize> {

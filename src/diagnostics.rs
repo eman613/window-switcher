@@ -10,6 +10,19 @@ use windows::Win32::{
 
 use crate::config::Config;
 
+pub(crate) fn sample_start(enabled: bool) -> Option<Instant> {
+    enabled.then(Instant::now)
+}
+
+pub(crate) fn stage_elapsed(stage: &str, started: Option<Instant>) {
+    if let Some(started) = started {
+        info!(
+            "metrics event=stage stage={stage} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
+}
+
 pub(crate) struct Diagnostics {
     enabled: bool,
     main_enter: Instant,

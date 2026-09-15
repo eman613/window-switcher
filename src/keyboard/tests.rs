@@ -98,11 +98,56 @@ fn negative_code_unknown_message_null_and_unaligned_parameters_are_forwarded() {
 }
 
 #[test]
+fn injected_policy_is_applied_before_binding_actions_and_observes_altgr_control() {
+    let window = MessageWindow::new();
+    let config = crate::config::Config {
+        unknown_foreground: crate::config::ForegroundPolicy::Handle,
+        ..Default::default()
+    };
+    let foreground =
+        ForegroundWatcher::init(&config, window.0, Arc::new(Default::default())).unwrap();
+    for policy in [InjectedPolicy::Handle, InjectedPolicy::Passthrough] {
+        let target = Arc::new(WindowTarget::new(window.0));
+        let dispatch = Arc::new(InputDispatch::new(target));
+        let mut context = HookContext {
+            machine: InputMachine::new(vec![Hotkey::create(
+                crate::config::SWITCH_APPS_HOTKEY_ID,
+                "fixture",
+                "alt+tab",
+            )
+            .unwrap()]),
+            dispatch: dispatch.clone(),
+            foreground: foreground.status(),
+            stop: Arc::new(AtomicBool::new(false)),
+            activation: Arc::new(InputActivation::new(true)),
+            injected: policy,
+        };
+        assert!(!context.process(KBDLLHOOKSTRUCT {
+            scanCode: 0x38,
+            flags: LLKHF_INJECTED,
+            ..Default::default()
+        }));
+        let consumed = context.process(KBDLLHOOKSTRUCT {
+            scanCode: 0x0f,
+            flags: LLKHF_INJECTED,
+            ..Default::default()
+        });
+        assert_eq!(consumed, policy == InjectedPolicy::Handle);
+        assert_eq!(
+            !dispatch.take().is_empty(),
+            policy == InjectedPolicy::Handle
+        );
+    }
+}
+
+#[test]
 fn input_thread_is_ready_while_ui_is_not_pumping_and_shutdown_is_bounded() {
     let window = MessageWindow::new();
     let target = Arc::new(WindowTarget::new(window.0));
     let dispatch = Arc::new(InputDispatch::new(target.clone()));
-    let foreground = ForegroundWatcher::init(&Default::default(), window.0).unwrap();
+    let foreground =
+        ForegroundWatcher::init(&Default::default(), window.0, Arc::new(Default::default()))
+            .unwrap();
     // Empty bindings ensure the real installed hook cannot consume user keys.
     let started = Instant::now();
     let mut listener = KeyboardListener::init(dispatch.clone(), foreground.status(), &[]).unwrap();
@@ -143,7 +188,9 @@ fn cancellation_before_hook_install_never_reports_ready() {
     let window = MessageWindow::new();
     let target = Arc::new(WindowTarget::new(window.0));
     let dispatch = Arc::new(InputDispatch::new(target));
-    let foreground = ForegroundWatcher::init(&Default::default(), window.0).unwrap();
+    let foreground =
+        ForegroundWatcher::init(&Default::default(), window.0, Arc::new(Default::default()))
+            .unwrap();
     let (ready, result) = mpsc::sync_channel(1);
     assert!(run_input_thread(
         Vec::new(),
@@ -151,6 +198,7 @@ fn cancellation_before_hook_install_never_reports_ready() {
         foreground.status(),
         Arc::new(AtomicBool::new(true)),
         Arc::new(InputActivation::new(true)),
+        InjectedPolicy::Handle,
         &ready
     )
     .is_err());

@@ -1,73 +1,73 @@
-use std::hash::{Hash, Hasher};
 use windows::Win32::{
-    Foundation::{FILETIME, HWND},
-    System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    Foundation::HWND,
     UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow},
 };
 
-use super::HandleWrapper;
+use crate::{
+    process_metadata::{open_identity, ProcessIdentity},
+    window_snapshot::lifetimes::{LifetimeStamp, WindowLifetimes},
+};
 
-/// A conservative activation identity. Unknown process identity is never
-/// activated. Event-driven HWND lifetime generations are added with snapshots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Integer HWNDs are transferable identifiers, never cross-thread owners.
+/// Both the native process identity and delivered lifecycle events must match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct WindowIdentity {
-    pub(crate) hwnd: HWND,
-    pid: u32,
+    pub(crate) window: usize,
+    pub(crate) process: ProcessIdentity,
     thread: u32,
-    created: u64,
-}
-
-impl Hash for WindowIdentity {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        (self.hwnd.0 as usize, self.pid, self.thread, self.created).hash(state);
-    }
+    lifetime: LifetimeStamp,
 }
 
 impl WindowIdentity {
-    pub(crate) fn capture(hwnd: HWND) -> Option<Self> {
+    #[cfg(test)]
+    pub(crate) fn fixture(window: usize) -> Self {
+        Self {
+            window,
+            process: ProcessIdentity { pid: 1, created: 1 },
+            thread: 1,
+            lifetime: WindowLifetimes::default().stamp(window).unwrap(),
+        }
+    }
+
+    pub(crate) fn hwnd(self) -> HWND {
+        HWND(self.window as _)
+    }
+
+    pub(crate) fn capture(hwnd: HWND, lifetimes: &WindowLifetimes) -> Option<Self> {
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        let (_, process) = open_identity(pid)?;
+        Self::from_process(hwnd, process, lifetimes)
+    }
+
+    pub(crate) fn from_process(
+        hwnd: HWND,
+        process: ProcessIdentity,
+        lifetimes: &WindowLifetimes,
+    ) -> Option<Self> {
+        let lifetime = lifetimes.stamp(hwnd.0 as usize)?;
         if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
             return None;
         }
         let mut pid = 0;
         let thread = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-        if pid == 0 || thread == 0 {
+        if pid != process.pid || thread == 0 {
             return None;
         }
-        let process = HandleWrapper::new(
-            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?,
-        );
-        let (mut created, mut exit, mut kernel, mut user) = (
-            FILETIME::default(),
-            FILETIME::default(),
-            FILETIME::default(),
-            FILETIME::default(),
-        );
-        unsafe {
-            GetProcessTimes(
-                process.get_handle(),
-                &mut created,
-                &mut exit,
-                &mut kernel,
-                &mut user,
-            )
-        }
-        .ok()?;
-        let mut current_pid = 0;
-        if unsafe { GetWindowThreadProcessId(hwnd, Some(&mut current_pid)) } != thread
-            || current_pid != pid
-        {
+        if !lifetimes.matches(hwnd.0 as usize, lifetime) {
             return None;
         }
         Some(Self {
-            hwnd,
-            pid,
+            window: hwnd.0 as usize,
+            process,
             thread,
-            created: (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime),
+            lifetime,
         })
     }
 
-    pub(crate) fn is_current(self) -> bool {
-        Self::capture(self.hwnd) == Some(self)
+    pub(crate) fn is_current(self, lifetimes: &WindowLifetimes) -> bool {
+        lifetimes.matches(self.window, self.lifetime)
+            && Self::capture(self.hwnd(), lifetimes) == Some(self)
     }
 }
 
@@ -86,7 +86,8 @@ mod tests {
 
     #[test]
     fn destroyed_window_and_unknown_identity_are_rejected() {
-        assert!(WindowIdentity::capture(HWND::default()).is_none());
+        let lifetimes = WindowLifetimes::default();
+        assert!(WindowIdentity::capture(HWND::default(), &lifetimes).is_none());
         let hwnd = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -104,14 +105,16 @@ mod tests {
             )
         }
         .unwrap();
-        let identity = WindowIdentity::capture(hwnd).unwrap();
-        assert!(identity.is_current());
+        let identity = WindowIdentity::capture(hwnd, &lifetimes).unwrap();
+        assert!(identity.is_current(&lifetimes));
         let mut stale = identity;
-        stale.created ^= 1;
-        assert!(!stale.is_current());
+        stale.process.created ^= 1;
+        assert!(!stale.is_current(&lifetimes));
+        lifetimes.event(hwnd.0 as usize, true);
+        assert!(!identity.is_current(&lifetimes));
         assert_eq!(super::super::get_window_size(hwnd).unwrap(), (320, 200));
         unsafe { DestroyWindow(hwnd) }.unwrap();
-        assert!(!identity.is_current());
+        assert!(!identity.is_current(&lifetimes));
         assert!(super::super::get_window_size(hwnd).is_err());
     }
 }

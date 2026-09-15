@@ -18,11 +18,7 @@ pub fn run() -> Result<()> {
         }
         instance
     };
-    unsafe {
-        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
-            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_SYSTEM_AWARE,
-        );
-    }
+    crate::layout::enable_per_monitor()?;
     let (loaded, child) = match replacement {
         Some((child, contents)) => (
             load_snapshot(&contents, &config::get_config_path()?)?,

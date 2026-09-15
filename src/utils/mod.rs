@@ -1,10 +1,11 @@
 mod admin;
 mod app_icon;
+pub(crate) mod appx;
+pub(crate) mod browser;
 mod check_error;
 pub(crate) mod com;
 pub(crate) mod command;
 pub(crate) mod gdi;
-pub(crate) mod gdiplus;
 mod handle_wrapper;
 mod regedit;
 pub(crate) mod scheduled_task;

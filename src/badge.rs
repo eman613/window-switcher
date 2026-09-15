@@ -3,7 +3,7 @@ use windows::Win32::{
     Foundation::{COLORREF, RECT, SIZE},
     Graphics::Gdi::{
         CreateEllipticRgn, CreateFontW, CreateSolidBrush, DrawTextW, FillRgn,
-        GetTextExtentPoint32W, SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+        GetTextExtentPoint32W, SetBkMode, SetTextColor, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS,
         CLR_INVALID, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
         FF_DONTCARE, FW_SEMIBOLD, HDC, OUT_DEFAULT_PRECIS, TRANSPARENT,
     },
@@ -12,7 +12,7 @@ use windows::Win32::{
 use crate::utils::gdi::{OwnedGdiObject, SavedDc};
 use crate::{config::Config, painter::ICON_SIZE_BASE};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BadgeStyle {
     pub background: u32,
     pub foreground: u32,
@@ -74,7 +74,7 @@ pub(crate) fn draw_badge(
                 DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS,
                 CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
+                ANTIALIASED_QUALITY,
                 DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
                 windows::core::w!("Segoe UI"),
             )

@@ -16,8 +16,13 @@ pub(crate) const WM_INPUT_READY: u32 = 6003;
 const INPUT_QUEUE_CAPACITY: usize = 64;
 
 struct PendingInput {
-    events: VecDeque<InputEvent>,
+    events: VecDeque<ReceivedInput>,
     notified: bool,
+}
+
+pub(crate) struct ReceivedInput {
+    pub(crate) event: InputEvent,
+    pub(crate) received: Option<Instant>,
 }
 
 pub(crate) struct InputDispatch {
@@ -54,6 +59,13 @@ impl InputDispatch {
     }
 
     pub(super) fn submit(&self, event: InputEvent) -> bool {
+        if matches!(event.action, InputAction::Cancel) && self.permits(event.session) {
+            // Cancellation already has an atomic delivery path. Do not depend
+            // on queue space/ownership: rejecting Escape here would forward a
+            // native modifier+Escape shortcut instead of canceling the panel.
+            self.revoke(event.session);
+            return true;
+        }
         let accepted = self.enqueue(event, || self.target.try_post(WM_INPUT_READY));
         if !accepted {
             self.cancel(event.session);
@@ -76,7 +88,10 @@ impl InputDispatch {
         if pending.events.len() >= limit {
             return false;
         }
-        pending.events.push_back(event);
+        pending.events.push_back(ReceivedInput {
+            event,
+            received: self.sample_start(),
+        });
         if !pending.notified {
             if !notify() {
                 pending.events.pop_back();
@@ -88,14 +103,25 @@ impl InputDispatch {
     }
 
     pub(crate) fn take(&self) -> Vec<InputEvent> {
+        self.take_timed()
+            .into_iter()
+            .map(|input| input.event)
+            .collect()
+    }
+
+    pub(crate) fn take_timed(&self) -> Vec<ReceivedInput> {
         let mut pending = self.pending.lock();
         pending.notified = false;
         pending.events.drain(..).collect()
     }
 
     pub(crate) fn cancel(&self, session: u64) {
-        self.revoked.fetch_max(session, Ordering::AcqRel);
         self.rejected.fetch_add(1, Ordering::Relaxed);
+        self.revoke(session);
+    }
+
+    fn revoke(&self, session: u64) {
+        self.revoked.fetch_max(session, Ordering::AcqRel);
         // A UI timer also polls revocation, so a failed PostMessage cannot lose
         // a terminal cancellation. Nothing here waits for the UI or its queue.
         self.target.try_post(WM_INPUT_READY);
@@ -197,6 +223,54 @@ mod tests {
         assert!(!queue.enqueue(cycle(1), || true));
         queue.target.close();
         assert!(!queue.enqueue(cycle(2), || true));
+    }
+
+    #[test]
+    fn explicit_cancel_is_accepted_without_waiting_for_the_input_queue() {
+        let queue = Arc::new(queue());
+        assert!(queue.enqueue(cycle(1), || true));
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let held_queue = queue.clone();
+        let holder = std::thread::spawn(move || {
+            let _pending = held_queue.pending.lock();
+            ready_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let started = Instant::now();
+        let accepted = queue.submit(InputEvent {
+            session: 1,
+            action: InputAction::Cancel,
+        });
+        let elapsed = started.elapsed();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(accepted, "Escape must stay consumed when the queue is busy");
+        assert!(elapsed < Duration::from_millis(500));
+        assert_eq!(queue.revoked(), 1);
+        assert_eq!(queue.rejected.load(Ordering::Relaxed), 0);
+        assert!(queue
+            .take()
+            .iter()
+            .all(|event| !queue.permits(event.session)));
+    }
+
+    #[test]
+    fn explicit_cancel_survives_failed_notification_but_not_retirement() {
+        // HWND_BOTTOM is a positioning sentinel, never a message endpoint.
+        let queue = InputDispatch::new(Arc::new(WindowTarget::new(HWND(1 as _))));
+        assert!(!queue.target.try_post(WM_INPUT_READY));
+        assert!(queue.submit(InputEvent {
+            session: 1,
+            action: InputAction::Cancel,
+        }));
+        assert!(!queue.permits(1));
+        queue.target.close();
+        assert!(!queue.submit(InputEvent {
+            session: 2,
+            action: InputAction::Cancel,
+        }));
     }
 
     #[test]

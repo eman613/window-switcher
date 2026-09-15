@@ -1,24 +1,16 @@
-use crate::app::SwitchAppsState;
-use crate::utils::{
-    gdi::{as_bitmap, BitmapSurface, WindowDc},
-    gdiplus::{check_status, GdiPlusRuntime, OwnedGp},
-    get_moinitor_rect, is_light_theme, is_win11,
+use crate::{
+    app::SwitchAppsState,
+    config::Config,
+    layout::{LayoutOptions, LayoutSnapshot, PixelRect},
+    pixels::PixelImage,
+    render_surface::RenderSurface,
+    utils::{is_light_theme, is_win11},
 };
-
-use anyhow::{bail, Context, Result};
+use anyhow::{ensure, Context, Result};
 use windows::Win32::{
     Foundation::{COLORREF, HWND, POINT, SIZE},
-    Graphics::{
-        Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, HPALETTE},
-        GdiPlus::{
-            FlushIntentionSync, GdipCreateBitmapFromHBITMAP, GdipCreateFromHDC,
-            GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDisposeImage,
-            GdipDrawImageRect, GdipFillRectangle, GdipFlush, GdipSetInterpolationMode,
-            GdipSetSmoothingMode, InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias,
-        },
-    },
+    Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION},
     UI::{
-        HiDpi::GetDpiForWindow,
         Input::KeyboardAndMouse::SetFocus,
         WindowsAndMessaging::{
             GetCursorPos, ShowWindow, UpdateLayeredWindow, SW_HIDE, SW_SHOW, ULW_ALPHA,
@@ -26,53 +18,72 @@ use windows::Win32::{
     },
 };
 
-mod drawing;
-use drawing::{draw_icons, draw_round_rect};
+mod plan;
+mod sprite;
+use plan::RenderPlan;
+use sprite::Sprite;
 
 #[cfg(test)]
 #[path = "painter_tests.rs"]
 mod tests;
 
-pub const BG_DARK_COLOR: u32 = 0x4c4c4c;
-pub const FG_DARK_COLOR: u32 = 0x3b3b3b;
-pub const BG_LIGHT_COLOR: u32 = 0xe0e0e0;
-pub const FG_LIGHT_COLOR: u32 = 0xf2f2f2;
-pub const ALPHA_MASK: u32 = 0xff000000;
-pub const ICON_SIZE_BASE: i32 = 64;
-pub const WINDOW_BORDER_SIZE_BASE: i32 = 10;
-pub const ICON_BORDER_SIZE_BASE: i32 = 4;
-pub const SCALE_FACTOR: i32 = 6;
+pub(crate) const ICON_SIZE_BASE: i32 = 64;
 
-// GDI Antialiasing Painter
-pub struct GdiAAPainter {
+struct Scene {
+    layout: LayoutSnapshot,
+    count: usize,
+    background: PixelImage,
+    surface: RenderSurface,
+    sprites: Vec<Sprite>,
+    selected: usize,
+    plan: RenderPlan,
+}
+
+pub(crate) struct GdiAAPainter {
     hwnd: HWND,
-    screen: WindowDc,
-    _runtime: GdiPlusRuntime,
+    config: Config,
     rounded_corner: bool,
+    colors: (u32, u32),
     show: bool,
+    scene: Option<Scene>,
 }
 
 impl GdiAAPainter {
-    pub fn new(hwnd: HWND) -> Result<Self> {
-        let runtime = GdiPlusRuntime::new()?;
-        let screen = WindowDc::new(Some(hwnd))?;
-        let rounded_corner = is_win11();
-
+    pub(crate) fn new(hwnd: HWND, config: &Config) -> Result<Self> {
+        LayoutOptions::from_config(config).validate()?;
+        if config.switch_apps_enable {
+            let monitor = crate::layout::MonitorSnapshot::capture(
+                config,
+                crate::utils::get_foreground_window(),
+            )?;
+            let layout =
+                LayoutSnapshot::calculate(&LayoutOptions::from_config(config), monitor, 1, 0, 0)?;
+            RenderPlan::new(config, &layout)?;
+        }
         Ok(Self {
             hwnd,
-            screen,
-            _runtime: runtime,
-            rounded_corner,
+            config: config.clone(),
+            rounded_corner: is_win11(),
+            colors: theme_color(is_light_theme()),
             show: false,
+            scene: None,
         })
     }
 
-    pub fn paint(&mut self, state: &SwitchAppsState, allowed: impl Fn() -> bool) -> Result<()> {
+    pub(crate) fn paint(
+        &mut self,
+        state: &SwitchAppsState,
+        allowed: impl Fn() -> bool,
+    ) -> Result<()> {
         if !allowed() {
             return Ok(());
         }
-        self.render(state)?;
-        if !self.show && allowed() {
+        self.render_allowed(state, &allowed)?;
+        if !allowed() {
+            self.hide();
+            return Ok(());
+        }
+        if !self.show {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOW);
                 if allowed() {
@@ -87,250 +98,207 @@ impl GdiAAPainter {
         Ok(())
     }
 
-    fn render(&self, state: &SwitchAppsState) -> Result<()> {
-        let dpi_scale = get_dpi_scale(self.hwnd);
-        let icon_size_max = (ICON_SIZE_BASE as f64 * dpi_scale) as i32;
-        let border_size = (WINDOW_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
-        let icon_border = (ICON_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
+    #[cfg(test)]
+    fn render(&mut self, state: &SwitchAppsState) -> Result<()> {
+        self.render_allowed(state, || true)
+    }
 
-        let Coordinate {
-            x,
-            y,
-            width,
-            height,
-            icon_size,
-            item_size,
-        } = Coordinate::new(
-            state
-                .apps
-                .len()
-                .try_into()
-                .context("paint stage=item-count overflow")?,
-            icon_size_max,
-            border_size,
-            icon_border,
-        )?;
-
-        let corner_radius = if self.rounded_corner {
-            item_size / 4
+    fn render_allowed(
+        &mut self,
+        state: &SwitchAppsState,
+        allowed: impl Fn() -> bool,
+    ) -> Result<()> {
+        ensure!(
+            !state.apps.is_empty() && state.index < state.apps.len(),
+            "paint stage=count invalid"
+        );
+        let layout_start = crate::diagnostics::sample_start(self.config.metrics_enabled);
+        let reuse = self.scene.as_ref().is_some_and(|scene| {
+            scene.count == state.apps.len()
+                && scene.layout.monitor == state.monitor
+                && scene
+                    .layout
+                    .items
+                    .iter()
+                    .any(|item| item.index == state.index)
+        });
+        let replacement = if !reuse {
+            let layout = LayoutSnapshot::calculate(
+                &LayoutOptions::from_config(&self.config),
+                state.monitor,
+                state.apps.len(),
+                state.index,
+                0,
+            )?;
+            let plan = RenderPlan::new(&self.config, &layout)?;
+            Some((layout, plan))
         } else {
-            0
+            None
         };
-
-        let hwnd = self.hwnd;
-        let hdc_screen = self.screen.dc;
-
-        let (fg_color, bg_color) = theme_color(is_light_theme());
-
-        unsafe {
-            let surface = BitmapSurface::new(hdc_screen, width, height)?;
-            let graphics = OwnedGp::create(
-                "create-graphics",
-                |out| GdipCreateFromHDC(surface.dc(), out),
-                GdipDeleteGraphics,
-            )?;
-            check_status(
-                GdipSetSmoothingMode(graphics.ptr, SmoothingModeAntiAlias),
-                "smoothing",
-            )?;
-            check_status(
-                GdipSetInterpolationMode(graphics.ptr, InterpolationModeHighQualityBicubic),
-                "interpolation",
-            )?;
-            let bg_brush = OwnedGp::create(
-                "create-brush",
-                |out| GdipCreateSolidFill(ALPHA_MASK | bg_color, out),
-                |brush| GdipDeleteBrush(brush.cast()),
-            )?;
-
-            if self.rounded_corner {
-                draw_round_rect(
-                    graphics.ptr,
-                    bg_brush.ptr.cast(),
-                    0.0,
-                    0.0,
-                    width as f32,
-                    height as f32,
-                    corner_radius as f32,
+        crate::diagnostics::stage_elapsed("layout", layout_start);
+        let mut rebuilt = 0;
+        if let Some((layout, plan)) = replacement {
+            let resources_start = crate::diagnostics::sample_start(self.config.metrics_enabled);
+            rebuilt = layout.items.len();
+            self.scene = None; // Release old surfaces before allocating their replacements.
+            self.scene = Some(self.create_scene(state, layout, plan)?);
+            crate::diagnostics::stage_elapsed("render-resources", resources_start);
+        }
+        let scene = self.scene.as_mut().unwrap();
+        let compose_start = crate::diagnostics::sample_start(self.config.metrics_enabled);
+        let previous = scene.selected;
+        for (item, sprite) in scene.layout.items.iter().zip(&mut scene.sprites) {
+            let entry = &state.apps[item.index];
+            let changed = !sprite.matches(entry, state);
+            if changed {
+                *sprite = Sprite::new(
+                    entry,
+                    state,
+                    item,
+                    scene.plan.scale,
+                    self.rounded_corner,
+                    self.colors.0,
+                    self.config.metrics_enabled,
                 )?;
-            } else {
-                check_status(
-                    GdipFillRectangle(
-                        graphics.ptr,
-                        bg_brush.ptr.cast(),
-                        0.0,
-                        0.0,
-                        width as f32,
-                        height as f32,
-                    ),
-                    "fill-background",
+                rebuilt += 1;
+            }
+            if changed
+                || item.index == previous
+                || item.index == state.index
+                || previous == usize::MAX
+            {
+                scene.surface.restore(&scene.background, item.outer)?;
+                scene.surface.compose(
+                    if item.index == state.index {
+                        &sprite.selected
+                    } else {
+                        &sprite.plain
+                    },
+                    item.outer.left,
+                    item.outer.top,
                 )?;
             }
-
-            let icons_width = item_size * state.apps.len() as i32;
-            let icons_height = item_size;
-            let bitmap_icons = draw_icons(
-                state,
-                hdc_screen,
-                icon_size,
-                icon_border,
-                icons_width,
-                icons_height,
-                corner_radius,
-                fg_color,
-                bg_color,
-            )?;
-
-            let image = OwnedGp::create(
-                "create-image",
-                |out| {
-                    GdipCreateBitmapFromHBITMAP(as_bitmap(&bitmap_icons), HPALETTE::default(), out)
-                },
-                |bitmap| GdipDisposeImage(bitmap.cast()),
-            )?;
-            check_status(
-                GdipDrawImageRect(
-                    graphics.ptr,
-                    image.ptr.cast(),
-                    border_size as f32,
-                    border_size as f32,
-                    icons_width as f32,
-                    icons_height as f32,
-                ),
-                "draw-icons",
-            )?;
-            check_status(GdipFlush(graphics.ptr, FlushIntentionSync), "flush")?;
-
-            let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as _,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as _,
-                ..Default::default()
-            };
+        }
+        scene.selected = state.index;
+        crate::diagnostics::stage_elapsed("composition", compose_start);
+        if !allowed() {
+            return Ok(());
+        }
+        let submit_start = crate::diagnostics::sample_start(self.config.metrics_enabled);
+        let bounds = scene.layout.bounds;
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+            ..Default::default()
+        };
+        unsafe {
             UpdateLayeredWindow(
-                hwnd,
-                Some(hdc_screen),
-                Some(&POINT { x, y }),
-                Some(&SIZE {
-                    cx: width,
-                    cy: height,
+                self.hwnd,
+                None,
+                Some(&POINT {
+                    x: bounds.left,
+                    y: bounds.top,
                 }),
-                Some(surface.dc()),
+                Some(&SIZE {
+                    cx: bounds.width(),
+                    cy: bounds.height(),
+                }),
+                Some(scene.surface.dc()),
                 Some(&POINT::default()),
                 COLORREF(0),
                 Some(&blend),
                 ULW_ALPHA,
             )
-            .context("paint stage=layered-window")?;
         }
-
+        .context("paint stage=layered-window")?;
+        crate::diagnostics::stage_elapsed("submit", submit_start);
+        if self.config.metrics_enabled {
+            info!("metrics event=frame width={} height={} scale={} reserved_bytes={} rebuilt_sprites={} page={}",
+                bounds.width(), bounds.height(), scene.plan.scale, scene.plan.reserved_bytes, rebuilt, scene.layout.page);
+        }
         Ok(())
     }
 
-    pub fn unpaint(&mut self, _state: SwitchAppsState) {
+    fn create_scene(
+        &self,
+        state: &SwitchAppsState,
+        layout: LayoutSnapshot,
+        plan: RenderPlan,
+    ) -> Result<Scene> {
+        let width = layout.bounds.width();
+        let height = layout.bounds.height();
+        let mut background = PixelImage::new(width, height)?;
+        let radius = if self.rounded_corner {
+            layout.items[0].outer.height() as f32 / 8.0
+        } else {
+            0.0
+        };
+        background.rounded_fill(
+            PixelRect {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            },
+            radius,
+            self.colors.1,
+        );
+        let mut surface = RenderSurface::new(width, height)?;
+        surface.pixels_mut()?.copy_from_slice(&background.data);
+        let mut sprites = Vec::with_capacity(layout.items.len());
+        for item in &layout.items {
+            sprites.push(Sprite::new(
+                &state.apps[item.index],
+                state,
+                item,
+                plan.scale,
+                self.rounded_corner,
+                self.colors.0,
+                self.config.metrics_enabled,
+            )?);
+        }
+        Ok(Scene {
+            layout,
+            count: state.apps.len(),
+            background,
+            surface,
+            sprites,
+            selected: usize::MAX,
+            plan,
+        })
+    }
+
+    pub(crate) fn hide(&mut self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         self.show = false;
     }
 
-    pub fn find_clicked_app_index(&self, state: &SwitchAppsState) -> Option<usize> {
-        let cursor_pos = unsafe {
-            let mut pos = POINT::default();
-            GetCursorPos(&mut pos).ok()?;
-            pos
-        };
+    pub(crate) fn invalidate(&mut self) {
+        self.scene = None;
+        self.colors = theme_color(is_light_theme());
+    }
 
-        let dpi_scale = get_dpi_scale(self.hwnd);
-        let icon_size_max = (ICON_SIZE_BASE as f64 * dpi_scale) as i32;
-        let border_size = (WINDOW_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
-        let icon_border = (ICON_BORDER_SIZE_BASE as f64 * dpi_scale) as i32;
+    pub(crate) fn layout(&self) -> Option<&LayoutSnapshot> {
+        self.scene.as_ref().map(|scene| &scene.layout)
+    }
 
-        let Coordinate {
-            x, y, item_size, ..
-        } = Coordinate::new(
-            state.apps.len() as i32,
-            icon_size_max,
-            border_size,
-            icon_border,
-        )
-        .ok()?;
-
-        let xpos = cursor_pos.x - x;
-        let ypos = cursor_pos.y - y;
-
-        let cy = border_size;
-        for (i, _) in state.apps.iter().enumerate() {
-            let cx = border_size + item_size * (i as i32);
-            if xpos >= cx && xpos < cx + item_size && ypos >= cy && ypos < cy + item_size {
-                return Some(i);
-            }
+    pub(crate) fn find_clicked_app_index(&self) -> Option<usize> {
+        if !self.show {
+            return None;
         }
-        None
+        let mut cursor = POINT::default();
+        unsafe { GetCursorPos(&mut cursor) }.ok()?;
+        self.layout()?.hit_test(cursor.x, cursor.y)
     }
 }
 
-const fn theme_color(light_theme: bool) -> (u32, u32) {
-    match light_theme {
-        true => (FG_LIGHT_COLOR, BG_LIGHT_COLOR),
-        false => (FG_DARK_COLOR, BG_DARK_COLOR),
-    }
-}
-
-fn get_dpi_scale(hwnd: HWND) -> f64 {
-    unsafe {
-        let dpi = GetDpiForWindow(hwnd);
-        if dpi == 0 {
-            1.0
-        } else {
-            dpi as f64 / 96.0
-        }
-    }
-}
-
-struct Coordinate {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    icon_size: i32,
-    item_size: i32,
-}
-
-impl Coordinate {
-    fn new(num_apps: i32, icon_size_max: i32, border_size: i32, icon_border: i32) -> Result<Self> {
-        if num_apps <= 0 {
-            bail!("paint stage=layout empty list");
-        }
-        let monitor_rect = get_moinitor_rect();
-        let monitor_width = monitor_rect
-            .right
-            .checked_sub(monitor_rect.left)
-            .context("paint monitor width overflow")?;
-        let monitor_height = monitor_rect
-            .bottom
-            .checked_sub(monitor_rect.top)
-            .context("paint monitor height overflow")?;
-
-        let icon_size =
-            ((monitor_width - 2 * border_size) / num_apps - icon_border * 2).min(icon_size_max);
-        if icon_size <= 0 || monitor_height <= 0 {
-            bail!("paint stage=layout insufficient space");
-        }
-
-        let item_size = icon_size + icon_border * 2;
-        let width = item_size * num_apps + border_size * 2;
-        let height = item_size + border_size * 2;
-        let x = monitor_rect.left + (monitor_width - width) / 2;
-        let y = monitor_rect.top + (monitor_height - height) / 2;
-
-        Ok(Self {
-            x,
-            y,
-            width,
-            height,
-            icon_size,
-            item_size,
-        })
+const fn theme_color(light: bool) -> (u32, u32) {
+    if light {
+        (0xf2f2f2, 0xe0e0e0)
+    } else {
+        (0x3b3b3b, 0x4c4c4c)
     }
 }

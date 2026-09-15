@@ -57,7 +57,10 @@ const MAX_BADGE_MAX: u32 = 9999;
 const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 
 pub use schema::Config;
-pub use types::{BatteryPolicy, Language, RunLevel, StartupEnabled, WatchMode};
+pub use types::{
+    BatteryPolicy, ForegroundPolicy, InjectedPolicy, Language, MonitorPolicy, RenderScale,
+    RunLevel, StartupEnabled, WatchMode,
+};
 
 impl Config {
     pub fn load(ini_conf: &Ini) -> Result<Self> {

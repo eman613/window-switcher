@@ -24,13 +24,16 @@ use windows::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW,
             SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
-            LLKHF_EXTENDED, LLKHF_UP, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-            WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_KEYDOWN,
+            WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
         },
     },
 };
 
-use crate::{config::Hotkey, foreground::ForegroundStatus};
+use crate::{
+    config::{Hotkey, InjectedPolicy},
+    foreground::ForegroundStatus,
+};
 
 mod activation;
 pub(crate) mod dispatch;
@@ -39,7 +42,7 @@ pub(crate) mod state;
 pub(crate) use activation::InputActivation;
 use activation::WM_INPUT_ACTIVATION;
 use dispatch::InputDispatch;
-use state::{InputMachine, KeyInput};
+use state::{InputMachine, InputPermissions, KeyInput};
 
 thread_local! {
     static HOOK_CONTEXT: RefCell<Option<HookContext>> = const { RefCell::new(None) };
@@ -51,6 +54,7 @@ struct HookContext {
     foreground: Arc<ForegroundStatus>,
     stop: Arc<AtomicBool>,
     activation: Arc<InputActivation>,
+    injected: InjectedPolicy,
 }
 
 impl HookContext {
@@ -67,9 +71,19 @@ impl HookContext {
             extended: data.flags.0 & LLKHF_EXTENDED.0 != 0,
             down: data.flags.0 & LLKHF_UP.0 == 0,
         };
+        if self.injected == InjectedPolicy::Passthrough && data.flags.0 & LLKHF_INJECTED.0 != 0 {
+            self.machine.observe_injected_passthrough(key);
+            if let Some(started) = started {
+                self.dispatch.observe_callback(started.elapsed());
+            }
+            return false;
+        }
         let decision = self.machine.handle(
             key,
-            self.foreground.allows_windows(),
+            InputPermissions {
+                windows: self.foreground.allows_windows(),
+                apps: self.foreground.allows_apps(),
+            },
             self.dispatch.acknowledged(),
             self.dispatch.revoked(),
         );
@@ -103,7 +117,7 @@ impl KeyboardListener {
         foreground: Arc<ForegroundStatus>,
         hotkeys: &[&Hotkey],
     ) -> Result<Self> {
-        Self::with_activation(dispatch, foreground, hotkeys, true)
+        Self::with_activation(dispatch, foreground, hotkeys, true, InjectedPolicy::Handle)
     }
 
     pub(crate) fn with_activation(
@@ -111,6 +125,7 @@ impl KeyboardListener {
         foreground: Arc<ForegroundStatus>,
         hotkeys: &[&Hotkey],
         active: bool,
+        injected: InjectedPolicy,
     ) -> Result<Self> {
         let hotkeys = hotkeys.iter().map(|key| (**key).clone()).collect();
         let stop = Arc::new(AtomicBool::new(false));
@@ -127,6 +142,7 @@ impl KeyboardListener {
                     foreground,
                     thread_stop,
                     thread_activation,
+                    injected,
                     &ready_tx,
                 ) {
                     error!("input stage=thread-failure error={err:#}");
@@ -189,6 +205,7 @@ fn run_input_thread(
     foreground: Arc<ForegroundStatus>,
     stop: Arc<AtomicBool>,
     activation: Arc<InputActivation>,
+    injected: InjectedPolicy,
     ready: &SyncSender<Result<u32>>,
 ) -> Result<()> {
     let mut message = MSG::default();
@@ -208,6 +225,7 @@ fn run_input_thread(
             foreground,
             stop: stop.clone(),
             activation,
+            injected,
         })
     });
     let module = unsafe { GetModuleHandleW(None) }.context("input stage=module")?;

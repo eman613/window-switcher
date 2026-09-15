@@ -53,6 +53,10 @@ impl WindowTarget {
         self.live.load(Ordering::Acquire)
     }
 
+    pub(crate) fn window_id(&self) -> usize {
+        self.window as usize
+    }
+
     pub(crate) fn close(&self) {
         // Posters use try_lock and never wait. Once close returns no worker can
         // post to this HWND again, even if Windows later reuses its numeric value.
