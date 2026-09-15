@@ -1,0 +1,37 @@
+Window Switcher
+个人维护版本：https://github.com/eman613/window-switcher
+发布下载：https://github.com/eman613/window-switcher/releases
+
+便携运行
+1. 选择与 Windows 操作系统架构相符的包：windows-64 为 x64，windows-arm64 为 ARM64。
+2. 下载 ZIP 及同名 .sha256，用 PowerShell 的 Get-FileHash -Algorithm SHA256 核对哈希。
+3. 新安装时解压全部文件。双击 window-switcher.exe。程序不要求管理员权限。
+4. 更新前从托盘“退出”。保留已有 window-switcher.ini，只替换 EXE。
+5. 从托盘“编辑配置”修改同目录 INI。保存后按 auto_restart 设置生效。
+
+源码仓库中的安装脚本（PowerShell 7）
+  pwsh -NoProfile -NonInteractive -File .\install.ps1
+默认选择个人维护仓库最近发布的公开预发布。可使用 -Channel stable 选择稳定版，
+或 -Tag 指定精确的 vMAJOR.MINOR.PATCH 标签。没有相应版本时返回错误。
+-Repository owner/repo 显式选择其他来源，不会自动回退至上游。
+-Destination 指定安装目录。默认从系统 LocalApplicationData 定位 Programs\window-switcher。
+脚本验证 GitHub 资产摘要、ZIP 的 SHA-256、文件清单、版本与 PE 架构。
+SHA-256 校验依赖所选择仓库的可信性，不是独立的代码签名。
+
+本地包与恢复
+-ArchivePath 指向已下载 ZIP，并同时提供 -Tag。旁边必须有同名 .sha256 文件。
+-ValidateOnly 只验证本地包；-Platform windows-64/windows-arm64 可跨架构验证。
+安装会保留已有 INI、LICENSE 和 USAGE.txt，只创建缺失的支持文件。
+程序运行、安装锁占用、目录无写权限或包校验失败时，退出程序或修复原因后重试。
+安装器不自动终止应用、不提升权限、不启动安装后的程序，不创建开机启动项。
+升级成功后，上一程序保存为 window-switcher.exe.previous。
+  pwsh -NoProfile -NonInteractive -File .\install.ps1 -Rollback -Destination <安装目录>
+回滚前退出程序。回滚使用上一 EXE，不回写或删除 INI。
+若文件系统报告部分替换失败，保留的 .window-switcher-stage-* 目录用于恢复诊断。
+不要将正在使用的其他软件目录作为安装目标，不支持目录联接或符号链接安装路径。
+
+发布与验证范围
+0.x 和带预发布后缀的版本标记为 Pre-release，不占用稳定版 latest。
+本包包含 EXE、默认 INI、MIT LICENSE 和本说明。源代码和依赖许可见仓库。
+双架构 CI 的编译与常规测试不代表所有桌面、权限、DPI、RDP 或读屏场景均已实机验收。
+请在对应版本的发布说明中查看功能范围和已知限制。

@@ -32,17 +32,18 @@ jobs:
       CARGO_TARGET: ${{ matrix.target }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: ${{ matrix.target }}
 
@@ -58,8 +59,84 @@ jobs:
           cargo test --locked --workspace --all-targets --target $env:CARGO_TARGET
           exit $LASTEXITCODE
 
+      - name: Check all targets
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo check --locked --workspace --all-targets --target $env:CARGO_TARGET
+          exit $LASTEXITCODE
+
       - name: Clippy
         run: |
           $ErrorActionPreference = 'Stop'
           cargo clippy --locked --workspace --all-targets --target $env:CARGO_TARGET -- -D warnings
           exit $LASTEXITCODE
+
+      - name: Build distribution test executable
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --locked --release --target $env:CARGO_TARGET
+          exit $LASTEXITCODE
+
+      - name: Package and installer regressions
+        run: ./tools/distribution/test-install.ps1 -Executable "target/$env:CARGO_TARGET/release/window-switcher.exe"
+
+  msrv:
+    name: MSRV (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+    env:
+      CARGO_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Read declared MSRV
+        id: msrv
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = cargo metadata --locked --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
+          $package = ($metadata | ConvertFrom-Json).packages | Where-Object name -eq 'window-switcher'
+          if (-not $package.rust_version) { throw 'The package must declare rust-version.' }
+          "version=$($package.rust_version)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding UTF8
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: msrv-${{ matrix.target }}
+      - name: Check MSRV
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo check --locked --workspace --all-targets --target $env:CARGO_TARGET
+          exit $LASTEXITCODE
+
+  distribution:
+    name: Distribution and dependency checks
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: dependency-audit
+      - name: PowerShell syntax
+        run: ./tools/distribution/check.ps1 -Check scripts
+      - name: Workflow validation
+        run: ./tools/distribution/check.ps1 -Check workflows
+      - name: Dependency licenses, advisories and sources
+        run: ./tools/distribution/check.ps1 -Check dependencies

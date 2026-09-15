@@ -44,16 +44,17 @@ jobs:
       RELEASE_PLATFORM: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: release-${{ matrix.target }}
 
@@ -92,24 +93,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $executable = "target/$env:RELEASE_TARGET/release/window-switcher.exe"
-          $version = ($env:RELEASE_TAG.Substring(1) -split '-')[0]
-          $fileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path -LiteralPath $executable).Path)
-          if ($fileVersion.ProductVersion -cne $version -or $fileVersion.FileVersion -cne "$version.0") {
-            throw 'The built executable has incorrect Windows version resources.'
-          }
-          $packageFiles = @($executable, 'window-switcher.ini', 'LICENSE')
-          foreach ($file in $packageFiles) {
-            if ((Get-Item -LiteralPath $file).Length -eq 0) { throw "Empty package file: $file" }
-          }
-          New-Item -ItemType Directory -Path 'dist/package' | Out-Null
-          Copy-Item -LiteralPath $packageFiles -Destination 'dist/package'
-          $archive = "dist/window-switcher-$env:RELEASE_TAG-$env:RELEASE_PLATFORM.zip"
-          $stagedFiles = $packageFiles | ForEach-Object { Join-Path 'dist/package' (Split-Path $_ -Leaf) }
-          Compress-Archive -LiteralPath $stagedFiles -DestinationPath $archive -CompressionLevel Optimal
-          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $(Split-Path $archive -Leaf)" | Set-Content -LiteralPath "$archive.sha256" -Encoding UTF8
+          ./tools/distribution/new-package.ps1 -Executable $executable -Tag $env:RELEASE_TAG -Platform $env:RELEASE_PLATFORM -OutputDirectory dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.platform }}
           path: |
@@ -127,7 +113,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           path: dist
@@ -146,10 +135,9 @@ jobs:
           if ($actualFiles.Count -ne 4 -or (Compare-Object $expectedFiles $actualFiles)) {
             throw 'Both architectures and their SHA-256 files must be present before publication.'
           }
-          foreach ($archive in Get-ChildItem -LiteralPath dist -Filter '*.zip' -File) {
-            $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            $checksum = (Get-Content -LiteralPath "$($archive.FullName).sha256" -Raw).Trim()
-            if ($checksum -cne "$hash  $($archive.Name)") { throw "Checksum mismatch: $($archive.Name)" }
+          foreach ($platform in @('windows-64', 'windows-arm64')) {
+            $archive = "dist/window-switcher-$env:RELEASE_TAG-$platform.zip"
+            ./install.ps1 -ArchivePath $archive -Tag $env:RELEASE_TAG -Platform $platform -ValidateOnly -RequireUsage
           }
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
           $releaseUri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG"
@@ -162,7 +150,7 @@ jobs:
 
       - name: Upload all assets to a draft
         id: release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           name: Window Switcher ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
@@ -174,7 +162,7 @@ jobs:
           generate_release_notes: true
           body: |
             便携包：`windows-64` 适用于 x64，`windows-arm64` 适用于 ARM64。
-            每个 ZIP 包含程序、INI 默认模板和 LICENSE，并提供同名 `.sha256` 校验文件。
+            每个 ZIP 包含程序、INI 默认模板、LICENSE 和 USAGE.txt，并提供同名 `.sha256` 校验文件。
             更新时保留已有 INI，仅替换 EXE；包内 INI 用于新安装或参考。
             `0.x` 及带预发布后缀的版本标记为 Pre-release，不替换稳定版 latest。
           files: |

@@ -2,13 +2,15 @@
 name = "inspect-windows"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
+license.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1"
 indexmap = "2.2.3"
-window-switcher = { path = "../.."}
+window-switcher = { version = "0.1.0", path = "../.." }
 
 [dependencies.windows]
 version = "0.61.3"
