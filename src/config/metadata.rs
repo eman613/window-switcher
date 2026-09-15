@@ -171,17 +171,36 @@ fn security_information(file: &File) -> Result<Vec<u32>> {
 }
 
 #[cfg(test)]
-pub(super) fn protect_test_dacl(file: &File) {
-    use windows::Win32::Security::{SetKernelObjectSecurity, PROTECTED_DACL_SECURITY_INFORMATION};
+pub(super) fn change_test_dacl_protection(file: &File) {
+    use windows::Win32::Security::{
+        GetSecurityDescriptorControl, SetKernelObjectSecurity, PROTECTED_DACL_SECURITY_INFORMATION,
+        SE_DACL_PROTECTED, UNPROTECTED_DACL_SECURITY_INFORMATION,
+    };
     let mut security = security_information(file).unwrap();
+    let descriptor = PSECURITY_DESCRIPTOR(security.as_mut_ptr().cast());
+    let mut control = 0;
+    let mut revision = 0;
+    unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }.unwrap();
+    // CI temporary files can already have protected DACLs. Always change the
+    // protection state instead of assuming inheritance is initially enabled.
+    let protection = if control & SE_DACL_PROTECTED.0 == 0 {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
     unsafe {
         SetKernelObjectSecurity(
             handle(file),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            PSECURITY_DESCRIPTOR(security.as_mut_ptr().cast()),
+            DACL_SECURITY_INFORMATION | protection,
+            descriptor,
         )
     }
     .unwrap();
+    assert_ne!(
+        security_information(file).unwrap(),
+        security,
+        "DACL fixture must change the original security descriptor"
+    );
 }
 
 #[cfg(test)]

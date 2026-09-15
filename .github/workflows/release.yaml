@@ -2,115 +2,211 @@ name: Release
 
 on:
   push:
-    tags:
-    - v[0-9]+.[0-9]+.[0-9]+*
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh -NoProfile -NonInteractive -File {0}
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+  # The fork starts at 0.1.0. All 0.x and suffixed tags are prereleases.
+  IS_PRERELEASE: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
 
 jobs:
-  all:
-    permissions:
-      contents: write
-    name: All
+  checks:
+    uses: ./.github/workflows/ci.yaml
 
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: checks
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
-        target:
-        - x86_64-pc-windows-msvc
         include:
-        - target: x86_64-pc-windows-msvc
-          os: windows-latest
-          platform: windows-64
-        - target: aarch64-pc-windows-msvc
-          os: windows-latest
-          platform: windows-arm64
-          use-cross: true
-
-    runs-on: ${{matrix.os}}
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            platform: windows-64
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            platform: windows-arm64
     env:
-      BUILD_CMD: cargo
+      RELEASE_TARGET: ${{ matrix.target }}
+      RELEASE_PLATFORM: ${{ matrix.platform }}
 
     steps:
-    - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
-    - name: Check Tag
-      id: check-tag
-      shell: bash
-      run: |
-        ver=${GITHUB_REF##*/}
-        echo "version=$ver" >> $GITHUB_OUTPUT
-        if [[ "$ver" =~ [0-9]+.[0-9]+.[0-9]+$ ]]; then
-          echo "rc=false" >> $GITHUB_OUTPUT
-        else
-          echo "rc=true" >> $GITHUB_OUTPUT
-        fi
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
 
-    - name: Install Rust Toolchain Components
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.target }}
+      - name: Validate tag and versions
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -cnotmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw 'Release tags must use vMAJOR.MINOR.PATCH with an optional prerelease suffix.'
+          }
+          $metadataJson = cargo metadata --locked --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
+          $package = ($metadataJson | ConvertFrom-Json).packages | Where-Object name -eq 'window-switcher'
+          if (-not $package -or "v$($package.version)" -cne $env:RELEASE_TAG) {
+            throw 'The tag must match the window-switcher Cargo version.'
+          }
+          $version = ($package.version -split '-')[0]
+          $fixedVersion = $version.Replace('.', ',') + ',0'
+          $resource = Get-Content -LiteralPath 'assets/app.rc' -Raw
+          $expectedResources = @(
+            "FILEVERSION $fixedVersion",
+            "PRODUCTVERSION $fixedVersion",
+            ('VALUE "FileVersion", "' + $version + '.0"'),
+            ('VALUE "ProductVersion", "' + $version + '"')
+          )
+          foreach ($expected in $expectedResources) {
+            if (-not $resource.Contains($expected)) { throw "Version resource mismatch: $expected" }
+          }
 
-    - name: Install cross
-      if: matrix.use-cross
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cross
-  
-    - name: Overwrite build command env variable
-      if: matrix.use-cross
-      shell: bash
-      run: echo "BUILD_CMD=cross" >> $GITHUB_ENV
+      - name: Build release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --locked --release --target $env:RELEASE_TARGET
+          exit $LASTEXITCODE
 
-    - name: Show Version Information (Rust, cargo, GCC)
-      shell: bash
-      run: |
-        gcc --version || true
-        rustup -V
-        rustup toolchain list
-        rustup default
-        cargo -V
-        rustc -V
-      
-    - name: Build
-      shell: bash
-      run: $BUILD_CMD build --locked --release --target=${{ matrix.target }} ${{ matrix.cargo-flags }}
+      - name: Package portable archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $executable = "target/$env:RELEASE_TARGET/release/window-switcher.exe"
+          $version = ($env:RELEASE_TAG.Substring(1) -split '-')[0]
+          $fileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path -LiteralPath $executable).Path)
+          if ($fileVersion.ProductVersion -cne $version -or $fileVersion.FileVersion -cne "$version.0") {
+            throw 'The built executable has incorrect Windows version resources.'
+          }
+          $packageFiles = @($executable, 'window-switcher.ini', 'LICENSE')
+          foreach ($file in $packageFiles) {
+            if ((Get-Item -LiteralPath $file).Length -eq 0) { throw "Empty package file: $file" }
+          }
+          New-Item -ItemType Directory -Path 'dist/package' | Out-Null
+          Copy-Item -LiteralPath $packageFiles -Destination 'dist/package'
+          $archive = "dist/window-switcher-$env:RELEASE_TAG-$env:RELEASE_PLATFORM.zip"
+          $stagedFiles = $packageFiles | ForEach-Object { Join-Path 'dist/package' (Split-Path $_ -Leaf) }
+          Compress-Archive -LiteralPath $stagedFiles -DestinationPath $archive -CompressionLevel Optimal
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $archive -Leaf)" | Set-Content -LiteralPath "$archive.sha256" -Encoding UTF8
 
-    - name: Build Archive
-      shell: bash
-      id: package
-      env:
-        target: ${{ matrix.target }}
-        platform: ${{ matrix.platform }}
-        version:  ${{ steps.check-tag.outputs.version }}
-      run: |
-        set -euxo pipefail
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
-        bin=${GITHUB_REPOSITORY##*/}
-        dist_dir=`pwd`/dist
-        name=$bin-$version-$platform
-        executable=target/$target/release/$bin
+  publish:
+    name: Publish complete release
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
 
-        if [[ "$RUNNER_OS" == "Windows" ]]; then
-          executable=$executable.exe
-        fi
+      - name: Verify archives and release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedFiles = foreach ($platform in @('windows-64', 'windows-arm64')) {
+            "window-switcher-$env:RELEASE_TAG-$platform.zip"
+            "window-switcher-$env:RELEASE_TAG-$platform.zip.sha256"
+          }
+          $actualFiles = @(Get-ChildItem -LiteralPath dist -File | Select-Object -ExpandProperty Name)
+          if ($actualFiles.Count -ne 4 -or (Compare-Object $expectedFiles $actualFiles)) {
+            throw 'Both architectures and their SHA-256 files must be present before publication.'
+          }
+          foreach ($archive in Get-ChildItem -LiteralPath dist -Filter '*.zip' -File) {
+            $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $checksum = (Get-Content -LiteralPath "$($archive.FullName).sha256" -Raw).Trim()
+            if ($checksum -cne "$hash  $($archive.Name)") { throw "Checksum mismatch: $($archive.Name)" }
+          }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+          $releaseUri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG"
+          $existingRelease = $null
+          try { $existingRelease = Invoke-RestMethod -Uri $releaseUri -Headers $headers }
+          catch { if ([int]$_.Exception.Response.StatusCode -ne 404) { throw } }
+          if ($existingRelease -and -not $existingRelease.draft) {
+            throw 'This release is already public. Publish a new version instead of replacing its assets.'
+          }
 
-        mkdir $dist_dir
-        cp $executable $dist_dir
-        cd $dist_dir
+      - name: Upload all assets to a draft
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Window Switcher ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          draft: true
+          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
+          make_latest: 'false'
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            便携包：`windows-64` 适用于 x64，`windows-arm64` 适用于 ARM64。
+            每个 ZIP 包含程序、INI 默认模板和 LICENSE，并提供同名 `.sha256` 校验文件。
+            更新时保留已有 INI，仅替换 EXE；包内 INI 用于新安装或参考。
+            `0.x` 及带预发布后缀的版本标记为 Pre-release，不替换稳定版 latest。
+          files: |
+            dist/*.zip
+            dist/*.sha256
 
-        if [[ "$RUNNER_OS" == "Windows" ]]; then
-            archive=$dist_dir/$name.zip
-            7z a $archive *
-            echo "archive=dist/$name.zip" >> $GITHUB_OUTPUT
-        else
-            archive=$dist_dir/$name.tar.gz
-            tar -czf $archive *
-            echo "archive=dist/$name.tar.gz" >> $GITHUB_OUTPUT
-        fi
-
-    - name: Publish Archive
-      uses: softprops/action-gh-release@v2
-      if: ${{ startsWith(github.ref, 'refs/tags/') }}
-      with:
-        draft: false
-        files: ${{ steps.package.outputs.archive }}
-        prerelease: ${{ steps.check-tag.outputs.rc == 'true' }}
+      - name: Verify uploaded assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+          $releaseUri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID"
+          $release = Invoke-RestMethod -Uri $releaseUri -Headers $headers
+          $localFiles = @(Get-ChildItem -LiteralPath dist -File)
+          if (-not $release.draft -or $release.assets.Count -ne $localFiles.Count) {
+            throw 'The release must remain a draft with exactly the validated asset set.'
+          }
+          foreach ($file in $localFiles) {
+            $asset = @($release.assets | Where-Object name -CEQ $file.Name)
+            $digest = 'sha256:' + (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded' -or $asset[0].size -ne $file.Length -or $asset[0].digest -cne $digest) {
+              throw "Uploaded asset verification failed: $($file.Name)"
+            }
+          }
+          $isPrerelease = $env:IS_PRERELEASE -eq 'true'
+          $body = @{
+            draft = $false
+            prerelease = $isPrerelease
+            make_latest = if ($isPrerelease) { 'false' } else { 'true' }
+          } | ConvertTo-Json
+          $published = Invoke-RestMethod -Uri $releaseUri -Method Patch -Headers $headers -ContentType 'application/json' -Body $body
+          if ($published.draft -or $published.prerelease -ne $isPrerelease) { throw 'Unexpected publication state.' }
+          Write-Output $published.html_url

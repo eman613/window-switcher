@@ -80,7 +80,8 @@ fn defaults_and_chinese_template_agree() {
     for (section, properties) in &parse_ini(DEFAULT_CONFIG).unwrap() {
         for (key, _) in properties {
             let name = section.map_or_else(|| key.to_owned(), |section| format!("{section}.{key}"));
-            assert!(DEFAULT_CONFIG.contains(&format!("; 配置说明：{name}\n")));
+            let comment = format!("; 配置说明：{name}");
+            assert!(DEFAULT_CONFIG.lines().any(|line| line == comment));
         }
     }
 }
@@ -561,7 +562,7 @@ fn custom_permissions_and_alternate_streams_are_not_silently_discarded() {
         .access_mode(GENERIC_READ.0 | WRITE_DAC.0)
         .open(&path)
         .unwrap();
-    super::metadata::protect_test_dacl(&file);
+    super::metadata::change_test_dacl_protection(&file);
     drop(file);
     let error = load_at(path.clone())
         .err()
