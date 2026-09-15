@@ -1,15 +1,15 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use windows::Win32::{
     Foundation::{COLORREF, RECT, SIZE},
     Graphics::Gdi::{
-        CreateEllipticRgn, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, FillRgn,
-        GetTextExtentPoint32W, RestoreDC, SaveDC, SelectObject, SetBkMode, SetTextColor,
-        CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CLR_INVALID, DEFAULT_CHARSET, DEFAULT_PITCH,
-        DT_CENTER, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_SEMIBOLD, HDC, HGDIOBJ,
-        OUT_DEFAULT_PRECIS, TRANSPARENT,
+        CreateEllipticRgn, CreateFontW, CreateSolidBrush, DrawTextW, FillRgn,
+        GetTextExtentPoint32W, SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+        CLR_INVALID, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
+        FF_DONTCARE, FW_SEMIBOLD, HDC, OUT_DEFAULT_PRECIS, TRANSPARENT,
     },
 };
 
+use crate::utils::gdi::{OwnedGdiObject, SavedDc};
 use crate::{config::Config, painter::ICON_SIZE_BASE};
 
 #[derive(Debug, Clone, Copy)]
@@ -81,10 +81,8 @@ pub(crate) fn draw_badge(
         };
         let font = OwnedGdiObject::new(font.into(), "CreateFontW")?;
         // Restore the font and text/DC state before deleting the font on every path.
-        let _state = SavedDc::new(hdc)?;
-        if unsafe { SelectObject(hdc, font.0) }.is_invalid() {
-            bail!("Badge SelectObject(font) failed");
-        }
+        let state = SavedDc::new(hdc)?;
+        state.select(font.0)?;
         let mut measured = SIZE::default();
         unsafe { GetTextExtentPoint32W(hdc, &text_utf16, &mut measured) }
             .ok()
@@ -144,45 +142,6 @@ fn required_diameter(icon_size: i32, measured: SIZE) -> i32 {
 
 fn rgb_colorref(rgb: u32) -> COLORREF {
     COLORREF(((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff))
-}
-
-struct OwnedGdiObject(HGDIOBJ);
-
-impl OwnedGdiObject {
-    fn new(object: HGDIOBJ, operation: &str) -> Result<Self> {
-        if object.is_invalid() {
-            return Err(anyhow!("Badge {operation} returned an invalid GDI object"));
-        }
-        Ok(Self(object))
-    }
-}
-
-impl Drop for OwnedGdiObject {
-    fn drop(&mut self) {
-        if !unsafe { DeleteObject(self.0) }.as_bool() {
-            warn!("Badge DeleteObject failed");
-        }
-    }
-}
-
-struct SavedDc(HDC, i32);
-
-impl SavedDc {
-    fn new(hdc: HDC) -> Result<Self> {
-        let state = unsafe { SaveDC(hdc) };
-        if state == 0 {
-            bail!("Badge SaveDC failed");
-        }
-        Ok(Self(hdc, state))
-    }
-}
-
-impl Drop for SavedDc {
-    fn drop(&mut self) {
-        if !unsafe { RestoreDC(self.0, self.1) }.as_bool() {
-            warn!("Badge RestoreDC failed");
-        }
-    }
 }
 
 #[cfg(test)]

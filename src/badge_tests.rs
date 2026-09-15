@@ -6,9 +6,9 @@ use std::{
 
 use windows::Win32::{
     Graphics::Gdi::{
-        CreateCompatibleDC, CreateDIBSection, DeleteDC, GdiFlush, GetBkMode, GetCurrentObject,
-        GetTextColor, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-        DIB_RGB_COLORS, HALFTONE, HBITMAP, OBJ_FONT, SRCCOPY,
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetBkMode,
+        GetCurrentObject, GetTextColor, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, HBITMAP, HGDIOBJ, OBJ_FONT, SRCCOPY,
     },
     System::Threading::{GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS},
 };

@@ -1,4 +1,4 @@
-use super::HandleWrapper;
+use super::{token::TokenSid, HandleWrapper};
 
 use anyhow::{anyhow, bail, Result};
 use std::{
@@ -8,12 +8,11 @@ use std::{
     os::windows::{ffi::OsStringExt, process::CommandExt},
     process::Command,
 };
-use windows::core::{Result as WindowsResult, PWSTR};
+use windows::core::PWSTR;
 use windows::Win32::{
-    Foundation::ERROR_INSUFFICIENT_BUFFER,
+    Foundation::{LocalFree, ERROR_INSUFFICIENT_BUFFER, HLOCAL},
     Security::{
-        Authorization::ConvertSidToStringSidW, GetTokenInformation, LookupAccountSidW, TokenUser,
-        SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
+        Authorization::ConvertSidToStringSidW, LookupAccountSidW, SID_NAME_USE, TOKEN_QUERY,
     },
     System::{
         SystemInformation::GetLocalTime,
@@ -24,7 +23,7 @@ use windows::Win32::{
 pub fn create_scheduled_task(name: &str, exe_path: &str) -> Result<()> {
     let task_xml_path = create_task_file(name, exe_path)
         .map_err(|err| anyhow!("Failed to create scheduled task, {err}"))?;
-    debug!("scheduled task file: {task_xml_path}");
+    debug!("startup stage=task-file-created");
     let output = Command::new("schtasks")
         .creation_flags(CREATE_NO_WINDOW.0) // CREATE_NO_WINDOW flag
         .args(["/create", "/tn", name, "/xml", &task_xml_path, "/f"])
@@ -127,7 +126,7 @@ fn create_task_file(name: &str, exe_path: &str) -> Result<String> {
     Ok(xml_path)
 }
 
-fn get_author_and_userid() -> WindowsResult<(String, String)> {
+fn get_author_and_userid() -> Result<(String, String)> {
     let mut token_handle = HandleWrapper::default();
     unsafe {
         OpenProcessToken(
@@ -137,41 +136,31 @@ fn get_author_and_userid() -> WindowsResult<(String, String)> {
         )?
     };
 
-    let mut token_info_length = 0;
-    if let Err(err) = unsafe {
-        GetTokenInformation(
-            token_handle.get_handle(),
-            TokenUser,
+    let token_user = TokenSid::user(token_handle.get_handle())?;
+    let user_sid = token_user.sid();
+    let mut name_len = 0;
+    let mut domain_len = 0;
+    let mut sid_name_use = SID_NAME_USE(0);
+    match unsafe {
+        LookupAccountSidW(
             None,
-            0,
-            &mut token_info_length,
+            user_sid,
+            None,
+            &mut name_len,
+            None,
+            &mut domain_len,
+            &mut sid_name_use,
         )
     } {
-        if err != ERROR_INSUFFICIENT_BUFFER.into() {
-            return Err(err);
-        }
+        Err(err) if err.code() == ERROR_INSUFFICIENT_BUFFER.to_hresult() => {}
+        Err(err) => return Err(err.into()),
+        Ok(()) => bail!("token stage=account-size unexpected success"),
     }
-
-    let mut token_user = Vec::<u8>::with_capacity(token_info_length as usize);
-    unsafe {
-        GetTokenInformation(
-            token_handle.get_handle(),
-            TokenUser,
-            Some(token_user.as_mut_ptr() as *mut _),
-            token_info_length,
-            &mut token_info_length,
-        )?
-    };
-
-    let user_sid = unsafe { *(token_user.as_ptr() as *const TOKEN_USER) }
-        .User
-        .Sid;
-
-    let mut name = Vec::<u16>::with_capacity(256);
-    let mut name_len = 256;
-    let mut domain = Vec::<u16>::with_capacity(256);
-    let mut domain_len = 256;
-    let mut sid_name_use = SID_NAME_USE(0);
+    if name_len == 0 || name_len > 32768 || domain_len > 32768 {
+        bail!("token stage=account-size invalid length");
+    }
+    let mut name = vec![0u16; name_len as usize];
+    let mut domain = vec![0u16; domain_len.max(1) as usize];
 
     unsafe {
         LookupAccountSidW(
@@ -185,10 +174,11 @@ fn get_author_and_userid() -> WindowsResult<(String, String)> {
         )?
     };
 
-    unsafe {
-        name.set_len(name_len as usize);
-        domain.set_len(domain_len as usize);
+    if name_len as usize > name.len() || domain_len as usize > domain.len() {
+        bail!("token stage=account-query invalid returned length");
     }
+    name.truncate(name_len as usize);
+    domain.truncate(domain_len as usize);
 
     let username = OsString::from_wide(&name).to_string_lossy().into_owned();
     let domainname = OsString::from_wide(&domain).to_string_lossy().into_owned();
@@ -196,11 +186,25 @@ fn get_author_and_userid() -> WindowsResult<(String, String)> {
     let mut sid_string = PWSTR::null();
     unsafe { ConvertSidToStringSidW(user_sid, &mut sid_string)? };
 
-    let sid_str = OsString::from_wide(unsafe { sid_string.as_wide() })
+    let sid_string = LocalSidString(sid_string);
+    let sid_str = OsString::from_wide(unsafe { sid_string.0.as_wide() })
         .to_string_lossy()
         .into_owned();
 
     Ok((format!("{domainname}\\{username}"), sid_str))
+}
+
+struct LocalSidString(PWSTR);
+
+impl Drop for LocalSidString {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            let remaining = unsafe { LocalFree(Some(HLOCAL(self.0 .0.cast()))) };
+            if !remaining.is_invalid() {
+                warn!("resource stage=free-sid failed");
+            }
+        }
+    }
 }
 
 fn get_current_time() -> String {

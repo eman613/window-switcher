@@ -1,6 +1,7 @@
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 
-#[derive(Debug, Clone, Default)]
+/// Unique owner of a real CloseHandle-compatible handle, never a pseudo handle.
+#[derive(Debug, Default)]
 pub struct HandleWrapper {
     handle: HANDLE,
 }
@@ -23,7 +24,9 @@ impl Drop for HandleWrapper {
             return;
         }
         unsafe {
-            let _ = CloseHandle(self.handle);
+            if let Err(err) = CloseHandle(self.handle) {
+                warn!("resource stage=close-handle code={:#x}", err.code().0);
+            }
         }
     }
 }

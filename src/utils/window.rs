@@ -1,4 +1,4 @@
-use crate::utils::is_process_elevated;
+use crate::utils::{is_process_elevated, HandleWrapper};
 
 use anyhow::{anyhow, Result};
 use indexmap::IndexMap;
@@ -27,7 +27,7 @@ use windows::Win32::{
         WindowsAndMessaging::{
             EnumWindows, GetCursorPos, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
             GetWindowPlacement, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-            SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GWL_STYLE, GWL_USERDATA, GW_OWNER,
+            SetForegroundWindow, ShowWindowAsync, GWL_EXSTYLE, GWL_STYLE, GWL_USERDATA, GW_OWNER,
             SW_RESTORE, WINDOWPLACEMENT, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_ICONIC, WS_VISIBLE,
         },
     },
@@ -76,8 +76,13 @@ fn is_cloaked_window(hwnd: HWND, only_current_desktop: bool) -> bool {
 }
 
 pub fn is_small_window(hwnd: HWND) -> bool {
-    let (width, height) = get_window_size(hwnd);
-    width < 120 || height < 90
+    match get_window_size(hwnd) {
+        Ok((width, height)) => width < 120 || height < 90,
+        Err(_) => {
+            debug!("window stage=placement unavailable");
+            true
+        }
+    }
 }
 
 pub fn get_moinitor_rect() -> RECT {
@@ -95,11 +100,17 @@ pub fn get_moinitor_rect() -> RECT {
     }
 }
 
-pub fn get_window_size(hwnd: HWND) -> (i32, i32) {
-    let mut placement = WINDOWPLACEMENT::default();
-    let _ = unsafe { GetWindowPlacement(hwnd, &mut placement) };
+pub fn get_window_size(hwnd: HWND) -> windows::core::Result<(i32, i32)> {
+    let mut placement = WINDOWPLACEMENT {
+        length: size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetWindowPlacement(hwnd, &mut placement) }?;
     let rect = placement.rcNormalPosition;
-    ((rect.right - rect.left), (rect.bottom - rect.top))
+    Ok((
+        rect.right.saturating_sub(rect.left),
+        rect.bottom.saturating_sub(rect.top),
+    ))
 }
 
 pub fn get_exe_folder() -> Result<PathBuf> {
@@ -123,21 +134,23 @@ pub fn get_window_pid(hwnd: HWND) -> u32 {
 }
 
 pub fn get_module_path(pid: u32) -> Option<String> {
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let handle = HandleWrapper::new(
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?,
+    );
     let mut len: u32 = MAX_PATH;
     let mut name = vec![0u16; len as usize];
     let ret = unsafe {
         QueryFullProcessImageNameW(
-            handle,
+            handle.get_handle(),
             PROCESS_NAME_WIN32,
             PWSTR(name.as_mut_ptr()),
             &mut len,
         )
     };
-    if ret.is_err() || len == 0 {
+    if ret.is_err() || len == 0 || len as usize > name.len() {
         return None;
     }
-    unsafe { name.set_len(len as usize) };
+    name.truncate(len as usize);
     let module_path = String::from_utf16_lossy(&name);
     if module_path.is_empty() {
         return None;
@@ -370,11 +383,18 @@ pub fn get_window_exe(hwnd: HWND) -> Option<String> {
     module_path.split('\\').map(|v| v.to_string()).next_back()
 }
 
-pub fn set_foreground_window(hwnd: HWND) {
+pub fn set_foreground_window(hwnd: HWND, allowed: impl Fn() -> bool) -> bool {
     // ref https://github.com/microsoft/PowerToys/blob/4cb72ee126caf1f720c507f6a1dbe658cd515366/src/modules/fancyzones/FancyZonesLib/WindowUtils.cpp#L191
+    if !allowed() {
+        return false;
+    }
     unsafe {
-        if is_iconic_window(hwnd) {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+        if is_iconic_window(hwnd) && !ShowWindowAsync(hwnd, SW_RESTORE).as_bool() {
+            debug!("window stage=restore rejected");
+            return false;
+        }
+        if !allowed() {
+            return false;
         }
 
         let input = INPUT {
@@ -382,10 +402,20 @@ pub fn set_foreground_window(hwnd: HWND) {
             ..Default::default()
         };
 
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
-
-        let _ = SetForegroundWindow(hwnd);
-    };
+        if SendInput(&[input], std::mem::size_of::<INPUT>() as i32) != 1 {
+            debug!("window stage=activation-input rejected");
+        }
+        // Restore/input can dispatch native callbacks. Recheck the session and
+        // target identity immediately before the final activation operation.
+        if !allowed() {
+            return false;
+        }
+        if !SetForegroundWindow(hwnd).as_bool() {
+            debug!("window stage=activation rejected");
+            return false;
+        }
+    }
+    true
 }
 
 pub fn get_foreground_window() -> HWND {
@@ -492,7 +522,11 @@ pub fn list_windows(
             result.entry(key).or_default().push((hwnd, title));
         }
     }
-    debug!("list windows {result:?}");
+    debug!(
+        "window stage=enumerated groups={} windows={}",
+        result.len(),
+        result.values().map(Vec::len).sum::<usize>()
+    );
     Ok(result)
 }
 

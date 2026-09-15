@@ -1,182 +1,243 @@
-use crate::{
-    app::{
-        WM_USER_SWITCH_APPS, WM_USER_SWITCH_APPS_CANCEL, WM_USER_SWITCH_APPS_DONE,
-        WM_USER_SWITCH_WINDOWS, WM_USER_SWITCH_WINDOWS_DONE,
+use std::{
+    cell::RefCell,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, SyncSender},
+        Arc,
     },
-    config::{Hotkey, SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID},
-    foreground::IS_FOREGROUND_IN_BLACKLIST,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Result};
-use indexmap::IndexSet;
-use parking_lot::Mutex;
-use std::sync::LazyLock;
+use anyhow::{bail, Context, Result};
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
-    System::LibraryLoader::GetModuleHandleW,
+    Foundation::{LPARAM, LRESULT, WPARAM},
+    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
     UI::{
-        Input::KeyboardAndMouse::{SCANCODE_LSHIFT, SCANCODE_RSHIFT},
+        Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
+            VK_RSHIFT, VK_RWIN,
+        },
         WindowsAndMessaging::{
-            CallNextHookEx, SendMessageTimeoutW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
-            KBDLLHOOKSTRUCT, LLKHF_UP, SMTO_ABORTIFHUNG, WH_KEYBOARD_LL,
+            CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW,
+            SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
+            LLKHF_EXTENDED, LLKHF_UP, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+            WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
         },
     },
 };
 
-static KEYBOARD_STATE: LazyLock<Mutex<Vec<HotKeyState>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-static mut WINDOW: HWND = HWND(0 as _);
-static mut IS_SHIFT_PRESSED: bool = false;
-static mut IS_SWITCHING_APPS: bool = false;
-static mut PREVIOUS_KEYCODE: u32 = 0;
+use crate::{config::Hotkey, foreground::ForegroundStatus};
 
-#[derive(Debug)]
-pub struct KeyboardListener {
-    hook: HHOOK,
+pub(crate) mod dispatch;
+pub(crate) mod state;
+
+use dispatch::InputDispatch;
+use state::{InputMachine, KeyInput};
+
+thread_local! {
+    static HOOK_CONTEXT: RefCell<Option<HookContext>> = const { RefCell::new(None) };
+}
+
+struct HookContext {
+    machine: InputMachine,
+    dispatch: Arc<InputDispatch>,
+    foreground: Arc<ForegroundStatus>,
+    stop: Arc<AtomicBool>,
+}
+
+impl HookContext {
+    fn process(&mut self, data: KBDLLHOOKSTRUCT) -> bool {
+        if self.stop.load(Ordering::Acquire) || !self.dispatch.is_live() {
+            return false;
+        }
+        let started = Instant::now();
+        let key = KeyInput {
+            scan: data.scanCode,
+            extended: data.flags.0 & LLKHF_EXTENDED.0 != 0,
+            down: data.flags.0 & LLKHF_UP.0 == 0,
+        };
+        let decision = self.machine.handle(
+            key,
+            self.foreground.allows_windows(),
+            self.dispatch.acknowledged(),
+            self.dispatch.revoked(),
+        );
+        let accepted = decision
+            .event
+            .is_none_or(|event| self.dispatch.submit(event));
+        let consume = accepted && decision.consume;
+        if accepted {
+            self.machine.accepted(key, consume);
+        } else {
+            self.machine.rejected(key);
+        }
+        self.dispatch.observe_callback(started.elapsed());
+        consume
+    }
+}
+
+pub(crate) struct KeyboardListener {
+    stop: Arc<AtomicBool>,
+    thread_id: u32,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl KeyboardListener {
-    pub fn init(hwnd: HWND, hotkeys: &[&Hotkey]) -> Result<Self> {
-        unsafe { WINDOW = hwnd }
-
-        let keyboard_state = hotkeys
-            .iter()
-            .map(|hotkey| HotKeyState {
-                hotkey: (*hotkey).clone(),
-                is_modifier_pressed: false,
+    pub(crate) fn init(
+        dispatch: Arc<InputDispatch>,
+        foreground: Arc<ForegroundStatus>,
+        hotkeys: &[&Hotkey],
+    ) -> Result<Self> {
+        let hotkeys = hotkeys.iter().map(|key| (**key).clone()).collect();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("keyboard-input".into())
+            .spawn(move || {
+                if let Err(err) =
+                    run_input_thread(hotkeys, dispatch, foreground, thread_stop, &ready_tx)
+                {
+                    error!("input stage=thread-failure error={err:#}");
+                    let _ = ready_tx.try_send(Err(err));
+                }
+                HOOK_CONTEXT.with(|slot| slot.borrow_mut().take());
             })
-            .collect();
-        *KEYBOARD_STATE.lock() = keyboard_state;
-
-        let hook = unsafe {
-            let hinstance = { GetModuleHandleW(None) }
-                .map_err(|err| anyhow!("Failed to get module handle, {err}"))?;
-            SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(keyboard_proc),
-                Some(hinstance.into()),
-                0,
-            )
+            .context("input stage=thread-create")?;
+        match ready_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(Ok(thread_id)) => Ok(Self {
+                stop,
+                thread_id,
+                thread: Some(thread),
+            }),
+            result => {
+                stop.store(true, Ordering::Release);
+                match result {
+                    Ok(Err(err)) => Err(err),
+                    _ => bail!("input stage=ready timeout or worker exit"),
+                }
+            }
         }
-        .map_err(|err| anyhow!("Failed to set windows hook, {err}"))?;
-        info!("keyboard listener start");
-
-        Ok(Self { hook })
     }
 }
 
 impl Drop for KeyboardListener {
     fn drop(&mut self) {
-        debug!("keyboard listener destroyed");
-        if !self.hook.is_invalid() {
-            let _ = unsafe { UnhookWindowsHookEx(self.hook) };
+        self.stop.store(true, Ordering::Release);
+        if let Err(err) =
+            unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) }
+        {
+            debug!("input stage=stop-notify code={:#x}", err.code().0);
+        }
+        // Never wait indefinitely for hook or OS message delivery on the UI thread.
+        if let Some(thread) = self.thread.take() {
+            if thread.is_finished() && thread.join().is_err() {
+                warn!("input stage=thread-exit panic");
+            }
         }
     }
 }
 
-#[derive(Debug)]
-struct HotKeyState {
-    hotkey: Hotkey,
-    is_modifier_pressed: bool,
+struct HookOwner(HHOOK);
+impl Drop for HookOwner {
+    fn drop(&mut self) {
+        if let Err(err) = unsafe { UnhookWindowsHookEx(self.0) } {
+            warn!("input stage=unhook code={:#x}", err.code().0);
+        }
+    }
 }
 
-unsafe fn send_message_timeout(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) {
-    let mut result: usize = 0;
-    let _ = SendMessageTimeoutW(
-        hwnd,
-        msg,
-        wparam,
-        lparam,
-        SMTO_ABORTIFHUNG,
-        500,
-        Some(&mut result as *mut _ as *mut _),
+fn run_input_thread(
+    hotkeys: Vec<Hotkey>,
+    dispatch: Arc<InputDispatch>,
+    foreground: Arc<ForegroundStatus>,
+    stop: Arc<AtomicBool>,
+    ready: &SyncSender<Result<u32>>,
+) -> Result<()> {
+    let mut message = MSG::default();
+    unsafe {
+        let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+    }
+    if stop.load(Ordering::Acquire) {
+        bail!("input stage=initialize canceled");
+    }
+    let mut machine = InputMachine::new(hotkeys);
+    for (vk, scan, extended) in [
+        (VK_LMENU, 0x38, false),
+        (VK_RMENU, 0x38, true),
+        (VK_LCONTROL, 0x1d, false),
+        (VK_RCONTROL, 0x1d, true),
+        (VK_LWIN, 0x5b, true),
+        (VK_RWIN, 0x5c, true),
+        (VK_LSHIFT, 0x2a, false),
+        (VK_RSHIFT, 0x36, false),
+    ] {
+        machine.seed_modifier(scan, extended, unsafe { GetAsyncKeyState(vk.0 as i32) } < 0);
+    }
+    HOOK_CONTEXT.with(|slot| {
+        *slot.borrow_mut() = Some(HookContext {
+            machine,
+            dispatch,
+            foreground,
+            stop: stop.clone(),
+        })
+    });
+    let module = unsafe { GetModuleHandleW(None) }.context("input stage=module")?;
+    let _hook = HookOwner(
+        unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(module.into()), 0) }
+            .context("input stage=hook-install")?,
     );
+    ready
+        .try_send(Ok(unsafe { GetCurrentThreadId() }))
+        .map_err(|_| anyhow::anyhow!("input stage=ready receiver gone"))?;
+    while !stop.load(Ordering::Acquire) {
+        let result = unsafe { GetMessageW(&mut message, None, 0, 0) }.0;
+        if result == -1 {
+            return Err(windows::core::Error::from_win32()).context("input stage=message-loop");
+        }
+        if result == 0 {
+            break;
+        }
+        #[cfg(test)]
+        if tests::handle_probe(&message) {
+            continue;
+        }
+        unsafe {
+            DispatchMessageW(&message);
+        }
+    }
+    Ok(())
 }
 
-unsafe extern "system" fn keyboard_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-    let kbd_data: &KBDLLHOOKSTRUCT = &*(l_param.0 as *const _);
-    debug!("keyboard {kbd_data:?}");
-    let mut is_modifier = false;
-    let scan_code = kbd_data.scanCode;
-    let is_key_pressed = || kbd_data.flags.0 & LLKHF_UP.0 == 0;
-    if [SCANCODE_LSHIFT, SCANCODE_RSHIFT].contains(&scan_code) {
-        IS_SHIFT_PRESSED = is_key_pressed();
-    }
-    let mut keyboard_state = KEYBOARD_STATE.lock();
-    let mut send_done_hotkeys: IndexSet<u32> = IndexSet::new();
-    let mut send_action_message: Option<(u32, isize, bool)> = None;
-
-    for state in keyboard_state.iter_mut() {
-        if state.hotkey.modifier.contains(&scan_code) {
-            is_modifier = true;
-            if is_key_pressed() {
-                state.is_modifier_pressed = true;
-            } else {
-                state.is_modifier_pressed = false;
-                if PREVIOUS_KEYCODE == state.hotkey.code {
-                    send_done_hotkeys.insert(state.hotkey.id);
-                }
-            }
-        }
-    }
-    if !is_modifier {
-        for state in keyboard_state.iter_mut() {
-            if is_key_pressed() && state.is_modifier_pressed {
-                let id = state.hotkey.id;
-                if scan_code == state.hotkey.code {
-                    let reverse = if IS_SHIFT_PRESSED { 1 } else { 0 };
-                    if id == SWITCH_APPS_HOTKEY_ID
-                        || (id == SWITCH_WINDOWS_HOTKEY_ID && !IS_FOREGROUND_IN_BLACKLIST)
-                    {
-                        send_action_message = Some((id, reverse, false));
-                        PREVIOUS_KEYCODE = scan_code;
-                        break;
-                    };
-                } else if id == SWITCH_APPS_HOTKEY_ID {
-                    if scan_code == 0x01 {
-                        // escape key
-                        send_action_message = Some((id, 0, true));
-                        PREVIOUS_KEYCODE = scan_code;
-                        break;
-                    } else if [0x48, 0x4b, 0x4d, 0x50].contains(&scan_code) && IS_SWITCHING_APPS {
-                        // arrow keys
-                        let reverse = if scan_code == 0x48 || scan_code == 0x4b {
-                            1
-                        } else {
-                            0
-                        };
-                        send_action_message = Some((id, reverse, false));
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    drop(keyboard_state);
-
-    for id in send_done_hotkeys {
-        if id == SWITCH_APPS_HOTKEY_ID {
-            send_message_timeout(WINDOW, WM_USER_SWITCH_APPS_DONE, WPARAM(0), LPARAM(0));
-            IS_SWITCHING_APPS = false;
-        } else if id == SWITCH_WINDOWS_HOTKEY_ID {
-            send_message_timeout(WINDOW, WM_USER_SWITCH_WINDOWS_DONE, WPARAM(0), LPARAM(0));
-        }
-    }
-
-    if let Some((id, reverse, is_cancel)) = send_action_message {
-        if id == SWITCH_APPS_HOTKEY_ID {
-            if is_cancel {
-                send_message_timeout(WINDOW, WM_USER_SWITCH_APPS_CANCEL, WPARAM(0), LPARAM(0));
-                IS_SWITCHING_APPS = false;
-            } else {
-                send_message_timeout(WINDOW, WM_USER_SWITCH_APPS, WPARAM(0), LPARAM(reverse));
-                IS_SWITCHING_APPS = true;
-            }
-            return LRESULT(1);
-        } else if id == SWITCH_WINDOWS_HOTKEY_ID {
-            send_message_timeout(WINDOW, WM_USER_SWITCH_WINDOWS, WPARAM(0), LPARAM(reverse));
-            IS_SWITCHING_APPS = false;
-            return LRESULT(1);
-        }
-    }
-    CallNextHookEx(None, code, w_param, l_param)
+fn can_read_keyboard_data(code: i32, message: WPARAM, parameter: LPARAM) -> bool {
+    code == HC_ACTION as i32
+        && matches!(
+            message.0 as u32,
+            WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP
+        )
+        && parameter.0 != 0
+        && (parameter.0 as usize).is_multiple_of(std::mem::align_of::<KBDLLHOOKSTRUCT>())
 }
+
+unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // Negative codes must be forwarded without even reading lparam.
+    if code < 0 || !can_read_keyboard_data(code, wparam, lparam) {
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
+    let data = (lparam.0 as *const KBDLLHOOKSTRUCT).read();
+    let consume = HOOK_CONTEXT.with(|slot| {
+        slot.try_borrow_mut()
+            .ok()
+            .and_then(|mut slot| slot.as_mut().map(|context| context.process(data)))
+            .unwrap_or(false)
+    });
+    if consume {
+        LRESULT(1)
+    } else {
+        CallNextHookEx(None, code, wparam, lparam)
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,18 +1,18 @@
 use std::{
     path::Path,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    sync::{
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
-use windows::Win32::{
-    Foundation::{HWND, LPARAM, WPARAM},
-    UI::WindowsAndMessaging::PostMessageW,
-};
 
 use super::{document, encoding, storage, LoadedConfig};
 use crate::app::WM_USER_CONFIG_CHANGED;
+use crate::window_target::WindowTarget;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -27,13 +27,12 @@ pub(crate) struct ConfigWatcher {
 }
 
 impl ConfigWatcher {
-    pub(crate) fn start(loaded: &LoadedConfig, hwnd: HWND) -> Result<Self> {
+    pub(crate) fn start(loaded: &LoadedConfig, target: Arc<WindowTarget>) -> Result<Self> {
         let (events_tx, events) = mpsc::channel();
         let (stop, stop_rx) = mpsc::channel();
         let path = loaded.path.clone();
         let delay = Duration::from_millis(u64::from(loaded.config.restart_delay_ms));
         let mut changes = StableChange::new(loaded.contents.clone(), delay);
-        let window = hwnd.0 as isize;
         thread::Builder::new()
             .name("config-watcher".into())
             .spawn(move || {
@@ -62,11 +61,11 @@ impl ConfigWatcher {
                             }
                             if !failure.2 && failure.1.elapsed() >= delay {
                                 failure.2 = true;
-                                error!("{}", failure.0);
+                                error!("config stage=watch read-failed");
                                 if !notify(
                                     &stop_rx,
                                     &events_tx,
-                                    window,
+                                    &target,
                                     ConfigEvent::Invalid(failure.0.clone()),
                                 ) {
                                     break;
@@ -86,19 +85,18 @@ impl ConfigWatcher {
                         Ok(false) => continue,
                         Err(err) => {
                             let message = format!("{err:#}；保留当前配置，修正并保存后会重新检测");
-                            error!("{message}");
+                            error!("config stage=watch invalid-candidate");
                             ConfigEvent::Invalid(message)
                         }
                     };
-                    if !notify(&stop_rx, &events_tx, window, event) {
+                    if !notify(&stop_rx, &events_tx, &target, event) {
                         break;
                     }
                 }
             })
             .context("无法启动 INI 后台监测线程")?;
         info!(
-            "config stage=watch-start path={} delay_ms={}",
-            loaded.path.display(),
+            "config stage=watch-start delay_ms={}",
             loaded.config.restart_delay_ms
         );
         Ok(Self { events, stop })
@@ -119,7 +117,7 @@ impl Drop for ConfigWatcher {
 fn notify(
     stop: &Receiver<()>,
     events: &Sender<ConfigEvent>,
-    window: isize,
+    target: &WindowTarget,
     event: ConfigEvent,
 ) -> bool {
     if !matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
@@ -128,15 +126,8 @@ fn notify(
     if events.send(event).is_err() {
         return false;
     }
-    if let Err(err) = unsafe {
-        PostMessageW(
-            Some(HWND(window as _)),
-            WM_USER_CONFIG_CHANGED,
-            WPARAM(0),
-            LPARAM(0),
-        )
-    } {
-        error!("config stage=notify error={err}");
+    if !target.try_post(WM_USER_CONFIG_CHANGED) {
+        debug!("config stage=notify retired-or-unavailable");
         return false;
     }
     true
@@ -151,7 +142,7 @@ fn validate_candidate(bytes: &[u8], ini_path: &Path) -> Result<bool> {
     let config = super::Config::load(&ini)?;
     storage::validate_log_destination(ini_path, config.log_file.as_deref())?;
     if let Some(path) = &config.log_file {
-        super::prepare_log_file(path)
+        super::prepare_log_file(path, ini_path)
             .with_context(|| format!("无法写入日志 '{}'；请检查目录和权限", path.display()))?;
     }
     Ok(true)

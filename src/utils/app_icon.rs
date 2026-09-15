@@ -1,4 +1,7 @@
-use super::to_wstring;
+use super::{
+    gdi::{checked_bitmap_bytes, OwnedGdiObject, WindowDc},
+    to_wstring,
+};
 
 use std::{
     fs::File,
@@ -14,9 +17,7 @@ use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
         Graphics::Gdi::{
-            CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC,
-            SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HDC,
-            HGDIOBJ, RGBQUAD,
+            GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, RGBQUAD,
         },
         Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
         UI::{
@@ -176,9 +177,19 @@ pub fn load_image_as_hicon<T: AsRef<Path>>(image_path: T) -> Option<HICON> {
         .ok()
         .map(|v| HICON(v.0))
     } else {
-        let mut logo_file = File::open(image_path).ok()?;
+        let logo_file = File::open(image_path).ok()?;
+        const MAX_ICON_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+        if logo_file.metadata().ok()?.len() > MAX_ICON_SOURCE_BYTES {
+            return None;
+        }
         let mut buffer = vec![];
-        logo_file.read_to_end(&mut buffer).ok()?;
+        logo_file
+            .take(MAX_ICON_SOURCE_BYTES + 1)
+            .read_to_end(&mut buffer)
+            .ok()?;
+        if buffer.len() as u64 > MAX_ICON_SOURCE_BYTES {
+            return None;
+        }
         unsafe { CreateIconFromResourceEx(&buffer, true, 0x30000, 100, 100, LR_DEFAULTCOLOR) }.ok()
     }
 }
@@ -367,48 +378,24 @@ fn is_topleft_icon(bounds: &IconBounds) -> bool {
     small_content && top_left
 }
 
-struct HdcGuard(HDC);
-impl Drop for HdcGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = DeleteDC(self.0);
-        }
-    }
-}
-
-struct ScreenDcGuard(HDC);
-impl Drop for ScreenDcGuard {
-    fn drop(&mut self) {
-        unsafe {
-            ReleaseDC(None, self.0);
-        }
-    }
-}
-
-struct BitmapGuard(HBITMAP);
-impl Drop for BitmapGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = DeleteObject(HGDIOBJ(self.0 .0 as _));
-        }
-    }
-}
-
 fn get_icon_bounds(hicon: HICON) -> Option<IconBounds> {
     unsafe {
         let mut icon_info: ICONINFO = std::mem::zeroed();
         if GetIconInfo(hicon, &mut icon_info).is_err() {
             return None;
         }
-        let _color_guard = BitmapGuard(icon_info.hbmColor);
-        let _mask_guard = BitmapGuard(icon_info.hbmMask);
+        // A monochrome icon may legitimately have no color bitmap. Own both
+        // results before any later failure; never delete a borrowed HICON.
+        let color_guard = OwnedGdiObject::new(icon_info.hbmColor.into(), "icon-color").ok();
+        let _mask_guard = OwnedGdiObject::new(icon_info.hbmMask.into(), "icon-mask").ok();
+        let _color_guard = color_guard?;
 
         let mut bmp = BITMAP::default();
         if GetObjectW(
             icon_info.hbmColor.into(),
             std::mem::size_of::<BITMAP>() as i32,
             Some(&mut bmp as *mut _ as *mut _),
-        ) == 0
+        ) != std::mem::size_of::<BITMAP>() as i32
         {
             return None;
         }
@@ -419,13 +406,7 @@ fn get_icon_bounds(hicon: HICON) -> Option<IconBounds> {
             return None;
         }
 
-        let screen_dc = GetDC(None);
-        let _screen_guard = ScreenDcGuard(screen_dc);
-
-        let mem_dc = CreateCompatibleDC(Some(screen_dc));
-        let _dc_guard = HdcGuard(mem_dc);
-
-        let old_bmp = SelectObject(mem_dc, HGDIOBJ(icon_info.hbmColor.0 as _));
+        let screen = WindowDc::new(None).ok()?;
 
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -449,19 +430,21 @@ fn get_icon_bounds(hicon: HICON) -> Option<IconBounds> {
             }; 1],
         };
 
-        let buf_size = (width * height * 4) as usize;
+        let buf_size = checked_bitmap_bytes(width, height).ok()?;
         let mut pixels: Vec<u8> = vec![0; buf_size];
 
-        if 0 == GetDIBits(
-            mem_dc,
-            icon_info.hbmColor,
-            0,
-            height as u32,
-            Some(pixels.as_mut_ptr() as *mut _),
-            &mut bmi,
-            DIB_RGB_COLORS,
-        ) {
-            SelectObject(mem_dc, old_bmp);
+        // GetDIBits requires the queried bitmap NOT to be selected into a DC.
+        if height
+            != GetDIBits(
+                screen.dc,
+                icon_info.hbmColor,
+                0,
+                height as u32,
+                Some(pixels.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            )
+        {
             return None;
         }
 
@@ -535,78 +518,74 @@ fn get_icon_bounds(hicon: HICON) -> Option<IconBounds> {
         }
 
         // Fallback to mask when no alpha channel and no visible pixels found
-        if !has_semi_transparent && max_x < 0 {
-            SelectObject(mem_dc, HGDIOBJ(icon_info.hbmMask.0 as _));
+        if !has_semi_transparent
+            && max_x < 0
+            && height
+                == GetDIBits(
+                    screen.dc,
+                    icon_info.hbmMask,
+                    0,
+                    height as u32,
+                    Some(pixels.as_mut_ptr() as *mut _),
+                    &mut bmi,
+                    DIB_RGB_COLORS,
+                )
+        {
+            let mask_rows = pixels.chunks_exact(width as usize * 4);
 
-            if 0 != GetDIBits(
-                mem_dc,
-                icon_info.hbmMask,
-                0,
-                height as u32,
-                Some(pixels.as_mut_ptr() as *mut _),
-                &mut bmi,
-                DIB_RGB_COLORS,
-            ) {
-                let mask_rows = pixels.chunks_exact(width as usize * 4);
+            min_y = height;
+            max_y = -1i32;
 
-                min_y = height;
-                max_y = -1i32;
+            for (y, row) in mask_rows.clone().enumerate() {
+                if row
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|c| c[0] == 0 && c[1] == 0 && c[2] == 0)
+                {
+                    min_y = y as i32;
+                    break;
+                }
+            }
 
-                for (y, row) in mask_rows.clone().enumerate() {
+            if min_y < height {
+                for (y, row) in mask_rows.clone().rev().enumerate() {
+                    let actual_y = (height as usize - 1) - y;
                     if row
                         .as_chunks::<4>()
                         .0
                         .iter()
                         .any(|c| c[0] == 0 && c[1] == 0 && c[2] == 0)
                     {
-                        min_y = y as i32;
+                        max_y = actual_y as i32;
                         break;
-                    }
-                }
-
-                if min_y < height {
-                    for (y, row) in mask_rows.clone().rev().enumerate() {
-                        let actual_y = (height as usize - 1) - y;
-                        if row
-                            .as_chunks::<4>()
-                            .0
-                            .iter()
-                            .any(|c| c[0] == 0 && c[1] == 0 && c[2] == 0)
-                        {
-                            max_y = actual_y as i32;
-                            break;
-                        }
-                    }
-                }
-
-                if max_y >= 0 {
-                    let stride = width as usize * 4;
-
-                    'mleft: for x in 0..width {
-                        for y in min_y..=max_y {
-                            let base = y as usize * stride + x as usize * 4;
-                            if pixels[base] == 0 && pixels[base + 1] == 0 && pixels[base + 2] == 0 {
-                                min_x = x;
-                                break 'mleft;
-                            }
-                        }
-                    }
-
-                    'mright: for x in (0..width).rev() {
-                        for y in min_y..=max_y {
-                            let base = y as usize * stride + x as usize * 4;
-                            if pixels[base] == 0 && pixels[base + 1] == 0 && pixels[base + 2] == 0 {
-                                max_x = x;
-                                break 'mright;
-                            }
-                        }
                     }
                 }
             }
 
-            SelectObject(mem_dc, old_bmp);
-        } else {
-            SelectObject(mem_dc, old_bmp);
+            if max_y >= 0 {
+                let stride = width as usize * 4;
+
+                'mleft: for x in 0..width {
+                    for y in min_y..=max_y {
+                        let base = y as usize * stride + x as usize * 4;
+                        if pixels[base] == 0 && pixels[base + 1] == 0 && pixels[base + 2] == 0 {
+                            min_x = x;
+                            break 'mleft;
+                        }
+                    }
+                }
+
+                'mright: for x in (0..width).rev() {
+                    for y in min_y..=max_y {
+                        let base = y as usize * stride + x as usize * 4;
+                        if pixels[base] == 0 && pixels[base + 1] == 0 && pixels[base + 2] == 0 {
+                            max_x = x;
+                            break 'mright;
+                        }
+                    }
+                }
+            }
         }
 
         if max_x < 0 {

@@ -10,14 +10,19 @@ use crate::utils::{get_exe_folder, RegKey};
 
 mod document;
 mod encoding;
+mod file_identity;
 mod hotkey;
+mod logging;
+mod metadata;
 mod storage;
+mod transaction;
 mod validation;
 pub(crate) mod watch;
 
 use hotkey::parse_hotkeys;
 pub use hotkey::Hotkey;
-pub use storage::prepare_log_file;
+pub use logging::prepare_log_file;
+pub(crate) use logging::take_log_failure;
 
 #[cfg(test)]
 mod migration_tests;
@@ -263,7 +268,7 @@ pub fn load_config() -> Result<LoadedConfig> {
 
 pub(crate) fn edit_config_file() -> Result<()> {
     let filepath = get_config_path()?;
-    debug!("open config file '{}'", filepath.display());
+    debug!("config stage=open-editor");
     Command::new("notepad.exe")
         .arg(&filepath)
         .spawn()

@@ -1,11 +1,16 @@
 mod admin;
 mod app_icon;
 mod check_error;
+pub(crate) mod com;
+pub(crate) mod gdi;
+pub(crate) mod gdiplus;
 mod handle_wrapper;
 mod regedit;
 mod scheduled_task;
 mod single_instance;
+mod token;
 mod window;
+pub(crate) mod window_identity;
 mod windows_theme;
 mod windows_version;
 

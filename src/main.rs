@@ -14,6 +14,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    let started = std::time::Instant::now();
     wait_for_restart_parent()?;
     let instance = SingleInstance::create("WindowSwitcherMutex")?;
     if !instance.is_single() {
@@ -27,7 +28,7 @@ fn run() -> Result<()> {
 
     let loaded = load_config()?;
     if let Some(log_file) = &loaded.config.log_file {
-        let file = prepare_log_file(log_file).with_context(|| {
+        let file = prepare_log_file(log_file, &loaded.path).with_context(|| {
             format!(
                 "无法写入日志 '{}'，请检查目录和权限；INI 原值未重置",
                 log_file.display()
@@ -36,10 +37,10 @@ fn run() -> Result<()> {
         simple_logging::log_to(file, loaded.config.log_level);
     }
     log::info!(
-        "config stage=loaded path={} supplemented={} pid={}",
-        loaded.path.display(),
+        "config stage=loaded supplemented={} pid={} main_elapsed_us={}",
         loaded.migrated,
-        std::process::id()
+        std::process::id(),
+        started.elapsed().as_micros()
     );
     start(&loaded)
 }

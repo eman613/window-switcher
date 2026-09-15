@@ -1,58 +1,52 @@
-use crate::badge::BadgeStyle;
-use crate::config::{
-    edit_config_file,
-    watch::{ConfigEvent, ConfigWatcher},
-    Config, LoadedConfig,
-};
-use crate::foreground::ForegroundWatcher;
-use crate::keyboard::KeyboardListener;
-use crate::painter::GdiAAPainter;
-use crate::startup::Startup;
-use crate::trayicon::TrayIcon;
-use crate::utils::{
-    check_error, get_app_icon, get_foreground_window, get_window_user_data, is_iconic_window,
-    is_running_as_admin, list_windows, set_foreground_window, set_window_user_data,
+use crate::{
+    badge::BadgeStyle,
+    config::{
+        edit_config_file,
+        watch::{ConfigEvent, ConfigWatcher},
+        Config, LoadedConfig,
+    },
+    keyboard::{
+        dispatch::InputDispatch,
+        state::{InputAction, SwitchKind},
+    },
+    painter::GdiAAPainter,
+    startup::Startup,
+    trayicon::TrayIcon,
+    utils::{
+        get_app_icon, get_foreground_window, is_iconic_window, list_windows, set_foreground_window,
+        window_identity::WindowIdentity,
+    },
+    window_target::WindowTarget,
 };
 
-use anyhow::{anyhow, Result};
-use indexmap::IndexSet;
-use std::collections::HashMap;
-use windows::core::{w, PCWSTR};
-use windows::Win32::{
-    Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-    System::LibraryLoader::GetModuleHandleW,
-    UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetWindowLongPtrW, IsWindow, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
-        RegisterWindowMessageW, SetWindowLongPtrW, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-        CW_USEDEFAULT, GWL_STYLE, HICON, HTCLIENT, IDC_ARROW, MSG, WINDOW_STYLE, WM_COMMAND,
-        WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCDESTROY, WM_NCHITTEST, WM_RBUTTONUP,
-        WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+use anyhow::Result;
+use std::{collections::HashMap, sync::Arc};
+use windows::{
+    core::{w, PCWSTR},
+    Win32::{
+        Foundation::{HWND, LPARAM, WPARAM},
+        UI::WindowsAndMessaging::{
+            DestroyIcon, PostQuitMessage, HICON, WM_COMMAND, WM_LBUTTONUP, WM_RBUTTONUP,
+        },
     },
 };
+
+mod navigation;
+mod runtime;
 
 pub const NAME: PCWSTR = w!("Window Switcher");
 pub const WM_USER_TRAYICON: u32 = 6000;
 pub const WM_USER_REGISTER_TRAYICON: u32 = 6001;
 pub const WM_USER_CONFIG_CHANGED: u32 = 6002;
-pub const WM_USER_SWITCH_APPS: u32 = 6010;
-pub const WM_USER_SWITCH_APPS_DONE: u32 = 6011;
-pub const WM_USER_SWITCH_APPS_CANCEL: u32 = 6012;
-pub const WM_USER_SWITCH_WINDOWS: u32 = 6020;
-pub const WM_USER_SWITCH_WINDOWS_DONE: u32 = 6021;
 pub const IDM_EXIT: u32 = 1;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
 
 pub fn start(loaded: &LoadedConfig) -> Result<()> {
-    info!("start config={:?}", loaded.config);
-    App::start(loaded)
+    runtime::run(loaded)
 }
 
-/// Listen to this message to recreate the tray icon since the taskbar has been recreated.
-static mut WM_TASKBARCREATED: u32 = 0;
-
-pub struct App {
+struct App {
     hwnd: HWND,
     is_admin: bool,
     trayicon: Option<TrayIcon>,
@@ -63,296 +57,157 @@ pub struct App {
     switch_apps_state: Option<SwitchAppsState>,
     cached_icons: HashMap<String, HICON>,
     painter: GdiAAPainter,
+    target: Arc<WindowTarget>,
+    input: Arc<InputDispatch>,
+    input_session: u64,
 }
 
 impl App {
-    pub fn start(loaded: &LoadedConfig) -> Result<()> {
-        let hwnd = Self::create_window()?;
-        let result = Self::run_window(hwnd, loaded);
-        set_window_user_data(hwnd, 0);
-        if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-            if let Err(err) = unsafe { DestroyWindow(hwnd) } {
-                error!("Failed to destroy application window: {err}");
-            }
-        }
-        result
-    }
-
-    fn run_window(hwnd: HWND, loaded: &LoadedConfig) -> Result<()> {
-        let config = &loaded.config;
-        let painter = GdiAAPainter::new(hwnd)?;
-
-        let _foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist)?;
-        let _keyboard_listener = KeyboardListener::init(hwnd, &config.to_hotkeys())?;
-
-        let trayicon = match config.trayicon {
-            true => Some(TrayIcon::create()),
-            false => None,
-        };
-
-        let is_admin = is_running_as_admin()?;
-        debug!("is_admin {is_admin}");
-
-        let startup = Startup::init(is_admin)?;
-
-        let mut app = Box::new(App {
-            hwnd,
-            is_admin,
-            trayicon,
-            startup,
-            config: config.clone(),
-            config_watcher: None,
-            switch_windows_state: SwitchWindowsState {
-                cache: None,
-                modifier_released: true,
-            },
-            switch_apps_state: None,
-            cached_icons: Default::default(),
-            painter,
-        });
-
-        app.set_trayicon();
-        if config.auto_restart {
-            app.config_watcher = Some(ConfigWatcher::start(loaded, hwnd)?);
-        }
-
-        let app_ptr = app.as_mut() as *mut App as _;
-        check_error(|| set_window_user_data(hwnd, app_ptr))
-            .map_err(|err| anyhow!("Failed to set window ptr, {err}"))?;
-
-        let result = Self::eventloop();
-        app.config_watcher.take();
-        set_window_user_data(hwnd, 0);
-        result
-    }
-
-    fn eventloop() -> Result<()> {
-        let mut message = MSG::default();
-        loop {
-            let ret = unsafe { GetMessageW(&mut message, None, 0, 0) };
-            match ret.0 {
-                -1 => {
-                    unsafe { GetLastError() }.ok()?;
-                }
-                0 => break,
-                _ => unsafe {
-                    let _ = TranslateMessage(&message);
-                    DispatchMessageW(&message);
-                },
-            }
-        }
-
-        Ok(())
-    }
-
-    fn create_window() -> Result<HWND> {
-        unsafe { WM_TASKBARCREATED = RegisterWindowMessageW(w!("TaskbarCreated")) };
-
-        let hinstance = unsafe { GetModuleHandleW(None) }
-            .map_err(|err| anyhow!("Failed to get current module handle, {err}"))?;
-
-        let hcursor = unsafe { LoadCursorW(None, IDC_ARROW) }
-            .map_err(|err| anyhow!("Failed to load arrow cursor, {err}"))?;
-
-        let window_class = WNDCLASSW {
-            hCursor: hcursor,
-            hInstance: HINSTANCE(hinstance.0),
-            lpszClassName: NAME,
-            style: CS_HREDRAW | CS_VREDRAW,
-            lpfnWndProc: Some(App::window_proc),
-            ..Default::default()
-        };
-
-        let atom = check_error(|| unsafe { RegisterClassW(&window_class) })
-            .map_err(|err| anyhow!("Failed to register class, {err}"))?;
-
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                PCWSTR(atom as _),
-                NAME,
-                WINDOW_STYLE(0),
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                None,
-                None,
-                Some(hinstance.into()),
-                None,
-            )
-        }
-        .map_err(|err| anyhow!("Failed to create windows, {err}"))?;
-
-        // hide caption
-        let mut style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
-        style &= !WS_CAPTION.0;
-        unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, style as _) };
-
-        Ok(hwnd)
-    }
-
     fn set_trayicon(&mut self) {
         if let Some(trayicon) = self.trayicon.as_mut() {
             match trayicon.register(self.hwnd) {
-                Ok(()) => info!("trayicon registered"),
-                Err(err) => {
-                    if !trayicon.exist() {
-                        error!("{err}, retrying in 3 second");
-                        let hwnd = self.hwnd.0 as isize;
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_secs(3));
-                            let _ = unsafe {
-                                PostMessageW(
-                                    Some(HWND(hwnd as _)),
-                                    WM_USER_REGISTER_TRAYICON,
-                                    WPARAM(0),
-                                    LPARAM(0),
-                                )
-                            };
-                        });
+                Ok(()) => info!("trayicon stage=registered"),
+                Err(_) if !trayicon.exist() => {
+                    warn!("trayicon stage=register retry_pending");
+                    let target = self.target.clone();
+                    if let Err(err) =
+                        std::thread::Builder::new()
+                            .name("tray-retry".into())
+                            .spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_secs(3));
+                                target.try_post(WM_USER_REGISTER_TRAYICON);
+                            })
+                    {
+                        warn!("trayicon stage=retry-thread error={err}");
                     }
                 }
+                Err(_) => {}
             }
         }
     }
 
-    unsafe extern "system" fn window_proc(
-        hwnd: HWND,
-        msg: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        match Self::handle_message(hwnd, msg, wparam, lparam) {
-            Ok(ret) => ret,
-            Err(err) => {
-                error!("{err}");
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
-        }
-    }
-
-    fn handle_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<LRESULT> {
+    fn handle_message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Result<()> {
         match msg {
             WM_USER_CONFIG_CHANGED => {
-                let app = get_app(hwnd)?;
-                match app
+                match self
                     .config_watcher
                     .as_ref()
                     .and_then(ConfigWatcher::next_event)
                 {
                     Some(ConfigEvent::Changed) => match crate::restart::spawn_replacement() {
-                        Ok(_) => unsafe { PostQuitMessage(0) },
-                        Err(err) => app.report_config_error(&format!("{err:#}")),
+                        Ok(_) => self.quit(),
+                        Err(err) => self.report_config_error(&format!("{err:#}")),
                     },
-                    Some(ConfigEvent::Invalid(message)) => app.report_config_error(&message),
+                    Some(ConfigEvent::Invalid(message)) => self.report_config_error(&message),
                     None => {}
                 }
-                return Ok(LRESULT(0));
-            }
-            WM_DESTROY => {
-                unsafe { PostQuitMessage(0) };
-                return Ok(LRESULT(0));
-            }
-            WM_NCDESTROY => {
-                set_window_user_data(hwnd, 0);
             }
             WM_USER_TRAYICON => {
-                let app = get_app(hwnd)?;
-                if let Some(trayicon) = app.trayicon.as_mut() {
-                    let keycode = lparam.0 as u32;
-                    if keycode == WM_LBUTTONUP || keycode == WM_RBUTTONUP {
-                        trayicon.show(app.startup.is_enable)?;
-                    }
-                }
-                return Ok(LRESULT(0));
-            }
-            WM_USER_SWITCH_APPS => {
-                debug!("message WM_USER_SWITCH_APPS");
-                let app = get_app(hwnd)?;
-                let reverse = lparam.0 == 1;
-                app.switch_apps(reverse)?;
-                if let Some(state) = &app.switch_apps_state {
-                    app.painter.paint(state);
-                }
-            }
-            WM_USER_SWITCH_APPS_DONE => {
-                debug!("message WM_USER_SWITCH_APPS_DONE");
-                let app = get_app(hwnd)?;
-                app.do_switch_app();
-            }
-            WM_USER_SWITCH_APPS_CANCEL => {
-                debug!("message WM_USER_SWITCH_APPS_CANCEL");
-                let app = get_app(hwnd)?;
-                app.cancel_switch_app();
-            }
-            WM_USER_SWITCH_WINDOWS => {
-                debug!("message WM_USER_SWITCH_WINDOWS");
-                let app = get_app(hwnd)?;
-                let reverse = lparam.0 == 1;
-                let hwnd = app
-                    .switch_apps_state
-                    .as_ref()
-                    .and_then(|state| {
-                        state
-                            .apps
-                            .get(state.index)
-                            .map(|entry| entry.representative_hwnd)
-                    })
-                    .unwrap_or_else(get_foreground_window);
-                app.switch_windows(hwnd, reverse)?;
-                app.cancel_switch_app();
-            }
-            WM_USER_SWITCH_WINDOWS_DONE => {
-                debug!("message WM_USER_SWITCH_WINDOWS_DONE");
-                let app = get_app(hwnd)?;
-                app.switch_windows_state.modifier_released = true;
-            }
-            WM_NCHITTEST => {
-                return Ok(LRESULT(HTCLIENT as _));
-            }
-            WM_LBUTTONUP => {
-                let app = get_app(hwnd)?;
-                app.click();
-            }
-            WM_COMMAND => {
-                let value = wparam.0 as u32;
-                let kind = ((value >> 16) & 0xffff) as u16;
-                let id = value & 0xffff;
-                if kind == 0 {
-                    match id {
-                        IDM_EXIT => unsafe { PostQuitMessage(0) },
-                        IDM_STARTUP => {
-                            let app = get_app(hwnd)?;
-                            app.startup.toggle()?;
-                        }
-                        IDM_CONFIGURE => {
-                            if let Err(err) = edit_config_file() {
-                                get_app(hwnd)?.report_config_error(&format!("{err:#}"));
-                            }
-                        }
-                        _ => {}
+                if matches!(lparam.0 as u32, WM_LBUTTONUP | WM_RBUTTONUP) {
+                    if let Some(trayicon) = self.trayicon.as_mut() {
+                        trayicon.show(self.startup.is_enable)?;
                     }
                 }
             }
-            WM_ERASEBKGND => {
-                return Ok(LRESULT(0));
-            }
-            _ if msg == WM_USER_REGISTER_TRAYICON || unsafe { msg == WM_TASKBARCREATED } => {
-                let app = get_app(hwnd)?;
-                app.set_trayicon();
-            }
+            WM_LBUTTONUP => self.click(),
+            WM_COMMAND if (wparam.0 >> 16) & 0xffff == 0 => match wparam.0 as u32 & 0xffff {
+                IDM_EXIT => self.quit(),
+                IDM_STARTUP => self.startup.toggle()?,
+                IDM_CONFIGURE => {
+                    if let Err(err) = edit_config_file() {
+                        self.report_config_error(&format!("{err:#}"));
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
-        Ok(unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) })
+        Ok(())
+    }
+
+    fn quit(&self) {
+        self.target.close();
+        unsafe { PostQuitMessage(0) };
+    }
+
+    fn drain_input(&mut self) {
+        if let Some(code) = crate::config::take_log_failure() {
+            self.report_config_error(&format!(
+                "部分诊断日志未能写入（系统错误码 {code}）。请检查日志权限及是否与 INI 指向同一文件。未向 INI 写入日志；本次运行仅提示一次。"
+            ));
+        }
+        if self.input_session != 0 && self.input_session <= self.input.revoked() {
+            self.cancel_switch_app();
+            self.switch_windows_state.modifier_released = true;
+            self.input.acknowledge(self.input_session);
+            self.input_session = 0;
+        }
+        for event in self.input.take() {
+            if !self.input.permits(event.session) {
+                self.input.acknowledge(event.session);
+                continue;
+            }
+            self.input_session = event.session;
+            let result = match event.action {
+                InputAction::Cycle(SwitchKind::Apps, reverse) => {
+                    self.switch_apps(reverse).and_then(|()| {
+                        if !self.input.permits(event.session) {
+                            return Ok(());
+                        }
+                        if let Some(state) = &self.switch_apps_state {
+                            self.painter
+                                .paint(state, || self.input.permits(event.session))?;
+                        }
+                        Ok(())
+                    })
+                }
+                InputAction::Cycle(SwitchKind::Windows, reverse) => {
+                    let hwnd = self
+                        .switch_apps_state
+                        .as_ref()
+                        .and_then(|state| state.apps.get(state.index))
+                        .map(|entry| entry.representative_hwnd)
+                        .unwrap_or_else(get_foreground_window);
+                    let result = self.switch_windows(hwnd, reverse).map(|_| ());
+                    self.cancel_switch_app();
+                    result
+                }
+                InputAction::Finish(kind) => {
+                    if kind == SwitchKind::Apps {
+                        self.do_switch_app();
+                    }
+                    self.switch_windows_state.modifier_released = true;
+                    self.input.acknowledge(event.session);
+                    self.input_session = 0;
+                    Ok(())
+                }
+                InputAction::Cancel => {
+                    self.cancel_switch_app();
+                    self.switch_windows_state.modifier_released = true;
+                    self.input.acknowledge(event.session);
+                    self.input_session = 0;
+                    Ok(())
+                }
+            };
+            if let Err(err) = result {
+                error!("input stage=apply error={err:#}");
+                self.input.cancel(event.session);
+            }
+            if event.session <= self.input.revoked() {
+                self.cancel_switch_app();
+                self.switch_windows_state.modifier_released = true;
+                self.input.acknowledge(event.session);
+                self.input_session = 0;
+            }
+        }
     }
 
     fn report_config_error(&mut self, message: &str) {
-        error!("{message}");
+        // Detailed paths/values may be useful in a local notification, never in logs.
+        error!("config stage=apply rejected");
         if let Some(trayicon) = self.trayicon.as_ref() {
-            match trayicon.notify_error(message) {
-                Ok(()) => return,
-                Err(err) => error!("Failed to display config notification: {err}"),
+            if trayicon.notify_error(message).is_ok() {
+                return;
             }
         }
         let message = message.to_owned();
@@ -362,111 +217,82 @@ impl App {
                 alert!("{message}");
             })
         {
-            error!("Failed to display config error: {err}");
+            error!("config stage=notification-thread error={err}");
         }
     }
 
     fn switch_windows(&mut self, hwnd: HWND, reverse: bool) -> Result<bool> {
-        let windows = list_windows(
+        let groups = list_windows(
             self.config.switch_windows_ignore_minimal,
             self.config.switch_windows_only_current_desktop(),
             self.is_admin,
         )?;
-        debug!(
-            "switch windows: hwnd:{hwnd:?} reverse:{reverse} state:{:?}",
-            self.switch_windows_state
-        );
-        let module_path = match windows
+        if !self.input.permits(self.input_session) {
+            return Ok(false);
+        }
+        let Some((module, windows)) = groups
             .iter()
-            .find(|(_, v)| v.iter().any(|(id, _)| *id == hwnd))
-            .map(|(k, _)| k.clone())
-        {
-            Some(v) => v,
-            None => return Ok(false),
+            .find(|(_, windows)| windows.iter().any(|(candidate, _)| *candidate == hwnd))
+        else {
+            return Ok(false);
         };
-        match windows.get(&module_path) {
-            None => Ok(false),
-            Some(windows) => {
-                let windows_len = windows.len();
-                if windows_len == 1 {
-                    return Ok(false);
-                }
-                let current_id = windows[0].0;
-                let mut index = 1;
-                let mut state_id = current_id;
-                let mut state_windows = vec![];
-                if windows_len > 2 {
-                    if let Some((cache_module_path, cache_id, cache_index, cache_windows)) =
-                        self.switch_windows_state.cache.as_ref()
-                    {
-                        if cache_module_path == &module_path {
-                            if self.switch_windows_state.modifier_released {
-                                if *cache_id != current_id {
-                                    if let Some((i, _)) =
-                                        windows.iter().enumerate().find(|(_, (v, _))| v == cache_id)
-                                    {
-                                        index = i;
-                                    }
-                                }
-                            } else {
-                                state_id = *cache_id;
-                                let mut windows_set: IndexSet<isize> =
-                                    windows.iter().map(|(v, _)| v.0 as _).collect();
-                                for id in cache_windows {
-                                    if windows_set.contains(id) {
-                                        state_windows.push(*id);
-                                        windows_set.swap_remove(id);
-                                    }
-                                }
-                                state_windows.extend(windows_set);
-                                index = if reverse {
-                                    if *cache_index == 0 {
-                                        windows_len - 1
-                                    } else {
-                                        cache_index - 1
-                                    }
-                                } else if *cache_index >= windows_len - 1 {
-                                    0
-                                } else {
-                                    cache_index + 1
-                                };
-                            }
+        let fresh: Vec<_> = windows
+            .iter()
+            .filter_map(|(hwnd, _)| WindowIdentity::capture(*hwnd))
+            .collect();
+        if fresh.len() < 2 {
+            return Ok(false);
+        }
+        let mut ordered = fresh.clone();
+        let mut anchor = fresh[0];
+        let mut index = if reverse { fresh.len() - 1 } else { 1 };
+        if let Some((cached_module, cached_anchor, cached_index, cached_windows)) =
+            &self.switch_windows_state.cache
+        {
+            if cached_module == module {
+                if self.switch_windows_state.modifier_released {
+                    if *cached_anchor != fresh[0] {
+                        if let Some(previous) =
+                            fresh.iter().position(|identity| identity == cached_anchor)
+                        {
+                            index = previous;
                         }
                     }
+                } else if let Some((reconciled, next)) =
+                    navigation::reconcile_cycle(cached_windows, *cached_index, &fresh, reverse)
+                {
+                    ordered = reconciled;
+                    index = next;
+                    if fresh.contains(cached_anchor) {
+                        anchor = *cached_anchor;
+                    }
                 }
-                if state_windows.is_empty() {
-                    state_windows = windows.iter().map(|(v, _)| v.0 as _).collect();
-                }
-                let hwnd = HWND(state_windows[index] as _);
-                self.switch_windows_state = SwitchWindowsState {
-                    cache: Some((module_path.clone(), state_id, index, state_windows)),
-                    modifier_released: false,
-                };
-                set_foreground_window(hwnd);
-
-                Ok(true)
             }
         }
+        let Some(target) = ordered
+            .get(index)
+            .copied()
+            .filter(|identity| identity.is_current())
+        else {
+            return Ok(false);
+        };
+        if !set_foreground_window(target.hwnd, || {
+            self.input.permits(self.input_session) && target.is_current()
+        }) {
+            return Ok(false);
+        }
+        self.switch_windows_state = SwitchWindowsState {
+            cache: Some((module.clone(), anchor, index, ordered)),
+            modifier_released: false,
+        };
+        Ok(true)
     }
 
     fn switch_apps(&mut self, reverse: bool) -> Result<()> {
-        debug!(
-            "switch apps: reverse:{reverse}, state:{:?}",
-            self.switch_apps_state
-        );
         if let Some(state) = self.switch_apps_state.as_mut() {
-            if reverse {
-                if state.index == 0 {
-                    state.index = state.apps.len() - 1;
-                } else {
-                    state.index -= 1;
-                }
-            } else if state.index == state.apps.len() - 1 {
-                state.index = 0;
-            } else {
-                state.index += 1;
-            };
-            debug!("switch apps: new index:{}", state.index);
+            if let Some(index) = navigation::cycle_index(state.index, state.apps.len(), reverse) {
+                state.index = index;
+            }
             return Ok(());
         }
         let windows = list_windows(
@@ -474,12 +300,21 @@ impl App {
             self.config.switch_apps_only_current_desktop(),
             self.is_admin,
         )?;
-        let mut apps = vec![];
-        for (module_path, hwnds) in windows.iter() {
-            let module_hwnd = if is_iconic_window(hwnds[0].0) {
-                hwnds[hwnds.len() - 1].0
+        let mut apps = Vec::new();
+        for (module_path, hwnds) in &windows {
+            if !self.input.permits(self.input_session) {
+                return Ok(());
+            }
+            let Some(first) = hwnds.first() else {
+                continue;
+            };
+            let module_hwnd = if is_iconic_window(first.0) {
+                hwnds.last().unwrap().0
             } else {
-                hwnds[0].0
+                first.0
+            };
+            let Some(identity) = WindowIdentity::capture(module_hwnd) else {
+                continue;
             };
             let module_hicon = self
                 .cached_icons
@@ -491,17 +326,20 @@ impl App {
                         module_hwnd,
                     )
                 });
+            if module_hicon.is_invalid() {
+                warn!("icon stage=load unavailable");
+                continue;
+            }
             apps.push(AppEntry {
                 icon: *module_hicon,
                 representative_hwnd: module_hwnd,
                 window_count: hwnds.len(),
+                identity: Some(identity),
             });
         }
-        let num_apps = apps.len() as i32;
-        if num_apps == 0 {
+        if apps.is_empty() {
             return Ok(());
         }
-
         let index = if apps.len() == 1 {
             0
         } else if reverse {
@@ -509,32 +347,52 @@ impl App {
         } else {
             1
         };
-
-        let state = SwitchAppsState {
+        self.switch_apps_state = Some(SwitchAppsState {
             apps,
             index,
             show_badge: self.config.switch_apps_show_badge,
             badge_max: self.config.switch_apps_badge_max,
             badge_style: BadgeStyle::from_config(&self.config),
-        };
-        self.switch_apps_state = Some(state);
-        debug!("switch apps, new state:{:?}", self.switch_apps_state);
+        });
         Ok(())
     }
 
     fn click(&mut self) {
         if let Some(state) = self.switch_apps_state.as_mut() {
-            if let Some(i) = self.painter.find_clicked_app_index(state) {
-                state.index = i;
+            if let Some(index) = self.painter.find_clicked_app_index(state) {
+                state.index = index;
                 self.do_switch_app();
+                self.input.acknowledge(self.input_session);
+                self.input_session = 0;
             }
         }
     }
 
     fn do_switch_app(&mut self) {
         if let Some(state) = self.switch_apps_state.take() {
-            if let Some(entry) = state.apps.get(state.index) {
-                set_foreground_window(entry.representative_hwnd);
+            if !self.input.permits(self.input_session) {
+                self.painter.unpaint(state);
+                return;
+            }
+            if let Some(identity) = state.apps.get(state.index).and_then(|entry| entry.identity) {
+                let still_candidate = list_windows(
+                    self.config.switch_apps_ignore_minimal,
+                    self.config.switch_apps_only_current_desktop(),
+                    self.is_admin,
+                )
+                .map(|groups| {
+                    groups
+                        .values()
+                        .any(|windows| windows.iter().any(|(hwnd, _)| *hwnd == identity.hwnd))
+                })
+                .unwrap_or(false);
+                if still_candidate && self.input.permits(self.input_session) {
+                    set_foreground_window(identity.hwnd, || {
+                        self.input.permits(self.input_session) && identity.is_current()
+                    });
+                } else {
+                    debug!("window stage=activation stale-or-unavailable");
+                }
             }
             self.painter.unpaint(state);
         }
@@ -550,30 +408,18 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         for (_, icon) in self.cached_icons.drain() {
-            unsafe {
-                let _ = DestroyIcon(icon);
+            if !icon.is_invalid() {
+                if let Err(err) = unsafe { DestroyIcon(icon) } {
+                    warn!("icon stage=release code={:#x}", err.code().0);
+                }
             }
         }
     }
 }
 
-fn get_app(hwnd: HWND) -> Result<&'static mut App> {
-    unsafe {
-        let ptr = check_error(|| get_window_user_data(hwnd))
-            .map_err(|err| anyhow!("Failed to get window ptr, {err}"))?;
-        if ptr == 0 {
-            return Err(anyhow!(
-                "Application window is not initialized or is closing"
-            ));
-        }
-        let tx: &mut App = &mut *(ptr as *mut App);
-        Ok(tx)
-    }
-}
-
-#[derive(Debug)]
+#[derive(Default)]
 struct SwitchWindowsState {
-    cache: Option<(String, HWND, usize, Vec<isize>)>,
+    cache: Option<(String, WindowIdentity, usize, Vec<WindowIdentity>)>,
     modifier_released: bool,
 }
 
@@ -591,4 +437,5 @@ pub struct AppEntry {
     pub icon: HICON,
     pub representative_hwnd: HWND,
     pub window_count: usize,
+    pub(crate) identity: Option<WindowIdentity>,
 }

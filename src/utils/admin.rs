@@ -1,20 +1,15 @@
-use super::HandleWrapper;
+use super::{token::TokenSid, HandleWrapper};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use windows::Win32::{
     Foundation::HANDLE,
-    Security::{
-        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenElevation,
-        TokenElevationType, TokenElevationTypeFull, TokenIntegrityLevel, TOKEN_ELEVATION,
-        TOKEN_ELEVATION_TYPE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    },
+    Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
     System::Threading::{
         GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
     },
 };
 
 const SECURITY_MANDATORY_HIGH_RID: u32 = 0x00003000;
-const SECURITY_MANDATORY_SYSTEM_RID: u32 = 0x00004000;
 
 pub fn is_running_as_admin() -> Result<bool> {
     let process = unsafe { GetCurrentProcess() };
@@ -23,8 +18,10 @@ pub fn is_running_as_admin() -> Result<bool> {
 }
 
 pub fn is_process_elevated(pid: u32) -> Option<bool> {
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-    get_process_elevation_info(process).ok()
+    let process = HandleWrapper::new(
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?,
+    );
+    get_process_elevation_info(process.get_handle()).ok()
 }
 
 fn get_process_elevation_info(process: HANDLE) -> Result<bool> {
@@ -48,39 +45,32 @@ unsafe fn query_token_elevated(token: HANDLE) -> Result<bool> {
         &mut ret_len,
     )?;
 
-    let mut elevation_type = TOKEN_ELEVATION_TYPE(0);
-    GetTokenInformation(
-        token,
-        TokenElevationType,
-        Some(&mut elevation_type as *mut _ as *mut _),
-        std::mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32,
-        &mut ret_len,
-    )?;
-
-    let mut buf = [0u8; 512];
-    GetTokenInformation(
-        token,
-        TokenIntegrityLevel,
-        Some(buf.as_mut_ptr() as *mut _),
-        buf.len() as u32,
-        &mut ret_len,
-    )?;
-
-    let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
-    let sid = label.Label.Sid;
-    if sid.0.is_null() {
-        return Err(anyhow!("SID is null"));
+    if ret_len as usize != std::mem::size_of::<TOKEN_ELEVATION>() {
+        bail!("token stage=elevation invalid length");
     }
-    let sub_auth_count = *GetSidSubAuthorityCount(sid);
-    let rid = *GetSidSubAuthority(sid, (sub_auth_count - 1).into());
+    let rid = TokenSid::integrity(token)?.integrity_rid()?;
+    Ok(classify_elevation(elevation.TokenIsElevated != 0, rid))
+}
 
-    Ok(matches!(
-        rid,
-        SECURITY_MANDATORY_HIGH_RID | SECURITY_MANDATORY_SYSTEM_RID
-    ) && elevation.TokenIsElevated != 0
-        && elevation_type == TokenElevationTypeFull)
+fn classify_elevation(elevated: bool, integrity_rid: u32) -> bool {
+    // TokenElevationTypeDefault means no linked token, not "not elevated".
+    elevated && integrity_rid >= SECURITY_MANDATORY_HIGH_RID
 }
 
 pub fn is_elevated(handle: HANDLE) -> Result<bool> {
     get_process_elevation_info(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn high_system_and_default_tokens_use_actual_elevation() {
+        assert!(classify_elevation(true, 0x3000));
+        assert!(classify_elevation(true, 0x4000));
+        assert!(!classify_elevation(false, 0x3000));
+        assert!(!classify_elevation(true, 0x2000));
+        assert!(is_running_as_admin().is_ok());
+        assert!(is_process_elevated(std::process::id()).is_some());
+    }
 }
