@@ -12,6 +12,7 @@ impl App {
             self.lifecycle_error(&error);
         }
         if !self.target.is_live() {
+            self.cancel_preview();
             return;
         }
         self.poll_feedback();
@@ -53,6 +54,7 @@ impl App {
         }
         self.poll_accessibility();
         if self.input_session == 0 {
+            self.poll_preview();
             return;
         }
         let result = self
@@ -66,6 +68,7 @@ impl App {
             self.input.cancel(self.input_session);
             self.complete_switch();
         }
+        self.poll_preview();
     }
 
     fn apply_input(&mut self, event: InputEvent, received: Option<Instant>) -> Result<()> {

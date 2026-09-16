@@ -45,6 +45,7 @@ impl App {
         match action {
             Some(SearchAction::Cancel) => self.complete_switch(),
             Some(SearchAction::Activate(entry)) => {
+                self.cancel_preview();
                 let identity = entry.identity;
                 let filter = WindowFilter::from_config(&self.config, SwitchKind::Search)
                     .with_scope(self.switching.scope);

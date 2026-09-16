@@ -99,6 +99,10 @@ settings! {
     search_max_results: u32 => ("search", "max_results", "50", |v| integer(v, 10, 200), "SearchService");
     details_enable: bool => ("details", "enable", "no", boolean, "WindowDetails/Config::to_hotkeys");
     details_hotkey: Hotkey => ("details", "hotkey", "ctrl+enter", |v| Hotkey::create(DETAILS_HOTKEY_ID, "window details", v), "InputMachine");
+    preview_enable: bool => ("preview", "enable", "no", boolean, "WindowPreview");
+    preview_delay_ms: u32 => ("preview", "delay_ms", "250", |v| integer(v, 0, 2000), "WindowPreview/SelectionDelay");
+    preview_max_width: u32 => ("preview", "max_width", "480", |v| integer(v, 160, 1024), "PreviewLayout::calculate");
+    preview_max_height: u32 => ("preview", "max_height", "300", |v| integer(v, 90, 768), "PreviewLayout::calculate");
     monitor: MonitorPolicy => ("appearance", "monitor", "cursor", str::parse::<MonitorPolicy>, "MonitorSnapshot::capture");
     use_work_area: bool => ("appearance", "use_work_area", "yes", boolean, "MonitorSnapshot::capture");
     panel_width: u32 => ("appearance", "panel_width", "0", |v| integer(v, 0, 32768), "LayoutSnapshot::calculate");

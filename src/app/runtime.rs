@@ -84,6 +84,10 @@ pub(super) fn run(
     let details = (loaded.config.switch_apps_enable && loaded.config.details_enable)
         .then(|| crate::window_details::WindowDetails::new(hwnd, target.clone(), text))
         .transpose()?;
+    let preview = loaded
+        .config
+        .preview_enable
+        .then(|| crate::preview::WindowPreview::new(hwnd, target.clone(), text));
     if loaded.config.switch_apps_enable {
         painter.start_fonts(
             loaded
@@ -140,6 +144,7 @@ pub(super) fn run(
             switch_apps_state: None,
             search,
             details,
+            preview,
             snapshots,
             icons,
             remembered_icons: Default::default(),
@@ -529,6 +534,7 @@ mod tests {
                 switch_apps_state: None,
                 search: None,
                 details: None,
+                preview: None,
                 pause: crate::pause::PauseControl::new(Default::default(), target.clone()),
                 snapshots,
                 icons,

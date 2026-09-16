@@ -36,6 +36,7 @@ impl App {
         {
             return Ok(());
         }
+        self.cancel_preview();
         let Some(state) = &self.switch_apps_state else {
             return Ok(());
         };
@@ -95,6 +96,7 @@ impl App {
         match action {
             Some(DetailsAction::Cancel) => self.complete_switch(),
             Some(DetailsAction::Back) => {
+                self.cancel_preview();
                 if !self.owns_picker_foreground() {
                     self.complete_switch();
                     return Ok(());
@@ -114,6 +116,7 @@ impl App {
                 }
             }
             Some(DetailsAction::Activate(record)) => {
+                self.cancel_preview();
                 let identity = record.identity;
                 let filter = WindowFilter::from_config(&self.config, SwitchKind::Apps)
                     .with_scope(self.switching.scope);

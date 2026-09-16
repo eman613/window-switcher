@@ -80,6 +80,15 @@ impl SearchSession {
     pub(crate) fn active(&self) -> bool {
         self.window.visible()
     }
+    pub(crate) fn selected_window(&self) -> Option<WindowIdentity> {
+        if !self.active() || self.pending || self.window.composing() {
+            return None;
+        }
+        self.window
+            .selected()
+            .and_then(|index| self.results.get(index))
+            .map(|entry| entry.identity)
+    }
     pub(crate) fn revision(&self) -> Option<u64> {
         self.source.as_ref().map(|source| source.revision)
     }

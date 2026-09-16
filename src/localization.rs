@@ -75,6 +75,33 @@ impl Text {
     pub(crate) fn details_back(self) -> &'static str {
         self.choose("返回应用列表", "Back to applications")
     }
+    pub(crate) fn preview_label(self) -> &'static str {
+        self.choose("窗口预览", "Window preview")
+    }
+    pub(crate) fn preview_unavailable(self) -> &'static str {
+        self.choose(
+            "预览不可用。仍可切换窗口。",
+            "Preview unavailable. You can still switch windows.",
+        )
+    }
+    pub(crate) fn preview_minimized(self) -> &'static str {
+        self.choose(
+            "窗口已最小化。切换后可恢复窗口。",
+            "Window minimized. Switch to restore it.",
+        )
+    }
+    pub(crate) fn preview_protected(self) -> &'static str {
+        self.choose(
+            "窗口内容受保护。仍可切换窗口。",
+            "Window content is protected. You can still switch to it.",
+        )
+    }
+    pub(crate) fn preview_closed(self) -> &'static str {
+        self.choose(
+            "窗口已关闭。请选择其他窗口。",
+            "Window closed. Select another window.",
+        )
+    }
     pub(crate) fn details_status(self, count: usize) -> String {
         if count == 0 {
             return self

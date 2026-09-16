@@ -254,6 +254,12 @@ impl GdiAAPainter {
         self.scene.as_ref().map(|scene| &scene.layout)
     }
 
+    pub(crate) fn reserved_bytes(&self) -> usize {
+        self.scene
+            .as_ref()
+            .map_or(0, |scene| scene.plan.reserved_bytes)
+    }
+
     pub(crate) fn find_clicked_app_index(&self) -> Option<usize> {
         if !self.show {
             return None;

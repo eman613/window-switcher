@@ -67,6 +67,10 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ("search", "max_results", "200", "201"),
         ("details", "enable", "yes", "maybe"),
         ("details", "hotkey", "ctrl+f9", "shift+enter"),
+        ("preview", "enable", "yes", "maybe"),
+        ("preview", "delay_ms", "0", "2001"),
+        ("preview", "max_width", "1024", "159"),
+        ("preview", "max_height", "768", "89"),
         ("appearance", "monitor", "primary", "last"),
         ("appearance", "use_work_area", "no", "maybe"),
         ("appearance", "panel_width", "740", "32769"),
@@ -131,7 +135,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ]);
     }
     let template = document::parse_ini(DEFAULT_CONFIG).unwrap();
-    assert_eq!(SETTINGS.len(), 109);
+    assert_eq!(SETTINGS.len(), 113);
     assert_eq!(cases.len(), SETTINGS.len());
     assert_eq!(
         template

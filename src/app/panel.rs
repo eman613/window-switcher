@@ -167,6 +167,7 @@ impl App {
     }
 
     pub(super) fn do_switch_app(&mut self) {
+        self.cancel_preview();
         self.accessibility.hide();
         if let Some(state) = self.switch_apps_state.take() {
             if let Some(entry) = state.apps.get(state.index) {
@@ -189,6 +190,7 @@ impl App {
     }
 
     pub(super) fn hide_apps(&mut self) {
+        self.cancel_preview();
         self.input.set_surface(InputSurface::None, self.hwnd);
         self.accessibility.hide();
         self.switch_apps_state = None;
@@ -201,6 +203,7 @@ impl App {
     }
 
     pub(super) fn cancel_switch_app(&mut self) {
+        self.cancel_preview();
         if let Some(identity) = self.switching.return_focus {
             // Restore only while this panel still owns the foreground. Do not
             // steal focus back after an external application became active.
@@ -222,6 +225,7 @@ impl App {
     }
 
     pub(super) fn invalidate_display(&mut self) -> Result<()> {
+        self.cancel_preview();
         self.painter.invalidate();
         let Some(previous) = self.switching.monitor else {
             return Ok(());

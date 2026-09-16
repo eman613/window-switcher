@@ -1,6 +1,10 @@
 use anyhow::{bail, Context, Result};
 use windows::Win32::Graphics::Gdi::{
-    DeleteDC, DeleteObject, RestoreDC, SaveDC, SelectObject, HDC, HGDIOBJ,
+    CreateFontIndirectW, DeleteDC, DeleteObject, RestoreDC, SaveDC, SelectObject, HDC, HGDIOBJ,
+};
+use windows::Win32::UI::{
+    HiDpi::SystemParametersInfoForDpi,
+    WindowsAndMessaging::{NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS},
 };
 
 pub(crate) struct OwnedGdiObject(pub(crate) HGDIOBJ);
@@ -20,6 +24,33 @@ impl Drop for OwnedGdiObject {
             warn!("gdi stage=delete-object failed");
         }
     }
+}
+
+/// Native surfaces share the system message font and a readable 14 DIP floor.
+pub(crate) fn message_font(dpi: u32) -> Result<OwnedGdiObject> {
+    let mut metrics = NONCLIENTMETRICSW {
+        cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        SystemParametersInfoForDpi(
+            SPI_GETNONCLIENTMETRICS.0,
+            metrics.cbSize,
+            Some((&mut metrics as *mut NONCLIENTMETRICSW).cast()),
+            0,
+            dpi,
+        )
+    }
+    .context("gdi stage=system-message-font")?;
+    metrics.lfMessageFont.lfHeight = -metrics
+        .lfMessageFont
+        .lfHeight
+        .abs()
+        .max((14 * dpi / 96) as i32);
+    OwnedGdiObject::new(
+        HGDIOBJ(unsafe { CreateFontIndirectW(&metrics.lfMessageFont) }.0),
+        "system-message-font",
+    )
 }
 
 pub(crate) struct SavedDc(HDC, i32);

@@ -39,6 +39,7 @@ mod navigation;
 mod panel;
 mod pause;
 mod pointer;
+mod preview;
 mod runtime;
 mod search;
 mod switching;
@@ -80,6 +81,7 @@ struct App {
     switch_apps_state: Option<SwitchAppsState>,
     search: Option<crate::search::SearchSession>,
     details: Option<crate::window_details::WindowDetails>,
+    preview: Option<crate::preview::WindowPreview>,
     snapshots: SnapshotService,
     icons: IconService,
     remembered_icons: IndexMap<IconKey, Weak<CachedIcon>>,
@@ -126,6 +128,7 @@ impl App {
             }
             _ => {}
         }
+        self.poll_preview();
         Ok(())
     }
 

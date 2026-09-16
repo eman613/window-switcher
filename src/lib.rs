@@ -25,6 +25,7 @@ mod painter;
 mod pause;
 mod picker;
 mod pixels;
+mod preview;
 mod process_metadata;
 mod render_surface;
 mod restart;

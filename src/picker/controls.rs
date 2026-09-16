@@ -3,16 +3,19 @@ use super::{
     ViewKind,
 };
 use crate::{
-    appearance::Appearance, config::Config, localization::Text, utils::gdi::OwnedGdiObject,
+    appearance::Appearance,
+    config::Config,
+    localization::Text,
+    utils::gdi::{message_font, OwnedGdiObject},
 };
 use anyhow::{ensure, Context, Result};
 use windows::{
     core::{w, HSTRING, PCWSTR},
     Win32::{
         Foundation::{HWND, LPARAM, RECT, WPARAM},
-        Graphics::Gdi::{CreateFontIndirectW, CreateSolidBrush, HBRUSH, HGDIOBJ},
+        Graphics::Gdi::{CreateSolidBrush, HBRUSH, HGDIOBJ},
         System::LibraryLoader::GetModuleHandleW,
-        UI::{HiDpi::SystemParametersInfoForDpi, Shell::SetWindowSubclass, WindowsAndMessaging::*},
+        UI::{Shell::SetWindowSubclass, WindowsAndMessaging::*},
     },
 };
 
@@ -169,29 +172,7 @@ impl Controls {
             .set(crate::text_raster::colorref(appearance.text));
         state.brush.set(HBRUSH(brush.0 .0));
         self.background = Some(brush);
-        let mut metrics = NONCLIENTMETRICSW {
-            cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
-            ..Default::default()
-        };
-        unsafe {
-            SystemParametersInfoForDpi(
-                SPI_GETNONCLIENTMETRICS.0,
-                metrics.cbSize,
-                Some((&mut metrics as *mut NONCLIENTMETRICSW).cast()),
-                0,
-                dpi,
-            )
-        }
-        .context("search stage=system-font")?;
-        metrics.lfMessageFont.lfHeight = -metrics
-            .lfMessageFont
-            .lfHeight
-            .abs()
-            .max((14 * dpi / 96) as i32);
-        let font = OwnedGdiObject::new(
-            HGDIOBJ(unsafe { CreateFontIndirectW(&metrics.lfMessageFont) }.0),
-            "search-font",
-        )?;
+        let font = message_font(dpi)?;
         for hwnd in [
             self.label,
             self.edit,

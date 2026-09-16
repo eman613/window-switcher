@@ -42,6 +42,15 @@ impl WindowDetails {
     pub(crate) fn active(&self) -> bool {
         self.window.visible()
     }
+    pub(crate) fn selected_window(&self) -> Option<WindowIdentity> {
+        if !self.active() {
+            return None;
+        }
+        self.window
+            .selected()
+            .and_then(|index| self.records.get(index))
+            .map(|record| record.identity)
+    }
     pub(crate) fn group(&self) -> &Arc<str> {
         &self.group
     }
