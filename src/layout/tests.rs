@@ -133,3 +133,26 @@ fn unusable_counts_work_areas_and_explicit_combinations_are_rejected() {
     assert!(LayoutSnapshot::calculate(&options(), tiny, 1, 0, 0).is_err());
     assert!(LayoutSnapshot::calculate(&options(), monitor(96), 1, 0, 2000).is_err());
 }
+
+#[test]
+fn selected_name_reserves_fixed_readable_height_and_rejects_incompatible_targets() {
+    let mut config = Config {
+        app_name_mode: crate::config::AppNameMode::Selected,
+        app_name_font_size: 48,
+        ..Default::default()
+    };
+    let options = LayoutOptions::from_config(&config);
+    assert_eq!(options.name_height, 78);
+    let named =
+        LayoutSnapshot::calculate(&options, monitor(96), 5, 0, options.name_height).unwrap();
+    let plain = LayoutSnapshot::calculate(&options, monitor(96), 5, 0, 0).unwrap();
+    assert_eq!(named.bounds.height() - plain.bounds.height(), 78);
+    assert_eq!(named.icon_size, plain.icon_size);
+    assert_eq!(named.footer.unwrap().height(), 78);
+    config.panel_height = 129;
+    assert!(LayoutOptions::from_config(&config).validate().is_err());
+    config.panel_height = 130;
+    assert!(LayoutOptions::from_config(&config).validate().is_ok());
+    config.app_name_mode = crate::config::AppNameMode::Off;
+    assert_eq!(LayoutOptions::from_config(&config).name_height, 0);
+}

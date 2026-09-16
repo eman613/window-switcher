@@ -7,14 +7,19 @@ use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            GetWindowLongPtrW, IsWindow, KillTimer, LoadCursorW, PostQuitMessage, RegisterClassW,
-            RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage, CS_HREDRAW,
-            CS_VREDRAW, CW_USEDEFAULT, GWL_STYLE, HTCLIENT, IDC_ARROW, MSG, WINDOW_STYLE,
-            WM_COMMAND, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONUP,
-            WM_NCDESTROY, WM_NCHITTEST, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
-            WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        UI::{
+            Controls::WM_MOUSELEAVE,
+            WindowsAndMessaging::{
+                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+                GetWindowLongPtrW, IsWindow, KillTimer, LoadCursorW, PostQuitMessage,
+                RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowLongPtrW,
+                TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWL_STYLE, HTCLIENT,
+                IDC_ARROW, MSG, WINDOW_STYLE, WM_CANCELMODE, WM_CAPTURECHANGED, WM_COMMAND,
+                WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETOBJECT,
+                WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY,
+                WM_NCHITTEST, WM_SETFOCUS, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
+                WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            },
         },
     },
 };
@@ -24,7 +29,9 @@ use super::{
     WM_USER_REGISTER_TRAYICON, WM_USER_TRAYICON,
 };
 use crate::{
+    accessibility::{Accessibility, WM_ACCESSIBILITY},
     config::LoadedConfig,
+    font_resources::WM_FONTS,
     foreground::ForegroundWatcher,
     icon_loader::{IconService, WM_ICON},
     keyboard::{
@@ -56,7 +63,7 @@ pub(super) fn run(
     let _com = ComApartment::sta()?;
     let window = ApplicationWindow::create()?;
     let hwnd = window.0;
-    let painter = GdiAAPainter::new(hwnd, &loaded.config)?;
+    let mut painter = GdiAAPainter::new(hwnd, &loaded.config)?;
     let lifetimes = Arc::new(crate::window_snapshot::lifetimes::WindowLifetimes::default());
     let foreground = ForegroundWatcher::init(&loaded.config, hwnd, lifetimes.clone())?;
     let is_admin = is_running_as_admin()?;
@@ -66,6 +73,18 @@ pub(super) fn run(
         return Err(windows::core::Error::from_win32()).context("ui stage=taskbar-message");
     }
     let target = Arc::new(WindowTarget::new(hwnd));
+    let text = crate::localization::Text::new(loaded.config.language);
+    let accessibility = Accessibility::new(target.clone(), text).context("uia stage=initialize")?;
+    let accessible_root = accessibility.root.clone();
+    if loaded.config.switch_apps_enable {
+        painter.start_fonts(
+            loaded
+                .path
+                .parent()
+                .context("font stage=config-directory")?,
+            target.clone(),
+        );
+    }
     let snapshots = SnapshotService::start(
         &loaded.config,
         is_admin,
@@ -94,6 +113,7 @@ pub(super) fn run(
             hwnd,
             is_admin,
             painter,
+            accessibility,
             startup,
             config: loaded.config.clone(),
             trayicon: loaded.config.trayicon.then(TrayIcon::create).transpose()?,
@@ -112,10 +132,11 @@ pub(super) fn run(
             input_session: 0,
             lifecycle,
             feedback: Default::default(),
-            text: crate::localization::Text::new(loaded.config.language),
+            text,
             diagnostics,
         }),
         target: target.clone(),
+        accessible_root,
         taskbar_message,
         pending: RefCell::new(VecDeque::with_capacity(MAX_DEFERRED_MESSAGES)),
     });
@@ -157,6 +178,7 @@ struct OwnedMessage {
 struct AppHost {
     app: RefCell<App>,
     target: Arc<WindowTarget>,
+    accessible_root: windows::Win32::UI::Accessibility::IRawElementProviderSimple,
     taskbar_message: u32,
     pending: RefCell<VecDeque<OwnedMessage>>,
 }
@@ -173,9 +195,18 @@ impl AppHost {
                 | WM_STARTUP
                 | WM_SNAPSHOT
                 | WM_ICON
+                | WM_FONTS
+                | WM_ACCESSIBILITY
                 | WM_SCENE_INVALIDATED
                 | WM_COMMAND
                 | WM_LBUTTONUP
+                | WM_LBUTTONDOWN
+                | WM_MOUSEMOVE
+                | WM_MOUSELEAVE
+                | WM_CAPTURECHANGED
+                | WM_CANCELMODE
+                | WM_SETFOCUS
+                | WM_KILLFOCUS
         ) || msg == self.taskbar_message
             || (msg == WM_TIMER && wparam.0 == INPUT_POLL_TIMER)
     }
@@ -200,7 +231,10 @@ impl AppHost {
                     | WM_USER_REGISTER_TRAYICON
                     | WM_SNAPSHOT
                     | WM_ICON
+                    | WM_FONTS
+                    | WM_ACCESSIBILITY
                     | WM_SCENE_INVALIDATED
+                    | WM_MOUSEMOVE
             ) && pending.iter().any(|old| old.msg == message.msg)
             {
                 return;
@@ -222,7 +256,14 @@ impl AppHost {
         };
         let result = if matches!(
             message.msg,
-            WM_INPUT_READY | WM_TIMER | WM_RESTART | WM_STARTUP | WM_SNAPSHOT | WM_ICON
+            WM_INPUT_READY
+                | WM_TIMER
+                | WM_RESTART
+                | WM_STARTUP
+                | WM_SNAPSHOT
+                | WM_ICON
+                | WM_FONTS
+                | WM_ACCESSIBILITY
         ) {
             app.drain_input();
             Ok(())
@@ -371,6 +412,19 @@ unsafe extern "system" fn window_proc(
     let pointer = get_window_user_data(hwnd);
     if pointer != 0 {
         let host = &*(pointer as *const AppHost);
+        if msg == WM_GETOBJECT
+            && lparam.0 as i32 == windows::Win32::UI::Accessibility::UiaRootObjectId
+            && host.target.is_live()
+        {
+            // UIA must receive its LRESULT immediately, even during a reentrant
+            // native callback. The provider owns values, never a borrow of App.
+            return windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(
+                hwnd,
+                wparam,
+                lparam,
+                &host.accessible_root,
+            );
+        }
         if matches!(msg, WM_DESTROY | WM_NCDESTROY) {
             host.target.close();
         }
@@ -391,6 +445,8 @@ unsafe extern "system" fn window_proc(
                     | WM_STARTUP
                     | WM_SNAPSHOT
                     | WM_ICON
+                    | WM_FONTS
+                    | WM_ACCESSIBILITY
                     | WM_SCENE_INVALIDATED
             ) && !host.target.accepts(lparam)
             {
@@ -437,6 +493,12 @@ mod tests {
         .unwrap();
         let icons =
             IconService::start(&config, &std::env::temp_dir(), lifetimes, target.clone()).unwrap();
+        let accessibility = Accessibility::new(
+            target.clone(),
+            crate::localization::Text::new(config.language),
+        )
+        .unwrap();
+        let accessible_root = accessibility.root.clone();
         let owner = Box::new(AppHost {
             app: RefCell::new(App {
                 hwnd: window.0,
@@ -452,6 +514,7 @@ mod tests {
                 remembered_icons: Default::default(),
                 switching: Default::default(),
                 painter: GdiAAPainter::new(window.0, &config).unwrap(),
+                accessibility,
                 target: target.clone(),
                 input,
                 input_session: 0,
@@ -461,6 +524,7 @@ mod tests {
                 diagnostics: Default::default(),
             }),
             target: target.clone(),
+            accessible_root,
             taskbar_message: 0xffff,
             pending: RefCell::new(VecDeque::new()),
         });

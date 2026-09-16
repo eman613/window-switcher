@@ -12,6 +12,9 @@ use windows::Win32::{
 use crate::utils::gdi::{OwnedGdiObject, SavedDc};
 use crate::{config::Config, painter::ICON_SIZE_BASE};
 
+mod raster;
+pub(crate) use raster::compose;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BadgeStyle {
     pub background: u32,

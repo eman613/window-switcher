@@ -36,16 +36,21 @@ impl RenderPlan {
                 .context("render stage=budget tile-overflow")?;
             largest = largest.max(bytes);
         }
+        let footer = layout
+            .footer
+            .map(|rect| checked_bitmap_bytes(rect.width(), rect.height()))
+            .transpose()?
+            .unwrap_or(0);
         for scale in [6, 4, 2, 1].into_iter().filter(|scale| *scale <= requested) {
-            // Native DIB + immutable background + two cached tile states. Six
-            // scaled scratch tiles cover icon resize, both badge mattes, alpha
-            // recovery and sprite assembly, including replacement overlap.
+            // Native DIB, background, two cached states, scaled glyph/shape
+            // scratch (including the DirectWrite target), and footer mattes.
             let bytes = frame
                 .checked_mul(2)
                 .and_then(|v| v.checked_add(tiles.checked_mul(2)?))
                 .and_then(|v| {
-                    v.checked_add(largest.checked_mul(6 * scale as usize * scale as usize + 4)?)
+                    v.checked_add(largest.checked_mul(9 * scale as usize * scale as usize + 4)?)
                 })
+                .and_then(|v| v.checked_add(footer.checked_mul(5)?))
                 .context("render stage=budget overflow")?;
             if bytes <= config.render_budget_mb as usize * 1024 * 1024 {
                 return Ok(Self {

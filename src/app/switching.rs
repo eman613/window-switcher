@@ -198,11 +198,19 @@ impl App {
                 .cloned()
                 .or_else(|| self.remembered_icons.get(&key).and_then(Weak::upgrade))
                 .filter(|icon| icon.expires > Instant::now());
+            let display_name = old
+                .as_ref()
+                .and_then(|state| state.apps.iter().find(|entry| entry.key.group == key.group))
+                .map_or_else(
+                    || record.process.executable.clone(),
+                    |entry| entry.display_name.clone(),
+                );
             apps.push(AppEntry {
                 key,
                 icon,
                 window_count: windows.len(),
                 executable: record.process.executable.clone(),
+                display_name,
             });
         }
         if apps.is_empty() {

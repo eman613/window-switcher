@@ -1,17 +1,19 @@
 use crate::{
     app::SwitchAppsState,
+    appearance::Appearance,
     config::Config,
-    layout::{LayoutOptions, LayoutSnapshot, PixelRect},
-    pixels::PixelImage,
-    render_surface::RenderSurface,
-    utils::{is_light_theme, is_win11},
+    font_resources::{FontResources, FontService},
+    icon_cache::IconKey,
+    layout::{LayoutOptions, LayoutSnapshot},
+    window_target::WindowTarget,
 };
 use anyhow::{ensure, Context, Result};
+use std::{path::Path, sync::Arc};
 use windows::Win32::{
     Foundation::{COLORREF, HWND, POINT, SIZE},
     Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION},
     UI::{
-        Input::KeyboardAndMouse::SetFocus,
+        Input::KeyboardAndMouse::{GetCapture, ReleaseCapture},
         WindowsAndMessaging::{
             GetCursorPos, ShowWindow, UpdateLayeredWindow, SW_HIDE, SW_SHOW, ULW_ALPHA,
         },
@@ -19,9 +21,11 @@ use windows::Win32::{
 };
 
 mod plan;
+mod scene;
 mod sprite;
+mod text;
 use plan::RenderPlan;
-use sprite::Sprite;
+use scene::Scene;
 
 #[cfg(test)]
 #[path = "painter_tests.rs"]
@@ -29,21 +33,19 @@ mod tests;
 
 pub(crate) const ICON_SIZE_BASE: i32 = 64;
 
-struct Scene {
-    layout: LayoutSnapshot,
-    count: usize,
-    background: PixelImage,
-    surface: RenderSurface,
-    sprites: Vec<Sprite>,
-    selected: usize,
-    plan: RenderPlan,
+#[derive(Default, PartialEq, Eq)]
+struct PointerFeedback {
+    hovered: Option<IconKey>,
+    pressed: Option<IconKey>,
 }
 
 pub(crate) struct GdiAAPainter {
     hwnd: HWND,
     config: Config,
-    rounded_corner: bool,
-    colors: (u32, u32),
+    appearance: Appearance,
+    fonts: Option<FontResources>,
+    font_service: Option<FontService>,
+    pointer: PointerFeedback,
     show: bool,
     scene: Option<Scene>,
 }
@@ -56,18 +58,49 @@ impl GdiAAPainter {
                 config,
                 crate::utils::get_foreground_window(),
             )?;
-            let layout =
-                LayoutSnapshot::calculate(&LayoutOptions::from_config(config), monitor, 1, 0, 0)?;
+            let layout = LayoutSnapshot::calculate(
+                &LayoutOptions::from_config(config),
+                monitor,
+                1,
+                0,
+                text::name_height(config, None),
+            )?;
             RenderPlan::new(config, &layout)?;
         }
         Ok(Self {
             hwnd,
             config: config.clone(),
-            rounded_corner: is_win11(),
-            colors: theme_color(is_light_theme()),
+            appearance: Appearance::capture(config),
+            fonts: None,
+            font_service: None,
+            pointer: Default::default(),
             show: false,
             scene: None,
         })
+    }
+
+    pub(crate) fn start_fonts(&mut self, ini_dir: &Path, target: Arc<WindowTarget>) {
+        match FontService::start(&self.config, ini_dir, target) {
+            Ok(service) => self.font_service = Some(service),
+            Err(error) => warn!("font stage=start fallback={error:#}; INI unchanged"),
+        }
+    }
+
+    pub(crate) fn poll_fonts(&mut self) -> bool {
+        let Some(result) = self.font_service.as_ref().and_then(FontService::take) else {
+            return false;
+        };
+        match result {
+            Ok(fonts) => {
+                self.fonts = Some(fonts);
+                self.scene = None;
+                true
+            }
+            Err(error) => {
+                warn!("font stage=load fallback={error:#}; INI unchanged");
+                false
+            }
+        }
     }
 
     pub(crate) fn paint(
@@ -86,12 +119,11 @@ impl GdiAAPainter {
         if !self.show {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOW);
-                if allowed() {
-                    let _ = SetFocus(Some(self.hwnd));
-                } else {
-                    let _ = ShowWindow(self.hwnd, SW_HIDE);
-                    return Ok(());
-                }
+            }
+            crate::utils::focus_window(self.hwnd, &allowed);
+            if !allowed() {
+                self.hide();
+                return Ok(());
             }
             self.show = true;
         }
@@ -128,7 +160,7 @@ impl GdiAAPainter {
                 state.monitor,
                 state.apps.len(),
                 state.index,
-                0,
+                text::name_height(&self.config, self.fonts.as_ref()),
             )?;
             let plan = RenderPlan::new(&self.config, &layout)?;
             Some((layout, plan))
@@ -141,45 +173,25 @@ impl GdiAAPainter {
             let resources_start = crate::diagnostics::sample_start(self.config.metrics_enabled);
             rebuilt = layout.items.len();
             self.scene = None; // Release old surfaces before allocating their replacements.
-            self.scene = Some(self.create_scene(state, layout, plan)?);
+            self.scene = Some(Scene::new(
+                state,
+                layout,
+                plan,
+                &self.config,
+                &self.appearance,
+                self.fonts.as_mut(),
+            )?);
             crate::diagnostics::stage_elapsed("render-resources", resources_start);
         }
         let scene = self.scene.as_mut().unwrap();
         let compose_start = crate::diagnostics::sample_start(self.config.metrics_enabled);
-        let previous = scene.selected;
-        for (item, sprite) in scene.layout.items.iter().zip(&mut scene.sprites) {
-            let entry = &state.apps[item.index];
-            let changed = !sprite.matches(entry, state);
-            if changed {
-                *sprite = Sprite::new(
-                    entry,
-                    state,
-                    item,
-                    scene.plan.scale,
-                    self.rounded_corner,
-                    self.colors.0,
-                    self.config.metrics_enabled,
-                )?;
-                rebuilt += 1;
-            }
-            if changed
-                || item.index == previous
-                || item.index == state.index
-                || previous == usize::MAX
-            {
-                scene.surface.restore(&scene.background, item.outer)?;
-                scene.surface.compose(
-                    if item.index == state.index {
-                        &sprite.selected
-                    } else {
-                        &sprite.plain
-                    },
-                    item.outer.left,
-                    item.outer.top,
-                )?;
-            }
-        }
-        scene.selected = state.index;
+        rebuilt += scene.compose(
+            state,
+            &self.config,
+            &self.appearance,
+            self.fonts.as_mut(),
+            &self.pointer,
+        )?;
         crate::diagnostics::stage_elapsed("composition", compose_start);
         if !allowed() {
             return Ok(());
@@ -220,65 +232,22 @@ impl GdiAAPainter {
         Ok(())
     }
 
-    fn create_scene(
-        &self,
-        state: &SwitchAppsState,
-        layout: LayoutSnapshot,
-        plan: RenderPlan,
-    ) -> Result<Scene> {
-        let width = layout.bounds.width();
-        let height = layout.bounds.height();
-        let mut background = PixelImage::new(width, height)?;
-        let radius = if self.rounded_corner {
-            layout.items[0].outer.height() as f32 / 8.0
-        } else {
-            0.0
-        };
-        background.rounded_fill(
-            PixelRect {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            },
-            radius,
-            self.colors.1,
-        );
-        let mut surface = RenderSurface::new(width, height)?;
-        surface.pixels_mut()?.copy_from_slice(&background.data);
-        let mut sprites = Vec::with_capacity(layout.items.len());
-        for item in &layout.items {
-            sprites.push(Sprite::new(
-                &state.apps[item.index],
-                state,
-                item,
-                plan.scale,
-                self.rounded_corner,
-                self.colors.0,
-                self.config.metrics_enabled,
-            )?);
-        }
-        Ok(Scene {
-            layout,
-            count: state.apps.len(),
-            background,
-            surface,
-            sprites,
-            selected: usize::MAX,
-            plan,
-        })
-    }
-
     pub(crate) fn hide(&mut self) {
         unsafe {
+            if GetCapture() == self.hwnd {
+                if let Err(error) = ReleaseCapture() {
+                    debug!("pointer stage=hide-release code={:#x}", error.code().0);
+                }
+            }
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         self.show = false;
+        self.pointer = Default::default();
     }
 
     pub(crate) fn invalidate(&mut self) {
         self.scene = None;
-        self.colors = theme_color(is_light_theme());
+        self.appearance = Appearance::capture(&self.config);
     }
 
     pub(crate) fn layout(&self) -> Option<&LayoutSnapshot> {
@@ -293,12 +262,15 @@ impl GdiAAPainter {
         unsafe { GetCursorPos(&mut cursor) }.ok()?;
         self.layout()?.hit_test(cursor.x, cursor.y)
     }
-}
-
-const fn theme_color(light: bool) -> (u32, u32) {
-    if light {
-        (0xf2f2f2, 0xe0e0e0)
-    } else {
-        (0x3b3b3b, 0x4c4c4c)
+    pub(crate) fn hover(&mut self, key: Option<IconKey>) -> bool {
+        let changed = self.pointer.hovered != key;
+        self.pointer.hovered = key;
+        changed
+    }
+    pub(crate) fn press(&mut self, key: Option<IconKey>) {
+        self.pointer.pressed = key;
+    }
+    pub(crate) fn release(&mut self) -> Option<IconKey> {
+        self.pointer.pressed.take()
     }
 }

@@ -44,6 +44,7 @@ pub(crate) struct LayoutOptions {
     pub(crate) max_width: u32,
     pub(crate) max_height: u32,
     pub(crate) max_columns: u32,
+    pub(crate) name_height: u32,
 }
 
 impl LayoutOptions {
@@ -58,16 +59,25 @@ impl LayoutOptions {
             max_width: config.max_width,
             max_height: config.max_height,
             max_columns: config.max_columns,
+            name_height: if config.app_name_mode == crate::config::AppNameMode::Selected {
+                config.app_name_font_size * 3 / 2 + 6
+            } else {
+                0
+            },
         }
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        self.validate_footer(self.name_height)
+    }
+
+    fn validate_footer(&self, name_height: u32) -> Result<()> {
         let minimum = MIN_ICON_DIP + 2 * (self.icon_padding + self.panel_padding);
-        for (name, value) in [
-            ("panel_width", self.panel_width),
-            ("panel_height", self.panel_height),
-            ("max_width", self.max_width),
-            ("max_height", self.max_height),
+        for (name, value, minimum) in [
+            ("panel_width", self.panel_width, minimum),
+            ("panel_height", self.panel_height, minimum + name_height),
+            ("max_width", self.max_width, minimum),
+            ("max_height", self.max_height, minimum + name_height),
         ] {
             if value != 0 && value < minimum {
                 bail!("[appearance] {name} 与内边距冲突；至少需要 {minimum} DIP，原值未修改");
@@ -103,7 +113,7 @@ impl LayoutSnapshot {
         selected: usize,
         name_height: u32,
     ) -> Result<Self> {
-        options.validate()?;
+        options.validate_footer(name_height)?;
         ensure!(
             count != 0 && count <= MAX_WINDOWS && selected < count,
             "layout stage=count invalid"

@@ -470,6 +470,7 @@ dependencies = [
  "rust-ini",
  "simple-logging",
  "windows",
+ "windows-core",
  "xml",
 ]
 

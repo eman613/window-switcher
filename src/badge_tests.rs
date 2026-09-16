@@ -63,6 +63,18 @@ fn native_badges_are_circular_readable_and_restore_gdi_state() {
     }
     style.font_size = 12;
     let canvas = TestCanvas::new(384, 384);
+    assert!(draw_badge(HDC::default(), 2, 99, canvas.bounds(), style).is_err());
+
+    if let Some(path) = std::env::var_os("WINDOW_SWITCHER_BADGE_PREVIEW") {
+        export_preview(Path::new(&path), style);
+    }
+}
+
+#[test]
+#[ignore = "process-wide GDI counters require an isolated serial process"]
+fn native_badge_resources_remain_bounded() {
+    let style = BadgeStyle::from_config(&Config::default());
+    let canvas = TestCanvas::new(384, 384);
     draw_badge(canvas.hdc, 100, 99, canvas.bounds(), style).unwrap();
     let before = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
     assert!(before > 0, "GDI resource counter is unavailable");
@@ -70,15 +82,11 @@ fn native_badges_are_circular_readable_and_restore_gdi_state() {
         draw_badge(canvas.hdc, 100, 99, canvas.bounds(), style).unwrap();
     }
     let after = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+    eprintln!("badge_resource_cycles=200 initial_gdi={before} final_gdi={after}");
     assert!(
         after <= before + 1,
         "Badge GDI objects grew from {before} to {after}"
     );
-    assert!(draw_badge(HDC::default(), 2, 99, canvas.bounds(), style).is_err());
-
-    if let Some(path) = std::env::var_os("WINDOW_SWITCHER_BADGE_PREVIEW") {
-        export_preview(Path::new(&path), style);
-    }
 }
 
 fn assert_circle(canvas: &TestCanvas, style: BadgeStyle, background: u32) {

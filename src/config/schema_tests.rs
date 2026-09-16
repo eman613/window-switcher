@@ -25,6 +25,13 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ("switch-apps", "badge_color", "#123456", "#XYZXYZ"),
         ("switch-apps", "badge_text_color", "#654321", "#FFFFFFFF"),
         ("switch-apps", "badge_font_size", "18", "25"),
+        ("switch-apps", "badge_font_family", "Arial", ""),
+        (
+            "switch-apps",
+            "badge_font_file",
+            "fonts/count.otf",
+            "bad\0.ttf",
+        ),
         ("switch-apps", "only_current_desktop", "no", "maybe"),
         ("startup", "enabled", "yes", "maybe"),
         ("startup", "run_level", "standard", "admin"),
@@ -56,6 +63,35 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ("appearance", "max_width", "1024", "32769"),
         ("appearance", "max_height", "512", "32769"),
         ("appearance", "max_columns", "10", "129"),
+        ("appearance", "theme", "dark", "system"),
+        ("appearance", "background_color", "#123456", "123456"),
+        ("appearance", "background_opacity", "50", "101"),
+        (
+            "appearance",
+            "icon_background_color",
+            "#234567",
+            "#12345678",
+        ),
+        ("appearance", "icon_background_opacity", "1", "-1"),
+        ("appearance", "selection_color", "#345678", "blue"),
+        ("appearance", "selection_opacity", "0", "101"),
+        ("appearance", "selection_border_color", "#456789", "#XYZXYZ"),
+        ("appearance", "selection_border_width", "0", "7"),
+        ("appearance", "panel_corner_radius", "0", "257"),
+        ("appearance", "icon_corner_radius", "8", "129"),
+        ("appearance", "selection_corner_radius", "12", "-1"),
+        ("appearance", "app_name_mode", "selected", "all"),
+        ("appearance", "app_name_font_family", "Arial", ""),
+        (
+            "appearance",
+            "app_name_font_file",
+            "fonts/name.ttf",
+            "bad\0.otf",
+        ),
+        ("appearance", "app_name_font_size", "20", "11"),
+        ("appearance", "app_name_font_weight", "500", "450"),
+        ("appearance", "app_name_font_italic", "yes", "maybe"),
+        ("appearance", "app_name_text_color", "#567890", "#FFF"),
         ("performance", "icon_cache_limit", "16", "15"),
         ("performance", "icon_cache_mb", "4", "257"),
         ("performance", "icon_failure_ttl_ms", "100", "99"),
@@ -80,7 +116,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ]);
     }
     let template = document::parse_ini(DEFAULT_CONFIG).unwrap();
-    assert_eq!(SETTINGS.len(), 73);
+    assert_eq!(SETTINGS.len(), 94);
     assert_eq!(cases.len(), SETTINGS.len());
     assert_eq!(
         template

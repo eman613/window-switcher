@@ -1,7 +1,7 @@
 use super::App;
 use crate::{
     keyboard::state::{InputAction, InputEvent},
-    utils::get_foreground_window,
+    utils::{get_foreground_window, window_identity::WindowIdentity},
 };
 use anyhow::Result;
 use std::time::Instant;
@@ -15,6 +15,7 @@ impl App {
             return;
         }
         self.poll_feedback();
+        self.switching.paint_dirty |= self.painter.poll_fonts();
         if self.diagnostics.tick() {
             self.input.log_summary();
         }
@@ -35,7 +36,10 @@ impl App {
             if self.input_session != event.session {
                 self.cancel_switch_app();
                 self.input_session = event.session;
-                self.switching.anchor = get_foreground_window().0 as usize;
+                let foreground = get_foreground_window();
+                self.switching.anchor = foreground.0 as usize;
+                self.switching.return_focus =
+                    WindowIdentity::capture(foreground, &self.snapshots.lifetimes);
             }
             if let Err(error) = self.apply_input(event, received.received) {
                 error!("input stage=apply error={error:#}");
@@ -43,6 +47,7 @@ impl App {
                 self.complete_switch();
             }
         }
+        self.poll_accessibility();
         if self.input_session == 0 {
             return;
         }

@@ -30,6 +30,51 @@ pub(super) fn color(value: &str) -> Result<u32> {
     super::validation::parse_color(value).context("请填写 #RRGGBB 六位十六进制颜色")
 }
 
+pub(super) fn automatic_color(value: &str) -> Result<Option<u32>> {
+    if value == "auto" {
+        return Ok(None);
+    }
+    if !value.starts_with('#') {
+        bail!("请填写 auto 或 #RRGGBB 六位十六进制颜色");
+    }
+    color(value).map(Some)
+}
+
+pub(super) fn radius(value: &str, maximum: u32) -> Result<Option<u32>> {
+    if value == "auto" {
+        Ok(None)
+    } else {
+        integer(value, 0, maximum).map(Some)
+    }
+}
+
+pub(super) fn font_family(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 128 || value.chars().any(char::is_control) {
+        bail!("字体族名须为 1–128 个字符，不能包含控制字符");
+    }
+    Ok(value.to_owned())
+}
+
+pub(super) fn font_file(value: &str) -> Result<Option<PathBuf>> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    if value.contains('\0') || value.encode_utf16().count() > 32767 {
+        bail!("字体路径不能包含 NUL 或超过 32767 个 UTF-16 单元");
+    }
+    // Resolve relative to the active INI in the font worker, never relative to CWD.
+    Ok(Some(PathBuf::from(value)))
+}
+
+pub(super) fn font_weight(value: &str) -> Result<u32> {
+    let weight = integer(value, 100, 900)?;
+    if !weight.is_multiple_of(100) {
+        bail!("字重须为 100–900 之间的 100 的倍数");
+    }
+    Ok(weight)
+}
+
 pub(super) fn level(value: &str) -> Result<LevelFilter> {
     value
         .parse()

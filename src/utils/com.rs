@@ -1,14 +1,22 @@
 use std::{marker::PhantomData, rc::Rc};
 
 use anyhow::{Context, Result};
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{
+    CoInitializeEx, CoUninitialize, COINIT, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED,
+};
 
 /// An apartment belongs to the calling thread, including S_FALSE acquisitions.
 pub(crate) struct ComApartment(PhantomData<Rc<()>>);
 
 impl ComApartment {
     pub(crate) fn sta() -> Result<Self> {
-        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        Self::initialize(COINIT_APARTMENTTHREADED)
+    }
+    pub(crate) fn mta() -> Result<Self> {
+        Self::initialize(COINIT_MULTITHREADED)
+    }
+    fn initialize(mode: COINIT) -> Result<Self> {
+        unsafe { CoInitializeEx(None, mode) }
             .ok()
             .context("shell stage=com-initialize")?;
         Ok(Self(PhantomData))

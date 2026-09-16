@@ -59,6 +59,19 @@ jobs:
           cargo test --locked --workspace --all-targets --target $env:CARGO_TARGET
           exit $LASTEXITCODE
 
+      - name: Isolated native resource regressions
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nativeTests = @(
+            'badge::tests::native_badge_resources_remain_bounded',
+            'font_resources::tests::private_font_reload_and_raster_resources_remain_bounded',
+            'painter::tests::stage_c_resource_stress'
+          )
+          foreach ($nativeTest in $nativeTests) {
+            cargo test --locked --lib --target $env:CARGO_TARGET $nativeTest -- --ignored --exact --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: Check all targets
         run: |
           $ErrorActionPreference = 'Stop'

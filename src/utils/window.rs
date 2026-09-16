@@ -8,7 +8,7 @@ use windows::Win32::{
         Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST},
     },
     UI::{
-        Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_MOUSE},
+        Input::KeyboardAndMouse::{GetFocus, SendInput, SetFocus, INPUT, INPUT_MOUSE},
         WindowsAndMessaging::{
             GetCursorPos, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowPlacement,
             GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
@@ -160,6 +160,25 @@ pub fn set_foreground_window(hwnd: HWND, allowed: impl Fn() -> bool) -> bool {
 
 pub fn get_foreground_window() -> HWND {
     unsafe { GetForegroundWindow() }
+}
+
+pub(crate) fn focus_window(hwnd: HWND, allowed: impl Fn() -> bool) -> bool {
+    if !set_foreground_window(hwnd, &allowed) || !allowed() {
+        return false;
+    }
+    if unsafe { GetFocus() } != hwnd {
+        let result = unsafe { SetFocus(Some(hwnd)) };
+        // SetFocus returns the previous HWND, which can legitimately be null.
+        // Verify the new focus instead of interpreting that null as failure.
+        if unsafe { GetFocus() } != hwnd {
+            debug!(
+                "window stage=keyboard-focus rejected code={:#x}",
+                result.err().map_or(0, |error| error.code().0)
+            );
+            return false;
+        }
+    }
+    allowed()
 }
 
 pub fn get_window_title(hwnd: HWND) -> String {

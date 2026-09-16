@@ -54,6 +54,21 @@ impl Text {
     pub(crate) fn exit(self) -> &'static str {
         self.choose("退出", "Exit")
     }
+    pub(crate) fn switcher_name(self) -> &'static str {
+        self.choose("应用切换器", "Application switcher")
+    }
+    pub(crate) fn switcher_help(self) -> &'static str {
+        self.choose("循环选择应用，松开快捷键修饰键激活。按 Esc 取消；也可点击应用图标。", "Cycle through applications and release the shortcut modifier to activate. Press Escape to cancel, or click an application icon.")
+    }
+    pub(crate) fn window_count(self, count: usize) -> String {
+        if self.chinese {
+            format!("{count} 个窗口")
+        } else if count == 1 {
+            "1 window".into()
+        } else {
+            format!("{count} windows")
+        }
+    }
     pub(crate) fn error_title(self) -> &'static str {
         self.choose("Window Switcher 错误", "Window Switcher error")
     }

@@ -27,3 +27,5 @@ choices!(MonitorPolicy { Cursor => "cursor", Foreground => "foreground", Primary
 choices!(ForegroundPolicy { Passthrough => "passthrough", Handle => "handle" });
 choices!(InjectedPolicy { Handle => "handle", Passthrough => "passthrough" });
 choices!(RenderScale { Auto => "auto", One => "1", Two => "2", Four => "4", Six => "6" });
+choices!(Theme { Auto => "auto", Light => "light", Dark => "dark" });
+choices!(AppNameMode { Off => "off", Selected => "selected" });

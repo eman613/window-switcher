@@ -1,13 +1,14 @@
 use crate::{
     app::{AppEntry, SwitchAppsState},
-    badge::{draw_badge, BadgeStyle},
+    appearance::Appearance,
+    badge::BadgeStyle,
+    config::Config,
+    font_resources::FontResources,
     icon_cache::IconKey,
     layout::{ItemRect, PixelRect},
     pixels::PixelImage,
-    render_surface::RenderSurface,
 };
 use anyhow::Result;
-use windows::Win32::Foundation::RECT;
 
 #[derive(PartialEq, Eq)]
 struct SpriteKey {
@@ -48,9 +49,9 @@ impl Sprite {
         state: &SwitchAppsState,
         item: &ItemRect,
         scale: i32,
-        rounded: bool,
-        color: u32,
-        metrics: bool,
+        config: &Config,
+        appearance: &Appearance,
+        fonts: Option<&mut FontResources>,
     ) -> Result<Self> {
         let width = item.outer.width() * scale;
         let height = item.outer.height() * scale;
@@ -68,48 +69,61 @@ impl Sprite {
             placeholder(&mut content, icon);
         }
         if state.show_badge && entry.window_count > 1 {
-            let started = crate::diagnostics::sample_start(metrics);
-            let mut black = RenderSurface::new(width, height)?;
-            let mut white = RenderSurface::new(width, height)?;
-            let rect = RECT {
-                left: icon.left,
-                top: icon.top,
-                right: icon.right,
-                bottom: icon.bottom,
-            };
-            for (surface, rgb) in [(&mut black, 0), (&mut white, 0xffffff)] {
-                surface.fill_rgb(rgb)?;
-                draw_badge(
-                    surface.dc(),
-                    entry.window_count,
-                    state.badge_max,
-                    rect,
-                    state.badge_style,
-                )?;
-            }
-            let badge = PixelImage::recover_alpha(black.pixels()?, white.pixels()?, width, height)?;
-            content.compose(&badge, 0, 0)?;
+            let started = crate::diagnostics::sample_start(config.metrics_enabled);
+            crate::badge::compose(
+                &mut content,
+                fonts,
+                entry.window_count,
+                state.badge_max,
+                icon,
+                appearance.badge(state.badge_style),
+            )?;
             crate::diagnostics::stage_elapsed("badge-raster", started);
         }
+        let rect = PixelRect {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        let radii = appearance.radii(config, state.monitor.dpi, item.outer.height());
+        let mut plain = PixelImage::new(width, height)?;
+        plain.rounded_fill_opacity(
+            rect,
+            radii[1] * scale as f32,
+            appearance.plain.color,
+            appearance.plain.opacity,
+        );
+        plain.compose(&content, 0, 0)?;
         let mut selected = PixelImage::new(width, height)?;
-        selected.rounded_fill(
-            PixelRect {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            },
-            if rounded {
-                width.min(height) as f32 / 8.0
-            } else {
-                0.0
-            },
-            color,
+        selected.rounded_fill_opacity(
+            rect,
+            radii[2] * scale as f32,
+            appearance.selected.color,
+            appearance.selected.opacity,
         );
         selected.compose(&content, 0, 0)?;
+        let border = (appearance.border_width as f32 * state.monitor.dpi as f32 / 96.0
+            * scale as f32)
+            .round() as i32;
+        selected.rounded_outline(rect, radii[2] * scale as f32, border, appearance.border);
+        if border == 0 {
+            let mark = (12.0 * state.monitor.dpi as f32 / 96.0 * scale as f32).round() as i32;
+            let thickness = (2 * scale).min(height);
+            selected.rounded_fill(
+                PixelRect {
+                    left: (width - mark.min(width)) / 2,
+                    right: (width + mark.min(width)) / 2,
+                    top: height - thickness,
+                    bottom: height,
+                },
+                0.0,
+                appearance.border,
+            );
+        }
         Ok(Self {
             key: SpriteKey::new(entry, state),
-            plain: content.downsample(scale)?,
+            plain: plain.downsample(scale)?,
             selected: selected.downsample(scale)?,
         })
     }

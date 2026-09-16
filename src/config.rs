@@ -58,8 +58,8 @@ const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 
 pub use schema::Config;
 pub use types::{
-    BatteryPolicy, ForegroundPolicy, InjectedPolicy, Language, MonitorPolicy, RenderScale,
-    RunLevel, StartupEnabled, WatchMode,
+    AppNameMode, BatteryPolicy, ForegroundPolicy, InjectedPolicy, Language, MonitorPolicy,
+    RenderScale, RunLevel, StartupEnabled, Theme, WatchMode,
 };
 
 impl Config {

@@ -157,9 +157,15 @@ impl IconLoader {
 pub(crate) struct IconResult {
     pub(crate) key: IconKey,
     pub(crate) image: Option<Arc<CachedIcon>>,
+    pub(crate) image_requested: bool,
+    pub(crate) display_name: Arc<str>,
+}
+pub(crate) struct IconRequest {
+    pub(crate) key: IconKey,
+    pub(crate) image: bool,
 }
 pub(crate) struct IconService {
-    mailbox: Arc<Mailbox<Vec<IconKey>, IconResult>>,
+    mailbox: Arc<Mailbox<Vec<IconRequest>, IconResult>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -170,7 +176,7 @@ impl IconService {
         lifetimes: Arc<WindowLifetimes>,
         target: Arc<WindowTarget>,
     ) -> Result<Self> {
-        let mailbox = Mailbox::<Vec<IconKey>, IconResult>::new(16);
+        let mailbox = Mailbox::<Vec<IconRequest>, IconResult>::new(16);
         let shared = mailbox.clone();
         let configuration = config.clone();
         let ini_dir = ini_dir.to_owned();
@@ -178,13 +184,16 @@ impl IconService {
             let _com = match ComApartment::sta() { Ok(com) => com, Err(error) => { error!("icon stage=com error={error:#}"); shared.close(); target.try_post(WM_ICON); return; } };
             let loader = IconLoader::new(&configuration, &ini_dir);
             let mut cache = IconCache::new(&configuration);
+            let mut names = crate::app_name::NameCache::new(&configuration);
             while !shared.closed() && target.is_live() {
                 let Some((generation, keys)) = shared.receive(Duration::from_secs(1)) else { continue; };
                 let started = crate::diagnostics::sample_start(configuration.metrics_enabled);
-                for key in keys {
+                let mut published_names = 0usize;
+                for IconRequest { key, image: image_requested } in keys {
                     let allowed = || shared.current(generation) && target.is_live();
                     if !allowed() { break; }
-                    let image = if !key.identity.is_current(&lifetimes) { None } else if let Some(image) = cache.get(&key) { image } else if let Some(lease) = cache.reserve() {
+                    if !key.identity.is_current(&lifetimes) { continue; }
+                    let image = if !image_requested { None } else if let Some(image) = cache.get(&key) { image } else if let Some(lease) = cache.reserve() {
                         let (icon, sources) = loader.native(&key.group, key.identity.hwnd(), || allowed() && key.identity.is_current(&lifetimes));
                         if !allowed() { break; }
                         if key.identity.is_current(&lifetimes) {
@@ -200,11 +209,15 @@ impl IconService {
                         debug!("icon stage=budget pinned-by-consumer");
                         cache.insert(key.clone(), None, Vec::new(), false)
                     };
-                    if !shared.publish(generation, IconResult { key, image }) { break; }
+                    if !allowed() { break; }
+                    let display_name = names.resolve(&key.group);
+                    if !allowed() || !key.identity.is_current(&lifetimes) { continue; }
+                    if !shared.publish(generation, IconResult { key, image, image_requested, display_name }) { break; }
+                    published_names += 1;
                     target.try_post(WM_ICON);
                 }
                 crate::diagnostics::stage_elapsed("icons", started);
-                if configuration.metrics_enabled { info!("metrics event=icon_cache entries={} bytes={} hits={} misses={} failures={} fallbacks={} workers=1", cache.len(), cache.bytes(), cache.hits, cache.misses, cache.failures, cache.fallbacks); }
+                if configuration.metrics_enabled { info!("metrics event=icon_cache entries={} bytes={} hits={} misses={} failures={} fallbacks={} names={published_names} workers=1", cache.len(), cache.bytes(), cache.hits, cache.misses, cache.failures, cache.fallbacks); }
             }
         }).context("icon stage=thread-create")?;
         Ok(Self {
@@ -212,7 +225,7 @@ impl IconService {
             thread: Some(thread),
         })
     }
-    pub(crate) fn request(&self, keys: Vec<IconKey>) -> u64 {
+    pub(crate) fn request(&self, keys: Vec<IconRequest>) -> u64 {
         self.mailbox.request(keys)
     }
     pub(crate) fn take(&self) -> Vec<(u64, IconResult)> {

@@ -1,4 +1,7 @@
-use crate::{icon_cache::IconKey, keyboard::state::SwitchKind, layout::MonitorSnapshot};
+use crate::{
+    icon_cache::IconKey, keyboard::state::SwitchKind, layout::MonitorSnapshot,
+    utils::window_identity::WindowIdentity,
+};
 use anyhow::{ensure, Result};
 use std::{
     collections::VecDeque,
@@ -28,6 +31,7 @@ pub(super) struct SwitchCoordinator {
     pub(super) monitor: Option<MonitorSnapshot>,
     pub(super) anchor: usize,
     pub(super) paint_dirty: bool,
+    pub(super) return_focus: Option<WindowIdentity>,
     pub(super) icon_generation: u64,
     pub(super) icon_keys: Vec<IconKey>,
     pub(super) icon_pending: usize,

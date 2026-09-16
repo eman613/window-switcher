@@ -13,6 +13,7 @@ once_cell = "1.18.0"
 parking_lot = "0.12.3"
 rust-ini = "0.21.0"
 xml = "1.3.0"
+windows-core = "0.61.2"
 
 [dependencies.windows]
 version = "0.61.3"
@@ -27,6 +28,7 @@ features = [
     "Win32_UI_HiDpi",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_DirectWrite",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_EnhancedStorage",

@@ -78,6 +78,7 @@ fn state(hwnd: HWND) -> SwitchAppsState {
                 icon: Some(icon.clone()),
                 window_count: if i == 0 { 100 } else { i + 1 },
                 executable: "fixture.exe".into(),
+                display_name: format!("Application {i}").into(),
             })
             .collect(),
         index: 0,
@@ -100,8 +101,8 @@ fn hidden_panel_preserves_alpha_and_recovers_from_native_submit_failure() {
     let mut painter = GdiAAPainter::new(window.0, &Config::default()).unwrap();
     let mut state = state(window.0);
     for rounded in [false, true] {
-        painter.rounded_corner = rounded;
         painter.invalidate();
+        painter.appearance.rounded = rounded;
         painter.render(&state).unwrap();
         let pixels = painter.scene.as_ref().unwrap().surface.pixels().unwrap();
         assert_eq!(pixels[3], if rounded { 0 } else { 255 });
@@ -177,6 +178,72 @@ fn cancellation_during_render_does_not_show_or_focus_the_panel() {
     );
 }
 
+#[test]
+fn background_alpha_does_not_dim_sprites_or_bottom_name_and_pointer_states_are_distinct() {
+    let window = TestWindow::new();
+    let mut config = Config {
+        app_name_mode: crate::config::AppNameMode::Selected,
+        app_name_text_color: Some(0xffffff),
+        background_color: Some(0x112233),
+        panel_corner_radius: Some(0),
+        selection_color: Some(0x445566),
+        icon_background_opacity: 0,
+        ..Default::default()
+    };
+    let state = state(window.0);
+    let mut baseline = None;
+    for opacity in [0, 1, 50, 100] {
+        config.background_opacity = opacity;
+        let mut painter = GdiAAPainter::new(window.0, &config).unwrap();
+        painter.fonts = Some(
+            crate::font_resources::FontResources::load(&config, &std::env::temp_dir()).unwrap(),
+        );
+        painter.render(&state).unwrap();
+        let scene = painter.scene.as_ref().unwrap();
+        let sprite = scene.sprites[1].plain.data.clone();
+        if let Some(baseline) = &baseline {
+            assert_eq!(&sprite, baseline);
+        } else {
+            baseline = Some(sprite);
+        }
+        let footer = scene.layout.footer.unwrap();
+        let pixels = scene.surface.pixels().unwrap();
+        assert_eq!(pixels[3], ((opacity * 255 + 50) / 100) as u8);
+        let width = scene.layout.bounds.width();
+        assert!(
+            (footer.top..footer.bottom).any(|y| (footer.left..footer.right).any(|x| {
+                let pixel = &pixels[((y * width + x) * 4) as usize..][..4];
+                pixel[0] >= 200 && pixel[1] >= 200 && pixel[2] >= 200 && pixel[3] >= 200
+            })),
+            "name vanished at {opacity}%"
+        );
+        let idle = pixels.to_vec();
+        painter.hover(Some(state.apps[1].key.clone()));
+        painter.render(&state).unwrap();
+        let hovered = painter
+            .scene
+            .as_ref()
+            .unwrap()
+            .surface
+            .pixels()
+            .unwrap()
+            .to_vec();
+        assert_ne!(idle, hovered);
+        painter.press(Some(state.apps[1].key.clone()));
+        painter.render(&state).unwrap();
+        assert_ne!(
+            hovered,
+            painter.scene.as_ref().unwrap().surface.pixels().unwrap()
+        );
+        painter.release();
+        painter.render(&state).unwrap();
+        assert_eq!(
+            hovered,
+            painter.scene.as_ref().unwrap().surface.pixels().unwrap()
+        );
+    }
+}
+
 fn resources() -> (u32, u32, u32) {
     unsafe {
         let _ = GdiFlush();
@@ -210,8 +277,8 @@ fn stage_c_resource_stress() {
         state.index = iteration % state.apps.len();
         if iteration % 1000 == 0 {
             state.apps[0].window_count = 100 + iteration;
-            painter.rounded_corner = !painter.rounded_corner;
             painter.invalidate();
+            painter.appearance.rounded = iteration % 2000 == 0;
         }
         if iteration % 2000 == 0 {
             state.monitor.dpi = [96, 144, 192][iteration / 2000 % 3];

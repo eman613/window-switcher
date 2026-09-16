@@ -19,7 +19,13 @@ use windows::{
     core::{w, PCWSTR},
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
-        UI::WindowsAndMessaging::{WM_COMMAND, WM_LBUTTONUP, WM_RBUTTONUP},
+        UI::{
+            Controls::WM_MOUSELEAVE,
+            WindowsAndMessaging::{
+                WM_CANCELMODE, WM_CAPTURECHANGED, WM_COMMAND, WM_KILLFOCUS, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WM_SETFOCUS,
+            },
+        },
     },
 };
 
@@ -30,6 +36,7 @@ mod input;
 mod lifecycle;
 mod navigation;
 mod panel;
+mod pointer;
 mod runtime;
 mod switching;
 mod window_cycle;
@@ -71,6 +78,7 @@ struct App {
     remembered_icons: IndexMap<IconKey, Weak<CachedIcon>>,
     switching: coordinator::SwitchCoordinator,
     painter: GdiAAPainter,
+    accessibility: crate::accessibility::Accessibility,
     target: Arc<WindowTarget>,
     input: Arc<InputDispatch>,
     input_session: u64,
@@ -85,6 +93,10 @@ impl App {
         match msg {
             WM_USER_CONFIG_CHANGED => self.poll_lifecycle()?,
             WM_SCENE_INVALIDATED => self.invalidate_display()?,
+            WM_SETFOCUS | WM_KILLFOCUS => {
+                self.switching.paint_dirty = true;
+                self.flush_panel()?;
+            }
             WM_USER_TRAYICON => {
                 if matches!(lparam.0 as u32, WM_LBUTTONUP | WM_RBUTTONUP) {
                     if let Some(trayicon) = self.trayicon.as_mut() {
@@ -96,7 +108,8 @@ impl App {
                     }
                 }
             }
-            WM_LBUTTONUP => self.click(),
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_MOUSELEAVE | WM_CAPTURECHANGED
+            | WM_CANCELMODE => self.pointer_message(msg)?,
             WM_COMMAND if (wparam.0 >> 16) & 0xffff == 0 => {
                 self.handle_command(wparam.0 as u32 & 0xffff)?
             }
@@ -143,4 +156,5 @@ pub(crate) struct AppEntry {
     pub(crate) icon: Option<Arc<CachedIcon>>,
     pub(crate) window_count: usize,
     pub(crate) executable: Arc<str>,
+    pub(crate) display_name: Arc<str>,
 }

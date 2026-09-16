@@ -4,10 +4,14 @@ pub mod macros;
 #[macro_use]
 extern crate log;
 
+mod accessibility;
 mod app;
+mod app_name;
+mod appearance;
 mod badge;
 mod config;
 mod diagnostics;
+mod font_resources;
 mod foreground;
 mod icon_cache;
 mod icon_loader;
@@ -20,6 +24,7 @@ mod process_metadata;
 mod render_surface;
 mod restart;
 mod startup;
+mod text_raster;
 mod trayicon;
 mod window_snapshot;
 mod window_target;

@@ -1,7 +1,7 @@
 use super::App;
 use crate::{
-    keyboard::state::SwitchKind, layout::MonitorSnapshot, utils::set_foreground_window,
-    window_snapshot::filter::WindowFilter,
+    icon_loader::IconRequest, keyboard::state::SwitchKind, layout::MonitorSnapshot,
+    utils::set_foreground_window, window_snapshot::filter::WindowFilter,
 };
 use anyhow::Result;
 use std::{
@@ -24,6 +24,12 @@ impl App {
             self.switching.paint_dirty = false;
             if !self.input.permits(self.input_session) {
                 return Ok(());
+            }
+            if let Some(layout) = self.painter.layout() {
+                self.switching.paint_dirty |=
+                    !self
+                        .accessibility
+                        .publish(state, layout, self.input_session);
             }
             if !self.switching.first_panel_done {
                 if let Some(started) = self.switching.first_panel_started {
@@ -83,7 +89,24 @@ impl App {
             keys.swap(0, selected);
         }
         self.switching.icon_pending = keys.len();
-        self.switching.icon_generation = self.icons.request(keys);
+        // UIA exposes every candidate, including pages that have not been painted.
+        // Query those names after visible icons without allocating off-page rasters.
+        let requests = keys
+            .into_iter()
+            .map(|key| IconRequest { key, image: true })
+            .chain(
+                state
+                    .apps
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index < first || *index > last)
+                    .map(|(_, entry)| IconRequest {
+                        key: entry.key.clone(),
+                        image: false,
+                    }),
+            )
+            .collect();
+        self.switching.icon_generation = self.icons.request(requests);
         self.switching.last_icons = Some(Instant::now());
     }
 
@@ -98,18 +121,25 @@ impl App {
                 continue;
             };
             if let Some(entry) = state.apps.iter_mut().find(|entry| entry.key == result.key) {
-                let changed = entry.icon.as_ref().map(|icon| icon.revision)
-                    != result.image.as_ref().map(|icon| icon.revision);
-                self.remembered_icons.shift_remove(&result.key);
-                if let Some(image) = &result.image {
-                    while self.remembered_icons.len() >= self.config.icon_cache_limit as usize {
-                        self.remembered_icons.shift_remove_index(0);
+                let mut changed = entry.display_name != result.display_name;
+                if result.image_requested {
+                    changed |= entry.icon.as_ref().map(|icon| icon.revision)
+                        != result.image.as_ref().map(|icon| icon.revision);
+                    self.remembered_icons.shift_remove(&result.key);
+                    if let Some(image) = &result.image {
+                        while self.remembered_icons.len() >= self.config.icon_cache_limit as usize {
+                            self.remembered_icons.shift_remove_index(0);
+                        }
+                        self.remembered_icons
+                            .insert(result.key, Arc::downgrade(image));
                     }
-                    self.remembered_icons
-                        .insert(result.key, Arc::downgrade(image));
+                    entry.icon = result.image;
                 }
-                entry.icon = result.image;
+                entry.display_name = result.display_name;
                 self.switching.paint_dirty |= changed;
+            }
+            if !result.image_requested {
+                continue;
             }
             self.switching.icon_pending = self.switching.icon_pending.saturating_sub(1);
             if self.switching.icon_pending == 0 {
@@ -128,20 +158,8 @@ impl App {
         }
     }
 
-    pub(super) fn click(&mut self) {
-        if let Some(index) = self.painter.find_clicked_app_index() {
-            if let Some(state) = &mut self.switch_apps_state {
-                if index >= state.apps.len() {
-                    return;
-                }
-                state.index = index;
-                self.do_switch_app();
-                self.complete_switch();
-            }
-        }
-    }
-
     pub(super) fn do_switch_app(&mut self) {
+        self.accessibility.hide();
         if let Some(state) = self.switch_apps_state.take() {
             if let Some(entry) = state.apps.get(state.index) {
                 let identity = entry.key.identity;
@@ -162,6 +180,7 @@ impl App {
     }
 
     pub(super) fn hide_apps(&mut self) {
+        self.accessibility.hide();
         self.switch_apps_state = None;
         self.icons.cancel();
         self.switching.icon_keys.clear();
@@ -172,6 +191,15 @@ impl App {
     }
 
     pub(super) fn cancel_switch_app(&mut self) {
+        if let Some(identity) = self.switching.return_focus {
+            // Restore only while this panel still owns the foreground. Do not
+            // steal focus back after an external application became active.
+            set_foreground_window(identity.hwnd(), || {
+                self.target.is_live()
+                    && crate::utils::get_foreground_window() == self.hwnd
+                    && identity.is_current(&self.snapshots.lifetimes)
+            });
+        }
         self.hide_apps();
         self.snapshots.cancel();
         self.switching = Default::default();

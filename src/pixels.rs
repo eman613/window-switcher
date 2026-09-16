@@ -24,20 +24,43 @@ impl PixelImage {
     }
 
     pub(crate) fn rounded_fill(&mut self, rect: PixelRect, radius: f32, color: u32) {
-        let radius = radius
-            .max(0.0)
-            .min(rect.width().min(rect.height()) as f32 / 2.0);
+        self.rounded_fill_opacity(rect, radius, color, 255);
+    }
+
+    pub(crate) fn rounded_fill_opacity(
+        &mut self,
+        rect: PixelRect,
+        radius: f32,
+        color: u32,
+        opacity: u8,
+    ) {
         for y in rect.top.max(0)..rect.bottom.min(self.height) {
             for x in rect.left.max(0)..rect.right.min(self.width) {
-                let px = x as f32 + 0.5;
-                let py = y as f32 + 0.5;
-                let cx = px.clamp(rect.left as f32 + radius, rect.right as f32 - radius);
-                let cy = py.clamp(rect.top as f32 + radius, rect.bottom as f32 - radius);
-                let coverage = if radius == 0.0 {
-                    1.0
-                } else {
-                    (radius + 0.5 - (px - cx).hypot(py - cy)).clamp(0.0, 1.0)
-                };
+                let coverage = rounded_coverage(rect, radius, x, y);
+                let offset = ((y * self.width + x) * 4) as usize;
+                over(
+                    &mut self.data[offset..offset + 4],
+                    &premultiply(color, (coverage * f32::from(opacity)).round() as u8),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn rounded_outline(&mut self, rect: PixelRect, radius: f32, width: i32, color: u32) {
+        if width <= 0 {
+            return;
+        }
+        let inner = PixelRect {
+            left: rect.left + width,
+            top: rect.top + width,
+            right: rect.right - width,
+            bottom: rect.bottom - width,
+        };
+        for y in rect.top.max(0)..rect.bottom.min(self.height) {
+            for x in rect.left.max(0)..rect.right.min(self.width) {
+                let coverage = (rounded_coverage(rect, radius, x, y)
+                    - rounded_coverage(inner, (radius - width as f32).max(0.0), x, y))
+                .clamp(0.0, 1.0);
                 let offset = ((y * self.width + x) * 4) as usize;
                 over(
                     &mut self.data[offset..offset + 4],
@@ -138,6 +161,24 @@ impl PixelImage {
             destination[3] = alpha;
         }
         Ok(image)
+    }
+}
+
+fn rounded_coverage(rect: PixelRect, radius: f32, x: i32, y: i32) -> f32 {
+    if rect.width() <= 0 || rect.height() <= 0 || !rect.contains(x, y) {
+        return 0.0;
+    }
+    let radius = radius
+        .max(0.0)
+        .min(rect.width().min(rect.height()) as f32 / 2.0);
+    let px = x as f32 + 0.5;
+    let py = y as f32 + 0.5;
+    let cx = px.clamp(rect.left as f32 + radius, rect.right as f32 - radius);
+    let cy = py.clamp(rect.top as f32 + radius, rect.bottom as f32 - radius);
+    if radius == 0.0 {
+        1.0
+    } else {
+        (radius + 0.5 - (px - cx).hypot(py - cy)).clamp(0.0, 1.0)
     }
 }
 
