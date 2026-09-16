@@ -26,6 +26,9 @@ impl App {
         if self.input_session != 0 && !self.input.permits(self.input_session) {
             self.complete_switch();
         }
+        if self.switching.sticky && !self.owns_picker_foreground() {
+            self.complete_switch();
+        }
         // Drain input before accepting results, so queued cancellation/release
         // wins over a late worker completion in the same UI turn.
         for received in self.input.take_timed() {
@@ -55,6 +58,7 @@ impl App {
         let result = self
             .poll_switching()
             .and_then(|()| self.poll_search())
+            .and_then(|()| self.poll_details())
             .and_then(|()| self.pump_switches())
             .and_then(|()| self.flush_panel());
         if let Err(error) = result {
@@ -65,7 +69,15 @@ impl App {
     }
 
     fn apply_input(&mut self, event: InputEvent, received: Option<Instant>) -> Result<()> {
+        if self.switching.monitor.is_none() {
+            let foreground = windows::Win32::Foundation::HWND(self.switching.anchor as _);
+            let monitor = crate::layout::MonitorSnapshot::capture(&self.config, foreground)?;
+            self.switching.scope =
+                crate::monitor_scope::MonitorScope::capture(monitor.identity, foreground);
+            self.switching.monitor = Some(monitor);
+        }
         match event.action {
+            InputAction::ShowDetails => self.show_details()?,
             InputAction::Cycle(SwitchKind::Search, _) => self.start_search()?,
             InputAction::Cycle(kind, reverse) => {
                 self.switching.push(kind, reverse, received)?;

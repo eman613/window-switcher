@@ -13,7 +13,7 @@ use windows::Win32::UI::{
 
 impl App {
     fn pointer_key(&self) -> Option<IconKey> {
-        if !self.input.permits(self.input_session) {
+        if self.details_active() || !self.input.permits(self.input_session) {
             return None;
         }
         let index = self.painter.find_clicked_app_index()?;
@@ -94,7 +94,8 @@ impl App {
     }
 
     fn activate_accessible(&mut self, key: &IconKey, kind: ActionKind) {
-        if !self.input.permits(self.input_session)
+        if self.details_active()
+            || !self.input.permits(self.input_session)
             || !key.identity.is_current(&self.snapshots.lifetimes)
         {
             return;

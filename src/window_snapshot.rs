@@ -1,7 +1,9 @@
 use crate::{
+    app_identity::{AppIdentity, GroupResolver},
     config::Config,
     foreground::ForegroundStatus,
     keyboard::state::SwitchKind,
+    monitor_scope::MonitorScope,
     mru::Mru,
     process_metadata::{ProcessMetadata, ProcessMetadataCache},
     utils::{com::ComApartment, window_identity::WindowIdentity},
@@ -11,6 +13,7 @@ use crate::{
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use std::{
+    path::Path,
     sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
@@ -27,6 +30,7 @@ pub(crate) const WM_SNAPSHOT: u32 = 6010;
 
 #[derive(Debug, Clone)]
 pub(crate) struct WindowRecord {
+    pub(crate) application: AppIdentity,
     pub(crate) identity: WindowIdentity,
     pub(crate) process: ProcessMetadata,
     pub(crate) title: String,
@@ -40,22 +44,29 @@ pub(crate) struct WindowSnapshot {
 }
 
 pub(crate) struct SnapshotService {
-    mailbox: Arc<Mailbox<SwitchKind, Result<WindowSnapshot>>>,
+    mailbox: Arc<Mailbox<SnapshotRequest, Result<WindowSnapshot>>>,
     thread: Option<JoinHandle<()>>,
     pub(crate) lifetimes: Arc<lifetimes::WindowLifetimes>,
+}
+
+struct SnapshotRequest {
+    kind: SwitchKind,
+    scope: MonitorScope,
 }
 
 impl SnapshotService {
     pub(crate) fn start(
         config: &Config,
+        ini_dir: &Path,
         is_admin: bool,
         foreground: Arc<ForegroundStatus>,
         lifetimes: Arc<lifetimes::WindowLifetimes>,
         target: Arc<WindowTarget>,
     ) -> Result<Self> {
-        let mailbox = Mailbox::new(1);
+        let mailbox = Mailbox::<SnapshotRequest, Result<WindowSnapshot>>::new(1);
         let shared = mailbox.clone();
         let configuration = config.clone();
+        let ini_dir = ini_dir.to_path_buf();
         let registry = lifetimes.clone();
         let thread = thread::Builder::new()
             .name("window-snapshot".into())
@@ -70,6 +81,7 @@ impl SnapshotService {
                     }
                 };
                 let mut metadata = ProcessMetadataCache::new(&configuration);
+                let mut grouping = GroupResolver::new(&configuration, &ini_dir);
                 let mut foreground_version = 0;
                 let mut mru = Mru::new(&configuration);
                 while !shared.closed() && target.is_live() {
@@ -77,13 +89,16 @@ impl SnapshotService {
                         foreground.resolve_pending(&mut metadata, &mut foreground_version),
                         &registry,
                     );
-                    let Some((generation, kind)) = shared.receive(Duration::from_millis(20)) else {
+                    let Some((generation, request)) = shared.receive(Duration::from_millis(20))
+                    else {
                         continue;
                     };
+                    let SnapshotRequest { kind, scope } = request;
                     let started = crate::diagnostics::sample_start(configuration.metrics_enabled);
                     let result = (|| {
                         let mut scan = scan::Scan::begin(
-                            filter::WindowFilter::from_config(&configuration, kind),
+                            filter::WindowFilter::from_config(&configuration, kind)
+                                .with_scope(scope),
                             is_admin,
                             registry.revision(),
                             target.window_id(),
@@ -102,7 +117,13 @@ impl SnapshotService {
                                     !shared.current(generation) || !target.is_live()
                                 },
                             ) {
-                                let mut snapshot = scan.finish()?;
+                                let Some(mut snapshot) =
+                                    grouping.regroup(scan.finish()?, kind, || {
+                                        shared.current(generation) && target.is_live()
+                                    })?
+                                else {
+                                    return Ok(None);
+                                };
                                 mru.order(&mut snapshot, kind, &configuration);
                                 return Ok(Some(snapshot));
                             }
@@ -137,8 +158,8 @@ impl SnapshotService {
         })
     }
 
-    pub(crate) fn request(&self, kind: SwitchKind) -> u64 {
-        self.mailbox.request(kind)
+    pub(crate) fn request(&self, kind: SwitchKind, scope: MonitorScope) -> u64 {
+        self.mailbox.request(SnapshotRequest { kind, scope })
     }
     pub(crate) fn cancel(&self) {
         self.mailbox.cancel();

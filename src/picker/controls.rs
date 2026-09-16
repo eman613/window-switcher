@@ -1,4 +1,7 @@
-use super::messages::{self, ViewState, EDIT_ID, LIST_ID};
+use super::{
+    messages::{self, ViewState, BACK_ID, EDIT_ID, LIST_ID},
+    ViewKind,
+};
 use crate::{
     appearance::Appearance, config::Config, localization::Text, utils::gdi::OwnedGdiObject,
 };
@@ -17,6 +20,7 @@ pub(super) struct Controls {
     pub edit: HWND,
     pub list: HWND,
     pub status: HWND,
+    back: HWND,
     label: HWND,
     results_label: HWND,
     font: Option<OwnedGdiObject>,
@@ -48,25 +52,37 @@ impl Controls {
         let label = child(
             parent,
             w!("STATIC"),
-            text.search_label(),
+            if state.kind == ViewKind::Search {
+                text.search_label()
+            } else {
+                text.details_label()
+            },
             WINDOW_STYLE(0),
             100,
         )?;
-        let edit = child(
-            parent,
-            w!("EDIT"),
-            "",
-            WS_BORDER | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-            EDIT_ID,
-        )?;
+        let edit = if state.kind == ViewKind::Search {
+            child(
+                parent,
+                w!("EDIT"),
+                "",
+                WS_BORDER | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                EDIT_ID,
+            )?
+        } else {
+            HWND::default()
+        };
         state.edit.set(edit);
-        let results_label = child(
-            parent,
-            w!("STATIC"),
-            text.search_results_label(),
-            WINDOW_STYLE(0),
-            103,
-        )?;
+        let results_label = if state.kind == ViewKind::Search {
+            child(
+                parent,
+                w!("STATIC"),
+                text.search_results_label(),
+                WINDOW_STYLE(0),
+                103,
+            )?
+        } else {
+            HWND::default()
+        };
         let list = child(
             parent,
             w!("LISTBOX"),
@@ -78,6 +94,18 @@ impl Controls {
             LIST_ID,
         )?;
         state.list.set(list);
+        let back = if state.kind == ViewKind::Details {
+            child(
+                parent,
+                w!("BUTTON"),
+                text.details_back(),
+                WS_TABSTOP,
+                BACK_ID,
+            )?
+        } else {
+            HWND::default()
+        };
+        state.back.set(back);
         let status = child(
             parent,
             w!("STATIC"),
@@ -86,13 +114,18 @@ impl Controls {
             104,
         )?;
         unsafe {
-            SendMessageW(
-                edit,
-                windows::Win32::UI::Controls::EM_SETLIMITTEXT,
-                Some(WPARAM(super::MAX_QUERY_UNITS)),
-                None,
-            );
-            for hwnd in [edit, list] {
+            if !edit.is_invalid() {
+                SendMessageW(
+                    edit,
+                    windows::Win32::UI::Controls::EM_SETLIMITTEXT,
+                    Some(WPARAM(super::MAX_QUERY_UNITS)),
+                    None,
+                );
+            }
+            for hwnd in [edit, list, back]
+                .into_iter()
+                .filter(|hwnd| !hwnd.is_invalid())
+            {
                 ensure!(
                     SetWindowSubclass(
                         hwnd,
@@ -109,6 +142,7 @@ impl Controls {
             edit,
             list,
             status,
+            back,
             label,
             results_label,
             font: None,
@@ -164,7 +198,11 @@ impl Controls {
             self.results_label,
             self.list,
             self.status,
-        ] {
+            self.back,
+        ]
+        .into_iter()
+        .filter(|hwnd| !hwnd.is_invalid())
+        {
             unsafe {
                 SendMessageW(
                     hwnd,
@@ -187,6 +225,8 @@ impl Controls {
             width >= px(200) && height >= px(180),
             "search stage=layout insufficient-work-area"
         );
+        let details = !self.back.is_invalid();
+        let list_top = if details { 30 } else { 92 };
         let rows = [
             (self.label, margin, margin, width - 2 * margin, px(22)),
             (
@@ -206,19 +246,26 @@ impl Controls {
             (
                 self.list,
                 margin,
-                margin + px(92),
+                margin + px(list_top),
                 width - 2 * margin,
-                height - margin - px(144),
+                height - margin - px(list_top + 52),
             ),
             (
                 self.status,
                 margin,
                 height - px(42),
-                width - 2 * margin,
+                width - 2 * margin - if details { px(158) } else { 0 },
+                px(32),
+            ),
+            (
+                self.back,
+                width - margin - px(148),
+                height - px(42),
+                px(148),
                 px(32),
             ),
         ];
-        for (hwnd, x, y, w, h) in rows {
+        for (hwnd, x, y, w, h) in rows.into_iter().filter(|(hwnd, ..)| !hwnd.is_invalid()) {
             unsafe { MoveWindow(hwnd, x, y, w, h, true) }.context("search stage=control-layout")?;
         }
         let result = unsafe {

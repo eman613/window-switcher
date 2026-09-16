@@ -1,4 +1,5 @@
 //! Callbacks retain only scalar state; they never borrow App or run a search.
+use super::ViewKind;
 use crate::{
     keyboard::dispatch::WM_INPUT_READY, utils::get_window_user_data, window_target::WindowTarget,
 };
@@ -15,14 +16,18 @@ use windows::Win32::{
 
 pub(super) const EDIT_ID: usize = 101;
 pub(super) const LIST_ID: usize = 102;
-pub(super) const CHANGED: u32 = 1;
-pub(super) const CANCEL: u32 = 2;
-pub(super) const RELAYOUT: u32 = 4;
+pub(super) const BACK_ID: usize = 105;
+pub(crate) const CHANGED: u32 = 1;
+pub(crate) const CANCEL: u32 = 2;
+pub(crate) const RELAYOUT: u32 = 4;
+pub(crate) const BACK: u32 = 8;
 
 pub(super) struct ViewState {
     pub target: Arc<WindowTarget>,
+    pub kind: ViewKind,
     pub edit: Cell<HWND>,
     pub list: Cell<HWND>,
+    pub back: Cell<HWND>,
     pub visible: Cell<bool>,
     pub busy: Cell<bool>,
     pub composing: Cell<bool>,
@@ -36,6 +41,17 @@ pub(super) struct ViewState {
 }
 
 impl ViewState {
+    pub(super) fn focus_target(&self) -> HWND {
+        if self.kind == ViewKind::Search {
+            self.edit.get()
+        } else if self.busy.get()
+            || unsafe { SendMessageW(self.list.get(), LB_GETCOUNT, None, None) }.0 <= 0
+        {
+            self.back.get()
+        } else {
+            self.list.get()
+        }
+    }
     pub(super) fn signal(&self, flags: u32) {
         if self.visible.get() {
             self.flags.set(self.flags.get() | flags);
@@ -79,7 +95,7 @@ pub(super) unsafe extern "system" fn window_proc(
             }
             WM_ACTIVATE if wparam.0 & 0xffff == WA_INACTIVE as usize => state.signal(CANCEL),
             WM_SETFOCUS if state.visible.get() => {
-                let _ = SetFocus(Some(state.edit.get()));
+                let _ = SetFocus(Some(state.focus_target()));
             }
             WM_SIZE | WM_DPICHANGED | WM_THEMECHANGED => state.signal(RELAYOUT),
             WM_COMMAND => {
@@ -89,6 +105,9 @@ pub(super) unsafe extern "system" fn window_proc(
                 }
                 if id == LIST_ID && notification == LBN_DBLCLK {
                     state.accept();
+                }
+                if id == BACK_ID && notification == BN_CLICKED {
+                    state.signal(BACK);
                 }
             }
             WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
@@ -141,7 +160,7 @@ pub(super) unsafe extern "system" fn control_proc(
         }
     }
     if state.visible.get() && !state.composing.get() {
-        if msg == WM_KEYDOWN {
+        if msg == WM_KEYDOWN || (msg == WM_SYSKEYDOWN && state.kind == ViewKind::Details) {
             match wparam.0 {
                 0x41 if hwnd == state.edit.get() && GetKeyState(0x11) < 0 => {
                     SendMessageW(
@@ -153,15 +172,29 @@ pub(super) unsafe extern "system" fn control_proc(
                     return LRESULT(0);
                 }
                 0x0d if !state.suppress_enter.get() => {
-                    state.accept();
+                    if hwnd == state.back.get() {
+                        state.signal(BACK);
+                    } else {
+                        state.accept();
+                    }
                     return LRESULT(0);
                 }
                 0x1b => {
-                    state.signal(CANCEL);
+                    state.signal(if state.kind == ViewKind::Details {
+                        BACK
+                    } else {
+                        CANCEL
+                    });
                     return LRESULT(0);
                 }
                 0x09 => {
-                    let target = if hwnd == state.edit.get() && !state.busy.get() {
+                    let target = if state.kind == ViewKind::Details {
+                        if hwnd == state.back.get() {
+                            state.focus_target()
+                        } else {
+                            state.back.get()
+                        }
+                    } else if hwnd == state.edit.get() && !state.busy.get() {
                         state.list.get()
                     } else {
                         state.edit.get()
@@ -178,7 +211,7 @@ pub(super) unsafe extern "system" fn control_proc(
         }
         // TranslateMessage runs before WM_KEYDOWN is dispatched. Consume its
         // corresponding control character too; printable/IME text stays native.
-        if msg == WM_CHAR && matches!(wparam.0, 0x01 | 0x09 | 0x0d | 0x1b) {
+        if matches!(msg, WM_CHAR | WM_SYSCHAR) && matches!(wparam.0, 0x01 | 0x09 | 0x0d | 0x1b) {
             return LRESULT(0);
         }
     }

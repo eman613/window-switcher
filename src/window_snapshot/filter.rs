@@ -1,4 +1,9 @@
-use crate::{config::Config, keyboard::state::SwitchKind, utils};
+use crate::{
+    config::{Config, MonitorFilter},
+    keyboard::state::SwitchKind,
+    monitor_scope::MonitorScope,
+    utils,
+};
 use std::collections::HashSet;
 use windows::Win32::Foundation::HWND;
 
@@ -13,6 +18,8 @@ pub(crate) struct WindowFilter {
     min_height: u32,
     titles: HashSet<String>,
     processes: HashSet<String>,
+    monitor: MonitorFilter,
+    scope: MonitorScope,
 }
 
 impl WindowFilter {
@@ -61,7 +68,17 @@ impl WindowFilter {
             min_height,
             titles: titles.clone(),
             processes: processes.iter().map(|p| p.to_lowercase()).collect(),
+            monitor: match kind {
+                SwitchKind::Windows => config.switch_windows_monitor_filter,
+                SwitchKind::Apps | SwitchKind::Search => config.switch_apps_monitor_filter,
+            },
+            scope: MonitorScope::default(),
         }
+    }
+
+    pub(crate) fn with_scope(mut self, scope: MonitorScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     pub(crate) fn allows_process(&self, executable: &str) -> bool {
@@ -81,6 +98,9 @@ impl WindowFilter {
     }
 
     pub(crate) fn allows(&self, hwnd: HWND) -> Option<(String, bool)> {
+        if !self.scope.allows(self.monitor, hwnd) {
+            return None;
+        }
         let state = utils::get_window_state(hwnd);
         if !self.allows_style(state) || utils::is_cloaked_window(hwnd, self.only_current_desktop) {
             return None;
@@ -120,6 +140,20 @@ mod tests {
         assert!(windows.allows_process("example.exe"));
         assert!(windows.titles.contains("Windows Input Experience"));
         assert!(!windows.untitled);
+        config.switch_apps_monitor_filter = MonitorFilter::Panel;
+        config.switch_windows_monitor_filter = MonitorFilter::Foreground;
+        assert_eq!(
+            WindowFilter::from_config(&config, SwitchKind::Apps).monitor,
+            MonitorFilter::Panel
+        );
+        assert_eq!(
+            WindowFilter::from_config(&config, SwitchKind::Search).monitor,
+            MonitorFilter::Panel
+        );
+        assert_eq!(
+            WindowFilter::from_config(&config, SwitchKind::Windows).monitor,
+            MonitorFilter::Foreground
+        );
         for dpi in [96, 144, 192] {
             assert!(windows.allows_size((120 * dpi / 96) as i32, (90 * dpi / 96) as i32, dpi));
             assert!(!windows.allows_size((120 * dpi / 96) as i32 - 1, (90 * dpi / 96) as i32, dpi));

@@ -67,4 +67,24 @@ mod tests {
         config.trayicon = true;
         assert!(validate(&config).is_ok());
     }
+
+    #[test]
+    fn details_only_registers_with_its_panel_and_conflicts_with_enabled_entries() {
+        let mut config = Config {
+            details_enable: true,
+            details_hotkey: Hotkey::create(
+                super::super::DETAILS_HOTKEY_ID,
+                "details",
+                "ctrl+space",
+            )
+            .unwrap(),
+            search_enable: true,
+            ..Default::default()
+        };
+        assert!(validate(&config).is_ok());
+        config.switch_apps_enable = true;
+        assert!(validate(&config).is_err());
+        config.search_enable = false;
+        assert!(validate(&config).is_ok());
+    }
 }

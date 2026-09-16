@@ -56,12 +56,17 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ("input", "pause_hotkey", "ctrl+f10", "shift+f10"),
         ("switch-windows", "order", "mru", "alphabetical"),
         ("switch-apps", "order", "mru", "alphabetical"),
+        ("switch-apps", "grouping", "profile", "title"),
+        ("switch-apps", "monitor_filter", "panel", "cursor"),
+        ("switch-windows", "monitor_filter", "foreground", "cursor"),
         ("behavior", "mru_limit", "512", "513"),
         ("search", "enable", "yes", "maybe"),
         ("search", "hotkey", "ctrl+f9", "shift+space"),
         ("search", "match", "contains", "regex"),
         ("search", "fields", "exe", "app,unknown"),
         ("search", "max_results", "200", "201"),
+        ("details", "enable", "yes", "maybe"),
+        ("details", "hotkey", "ctrl+f9", "shift+enter"),
         ("appearance", "monitor", "primary", "last"),
         ("appearance", "use_work_area", "no", "maybe"),
         ("appearance", "panel_width", "740", "32769"),
@@ -126,7 +131,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ]);
     }
     let template = document::parse_ini(DEFAULT_CONFIG).unwrap();
-    assert_eq!(SETTINGS.len(), 104);
+    assert_eq!(SETTINGS.len(), 109);
     assert_eq!(cases.len(), SETTINGS.len());
     assert_eq!(
         template

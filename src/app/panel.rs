@@ -1,23 +1,30 @@
 use super::App;
 use crate::{
-    icon_loader::IconRequest, keyboard::state::SwitchKind, layout::MonitorSnapshot,
-    utils::set_foreground_window, window_snapshot::filter::WindowFilter,
+    icon_loader::IconRequest,
+    keyboard::state::{InputSurface, SwitchKind},
+    utils::set_foreground_window,
+    window_snapshot::filter::WindowFilter,
 };
 use anyhow::Result;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use windows::Win32::Foundation::HWND;
 
 impl App {
     pub(super) fn flush_panel(&mut self) -> Result<()> {
-        if self.switching.finishing.is_some() || !self.input.permits(self.input_session) {
+        if self.details_active()
+            || self.switching.finishing.is_some()
+            || !self.input.permits(self.input_session)
+        {
             return Ok(());
         }
         let Some(state) = &self.switch_apps_state else {
             return Ok(());
         };
+        // The input thread must observe the surface before ShowWindow transfers
+        // focus. Its foreground check still gates keys until this panel is active.
+        self.input.set_surface(InputSurface::Panel, self.hwnd);
         if self.switching.paint_dirty {
             self.painter
                 .paint(state, || self.input.permits(self.input_session))?;
@@ -121,7 +128,8 @@ impl App {
                 continue;
             };
             if let Some(entry) = state.apps.iter_mut().find(|entry| entry.key == result.key) {
-                let mut changed = entry.display_name != result.display_name;
+                let display_name = entry.application.name(&result.display_name);
+                let mut changed = entry.display_name != display_name;
                 if result.image_requested {
                     changed |= entry.icon.as_ref().map(|icon| icon.revision)
                         != result.image.as_ref().map(|icon| icon.revision);
@@ -135,7 +143,7 @@ impl App {
                     }
                     entry.icon = result.image;
                 }
-                entry.display_name = result.display_name;
+                entry.display_name = display_name;
                 self.switching.paint_dirty |= changed;
             }
             if !result.image_requested {
@@ -163,7 +171,8 @@ impl App {
         if let Some(state) = self.switch_apps_state.take() {
             if let Some(entry) = state.apps.get(state.index) {
                 let identity = entry.key.identity;
-                let filter = WindowFilter::from_config(&self.config, SwitchKind::Apps);
+                let filter = WindowFilter::from_config(&self.config, SwitchKind::Apps)
+                    .with_scope(self.switching.scope);
                 if filter.allows_process(&entry.executable)
                     && filter.allows(identity.hwnd()).is_some()
                 {
@@ -180,6 +189,7 @@ impl App {
     }
 
     pub(super) fn hide_apps(&mut self) {
+        self.input.set_surface(InputSurface::None, self.hwnd);
         self.accessibility.hide();
         self.switch_apps_state = None;
         self.icons.cancel();
@@ -196,16 +206,15 @@ impl App {
             // steal focus back after an external application became active.
             set_foreground_window(identity.hwnd(), || {
                 self.target.is_live()
-                    && (crate::utils::get_foreground_window() == self.hwnd
-                        || self.search.as_ref().is_some_and(|search| {
-                            search.active()
-                                && crate::utils::get_foreground_window() == search.hwnd()
-                        }))
+                    && self.owns_picker_foreground()
                     && identity.is_current(&self.snapshots.lifetimes)
             });
         }
         if let Some(search) = self.search.as_mut() {
             search.close();
+        }
+        if let Some(details) = self.details.as_mut() {
+            details.close();
         }
         self.hide_apps();
         self.snapshots.cancel();
@@ -214,16 +223,10 @@ impl App {
 
     pub(super) fn invalidate_display(&mut self) -> Result<()> {
         self.painter.invalidate();
-        if let Some(search) = self.search.as_mut().filter(|search| search.active()) {
-            let monitor = MonitorSnapshot::capture(&self.config, HWND(self.switching.anchor as _))?;
-            self.switching.monitor = Some(monitor);
-            search.reposition(&self.config, monitor)?;
-        }
-        if self.switch_apps_state.is_none() {
+        let Some(previous) = self.switching.monitor else {
             return Ok(());
-        }
-        let monitor = match MonitorSnapshot::capture(&self.config, HWND(self.switching.anchor as _))
-        {
+        };
+        let monitor = match previous.refresh(&self.config) {
             Ok(monitor) => monitor,
             Err(error) => {
                 self.complete_switch();
@@ -231,7 +234,15 @@ impl App {
             }
         };
         self.switching.monitor = Some(monitor);
-        self.switch_apps_state.as_mut().unwrap().monitor = monitor;
+        if let Some(search) = self.search.as_mut().filter(|search| search.active()) {
+            search.reposition(&self.config, monitor)?;
+        }
+        if let Some(details) = self.details.as_mut().filter(|details| details.active()) {
+            details.reposition(&self.config, monitor)?;
+        }
+        if let Some(state) = self.switch_apps_state.as_mut() {
+            state.monitor = monitor;
+        }
         self.switching.icon_keys.clear();
         self.switching.paint_dirty = true;
         if let Err(error) = self.flush_panel() {

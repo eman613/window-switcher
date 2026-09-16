@@ -83,6 +83,7 @@ impl HookContext {
             InputPermissions {
                 windows: !self.dispatch.paused() && self.foreground.allows_windows(),
                 apps: !self.dispatch.paused() && self.foreground.allows_apps(),
+                surface: self.dispatch.surface(),
             },
             self.dispatch.acknowledged(),
             self.dispatch.revoked(),

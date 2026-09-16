@@ -1,5 +1,6 @@
 use crate::config::{
-    Hotkey, PAUSE_HOTKEY_ID, SEARCH_HOTKEY_ID, SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID,
+    Hotkey, DETAILS_HOTKEY_ID, PAUSE_HOTKEY_ID, SEARCH_HOTKEY_ID, SWITCH_APPS_HOTKEY_ID,
+    SWITCH_WINDOWS_HOTKEY_ID,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +14,14 @@ pub(crate) enum SwitchKind {
 pub(super) struct InputPermissions {
     pub(super) windows: bool,
     pub(super) apps: bool,
+    pub(super) surface: InputSurface,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputSurface {
+    None,
+    Panel,
+    Details,
 }
 
 #[cfg(test)]
@@ -21,6 +30,7 @@ impl From<bool> for InputPermissions {
         Self {
             windows,
             apps: true,
+            surface: InputSurface::Panel,
         }
     }
 }
@@ -31,6 +41,7 @@ pub(crate) enum InputAction {
     Finish(SwitchKind),
     Cancel,
     TogglePause,
+    ShowDetails,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +78,7 @@ struct Gesture {
     kind: SwitchKind,
     modifier: u32,
     finishing: bool,
+    sticky: bool,
 }
 
 pub(super) struct InputMachine {
@@ -164,10 +176,7 @@ impl InputMachine {
             }
         }
         if let Some(gesture) = self.active.as_ref() {
-            if gesture.kind != SwitchKind::Search
-                && !gesture.finishing
-                && !self.modifier_pressed(gesture.modifier)
-            {
+            if !gesture.sticky && !gesture.finishing && !self.modifier_pressed(gesture.modifier) {
                 let event = InputEvent {
                     session: gesture.session,
                     action: InputAction::Finish(gesture.kind),
@@ -188,6 +197,42 @@ impl InputMachine {
         if self.active.as_ref().is_some_and(|g| g.finishing) {
             return Decision::default();
         }
+        // Retain ownership of a consumed trigger until release, even when opening
+        // the view changes keyboard focus before the user's key-repeat arrives.
+        if repeated
+            && self.consumed[index]
+            && self.active.as_ref().is_some_and(|g| g.sticky)
+            && self
+                .hotkeys
+                .iter()
+                .any(|hotkey| hotkey.id == DETAILS_HOTKEY_ID && hotkey.code == key.scan)
+        {
+            return Decision {
+                consume: true,
+                event: None,
+            };
+        }
+        if permissions.surface == InputSurface::Panel
+            && permissions.apps
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|g| g.kind == SwitchKind::Apps)
+            && self
+                .hotkeys
+                .iter()
+                .any(|hotkey| hotkey.id == DETAILS_HOTKEY_ID && self.matches_hotkey(hotkey, key))
+        {
+            let gesture = self.active.as_mut().unwrap();
+            gesture.sticky = true;
+            return Decision {
+                consume: true,
+                event: (!repeated).then_some(InputEvent {
+                    session: gesture.session,
+                    action: InputAction::ShowDetails,
+                }),
+            };
+        }
         let matching = self.hotkeys.iter().find(|hotkey| {
             let allowed = (matches!(hotkey.id, SWITCH_APPS_HOTKEY_ID | SEARCH_HOTKEY_ID)
                 && permissions.apps)
@@ -203,12 +248,10 @@ impl InputMachine {
             let modifier = hotkey.get_modifier();
             // A normal switch replaces a sticky search with a new session.
             // Search text, navigation and composition remain native control input.
-            if kind != SwitchKind::Search
-                && self
-                    .active
-                    .as_ref()
-                    .is_some_and(|g| g.kind == SwitchKind::Search)
-            {
+            if self.active.as_ref().is_some_and(|g| {
+                (g.sticky && (kind != SwitchKind::Search || g.kind != SwitchKind::Search))
+                    || (kind == SwitchKind::Search && g.kind != SwitchKind::Search)
+            }) {
                 self.active = None;
             }
             if self.active.as_ref().is_some_and(|g| g.modifier != modifier) {
@@ -224,6 +267,7 @@ impl InputMachine {
                     kind,
                     modifier,
                     finishing: false,
+                    sticky: kind == SwitchKind::Search,
                 });
             }
             let reverse = self.pressed[0x2a] || self.pressed[0x36];
@@ -238,11 +282,17 @@ impl InputMachine {
             };
         }
         if let Some(gesture) = self.active.as_mut() {
-            if gesture.kind == SwitchKind::Apps {
+            if gesture.kind == SwitchKind::Apps
+                && (!gesture.sticky || permissions.surface == InputSurface::Panel)
+            {
                 let action = match key.scan {
                     0x01 => {
                         gesture.finishing = true;
                         Some(InputAction::Cancel)
+                    }
+                    0x1c if gesture.sticky => {
+                        gesture.finishing = true;
+                        Some(InputAction::Finish(SwitchKind::Apps))
                     }
                     0x48 | 0x4b | 0x4d | 0x50 if key.extended => Some(InputAction::Cycle(
                         SwitchKind::Apps,
@@ -320,6 +370,106 @@ mod tests {
     }
 
     #[test]
+    fn details_is_panel_scoped_survives_release_and_returns_to_sticky_navigation() {
+        let mut state = machine();
+        state
+            .hotkeys
+            .push(Hotkey::create(DETAILS_HOTKEY_ID, "details", "ctrl+enter").unwrap());
+        let outside = InputPermissions {
+            apps: true,
+            windows: true,
+            surface: InputSurface::None,
+        };
+        let panel = InputPermissions {
+            surface: InputSurface::Panel,
+            ..outside
+        };
+        let details = InputPermissions {
+            surface: InputSurface::Details,
+            ..outside
+        };
+        state.handle(key(0x1d, false, true), outside, 0, 0);
+        assert!(!state.handle(key(0x1c, false, true), outside, 0, 0).consume);
+        state.handle(key(0x1c, false, false), outside, 0, 0);
+        state.handle(key(0x38, false, true), panel, 0, 0);
+        let session = state
+            .handle(key(0x0f, false, true), panel, 0, 0)
+            .event
+            .unwrap()
+            .session;
+        let trigger = key(0x1c, false, true);
+        let entered = state.handle(trigger, panel, 0, 0);
+        assert_eq!(entered.event.unwrap().action, InputAction::ShowDetails);
+        state.accepted(trigger, entered.consume);
+        let repeated = state.handle(trigger, details, 0, 0);
+        assert!(repeated.consume && repeated.event.is_none());
+        assert!(state.handle(key(0x1c, false, false), details, 0, 0).consume);
+        assert!(state
+            .handle(key(0x38, false, false), details, 0, 0)
+            .event
+            .is_none());
+        state.handle(key(0x1d, false, false), details, 0, 0);
+        for scan in [0x48, 0x50, 0x1c, 0x01] {
+            let result = state.handle(key(scan, scan != 0x1c && scan != 0x01, true), details, 0, 0);
+            assert!(!result.consume && result.event.is_none());
+            state.handle(
+                key(scan, scan != 0x1c && scan != 0x01, false),
+                details,
+                0,
+                0,
+            );
+        }
+        assert!(!state.handle(key(0x48, true, true), outside, 0, 0).consume);
+        assert_eq!(
+            state
+                .handle(key(0x50, true, true), panel, 0, 0)
+                .event
+                .unwrap()
+                .action,
+            InputAction::Cycle(SwitchKind::Apps, false)
+        );
+        let finish = state
+            .handle(key(0x1c, false, true), panel, 0, 0)
+            .event
+            .unwrap();
+        assert_eq!(finish.session, session);
+        assert_eq!(finish.action, InputAction::Finish(SwitchKind::Apps));
+    }
+
+    #[test]
+    fn a_global_binding_replaces_details_with_a_new_session() {
+        let mut state = machine();
+        state
+            .hotkeys
+            .push(Hotkey::create(DETAILS_HOTKEY_ID, "details", "ctrl+enter").unwrap());
+        state
+            .hotkeys
+            .push(Hotkey::create(SEARCH_HOTKEY_ID, "search", "ctrl+space").unwrap());
+        state.handle(key(0x38, false, true), true, 0, 0);
+        let first = state
+            .handle(key(0x0f, false, true), true, 0, 0)
+            .event
+            .unwrap();
+        state.handle(key(0x1d, false, true), true, 0, 0);
+        state.handle(key(0x1c, false, true), true, 0, 0);
+        let next = state
+            .handle(
+                key(0x39, false, true),
+                InputPermissions {
+                    apps: true,
+                    windows: true,
+                    surface: InputSurface::Details,
+                },
+                0,
+                0,
+            )
+            .event
+            .unwrap();
+        assert!(next.session > first.session);
+        assert_eq!(next.action, InputAction::Cycle(SwitchKind::Search, false));
+    }
+
+    #[test]
     fn pause_recovery_bypasses_permissions_without_repeating_or_leaking_release() {
         let mut state = machine();
         state
@@ -328,6 +478,7 @@ mod tests {
         let denied = InputPermissions {
             apps: false,
             windows: false,
+            surface: InputSurface::None,
         };
         state.handle(key(0x1d, false, true), denied, 0, 0);
         let down = key(0x44, false, true);
@@ -386,6 +537,7 @@ mod tests {
         let permissions = InputPermissions {
             windows: true,
             apps: false,
+            surface: InputSurface::None,
         };
         state.handle(key(0x38, false, true), permissions, 0, 0);
         assert!(

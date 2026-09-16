@@ -8,8 +8,8 @@ use ini::Ini;
 use log::LevelFilter;
 
 use super::{
-    parsers::*, types::*, Hotkey, SearchFields, PAUSE_HOTKEY_ID, SEARCH_HOTKEY_ID,
-    SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID,
+    parsers::*, types::*, Hotkey, SearchFields, DETAILS_HOTKEY_ID, PAUSE_HOTKEY_ID,
+    SEARCH_HOTKEY_ID, SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID,
 };
 
 pub(super) struct Setting {
@@ -52,6 +52,7 @@ settings! {
     restart_delay_ms: u32 => ("", "restart_delay_ms", "1000", |v| integer(v, 200, 10000), "ConfigWatcher::start");
     switch_windows_enable: bool => ("switch-windows", "enable", "yes", boolean, "Config::to_hotkeys");
     switch_windows_order: SwitchOrder => ("switch-windows", "order", "existing", str::parse::<SwitchOrder>, "SnapshotService/cycle_windows");
+    switch_windows_monitor_filter: MonitorFilter => ("switch-windows", "monitor_filter", "all", str::parse::<MonitorFilter>, "MonitorScope/WindowFilter");
     switch_windows_hotkey: Vec<Hotkey> => ("switch-windows", "hotkey", "alt+`", |v| hotkeys(v, SWITCH_WINDOWS_HOTKEY_ID, "switch windows", "alt+`"), "KeyboardListener");
     switch_windows_blacklist: HashSet<String> => ("switch-windows", "blacklist", "", blacklist, "ForegroundWatcher::init");
     switch_windows_ignore_minimal: bool => ("switch-windows", "ignore_minimal", "no", boolean, "WindowFilter::from_config");
@@ -65,6 +66,8 @@ settings! {
     switch_windows_exclude_processes: HashSet<String> => ("switch-windows", "exclude_processes", "", blacklist, "WindowFilter::allows");
     switch_apps_enable: bool => ("switch-apps", "enable", "no", boolean, "Config::to_hotkeys");
     switch_apps_order: SwitchOrder => ("switch-apps", "order", "existing", str::parse::<SwitchOrder>, "SnapshotService");
+    switch_apps_grouping: Grouping => ("switch-apps", "grouping", "app-id", str::parse::<Grouping>, "AppIdentity/Scan");
+    switch_apps_monitor_filter: MonitorFilter => ("switch-apps", "monitor_filter", "all", str::parse::<MonitorFilter>, "MonitorScope/WindowFilter");
     switch_apps_hotkey: Vec<Hotkey> => ("switch-apps", "hotkey", "alt+tab", |v| hotkeys(v, SWITCH_APPS_HOTKEY_ID, "switch apps", "alt+tab"), "KeyboardListener");
     switch_apps_ignore_minimal: bool => ("switch-apps", "ignore_minimal", "no", boolean, "WindowFilter::from_config");
     switch_apps_override_icons: IndexMap<String, String> => ("switch-apps", "override_icons", "", overrides, "IconLoader::native");
@@ -94,6 +97,8 @@ settings! {
     search_match: SearchMatch => ("search", "match", "fuzzy", str::parse::<SearchMatch>, "SearchService");
     search_fields: SearchFields => ("search", "fields", "app,title", str::parse::<SearchFields>, "SearchService");
     search_max_results: u32 => ("search", "max_results", "50", |v| integer(v, 10, 200), "SearchService");
+    details_enable: bool => ("details", "enable", "no", boolean, "WindowDetails/Config::to_hotkeys");
+    details_hotkey: Hotkey => ("details", "hotkey", "ctrl+enter", |v| Hotkey::create(DETAILS_HOTKEY_ID, "window details", v), "InputMachine");
     monitor: MonitorPolicy => ("appearance", "monitor", "cursor", str::parse::<MonitorPolicy>, "MonitorSnapshot::capture");
     use_work_area: bool => ("appearance", "use_work_area", "yes", boolean, "MonitorSnapshot::capture");
     panel_width: u32 => ("appearance", "panel_width", "0", |v| integer(v, 0, 32768), "LayoutSnapshot::calculate");

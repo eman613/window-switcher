@@ -46,6 +46,7 @@ pub const SWITCH_WINDOWS_HOTKEY_ID: u32 = 1;
 pub const SWITCH_APPS_HOTKEY_ID: u32 = 2;
 pub const SEARCH_HOTKEY_ID: u32 = 3;
 pub const PAUSE_HOTKEY_ID: u32 = 4;
+pub const DETAILS_HOTKEY_ID: u32 = 5;
 #[cfg(test)]
 pub const DEFAULT_BADGE_MAX: u32 = 99;
 #[cfg(test)]
@@ -63,8 +64,9 @@ const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 pub use schema::Config;
 pub use search::{SearchField, SearchFields};
 pub use types::{
-    AppNameMode, BatteryPolicy, ForegroundPolicy, InjectedPolicy, Language, MonitorPolicy,
-    RenderScale, RunLevel, SearchMatch, StartupEnabled, SwitchOrder, Theme, WatchMode,
+    AppNameMode, BatteryPolicy, ForegroundPolicy, Grouping, InjectedPolicy, Language,
+    MonitorFilter, MonitorPolicy, RenderScale, RunLevel, SearchMatch, StartupEnabled, SwitchOrder,
+    Theme, WatchMode,
 };
 
 impl Config {
@@ -80,6 +82,9 @@ impl Config {
             .collect();
         if self.switch_apps_enable {
             hotkeys.extend(self.switch_apps_hotkey.iter());
+            if self.details_enable {
+                hotkeys.push(&self.details_hotkey);
+            }
         }
         if self.search_enable {
             hotkeys.push(&self.search_hotkey);

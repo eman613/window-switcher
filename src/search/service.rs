@@ -43,11 +43,10 @@ impl SearchIndex {
     ) -> Result<Option<Self>> {
         let mut entries = Vec::new();
         let mut bytes: usize = 0;
-        for (group, records) in &source.groups {
+        for records in source.groups.values() {
             if !current() {
                 return Ok(None);
             }
-            let app = names.resolve(group);
             for record in records {
                 if !current() {
                     return Ok(None);
@@ -56,7 +55,9 @@ impl SearchIndex {
                     identity: record.identity,
                     executable: record.process.executable.clone(),
                     title: Arc::from(record.title.as_str()),
-                    app: app.clone(),
+                    app: record
+                        .application
+                        .name(&names.resolve(&record.application.icon_key)),
                 };
                 let fields: Vec<String> = [
                     (SearchField::App, entry.app.as_ref()),

@@ -1,9 +1,8 @@
 use super::App;
 use crate::{
     keyboard::state::SwitchKind,
-    layout::MonitorSnapshot,
     search::SearchAction,
-    utils::{get_foreground_window, set_foreground_window},
+    utils::set_foreground_window,
     window_snapshot::{filter::WindowFilter, WindowSnapshot},
 };
 use anyhow::{Context, Result};
@@ -13,10 +12,6 @@ impl App {
         let already_active = self.search.as_ref().is_some_and(|search| search.active());
         if !already_active {
             self.hide_apps();
-            self.switching.monitor = Some(MonitorSnapshot::capture(
-                &self.config,
-                get_foreground_window(),
-            )?);
         }
         let monitor = self
             .switching
@@ -51,7 +46,8 @@ impl App {
             Some(SearchAction::Cancel) => self.complete_switch(),
             Some(SearchAction::Activate(entry)) => {
                 let identity = entry.identity;
-                let filter = WindowFilter::from_config(&self.config, SwitchKind::Search);
+                let filter = WindowFilter::from_config(&self.config, SwitchKind::Search)
+                    .with_scope(self.switching.scope);
                 if filter.allows_process(&entry.executable)
                     && identity.is_current(&self.snapshots.lifetimes)
                     && filter.allows(identity.hwnd()).is_some()

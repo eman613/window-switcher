@@ -22,6 +22,8 @@ use windows::{
 pub(crate) struct BrowserPaths {
     chrome: Option<PathBuf>,
     edge: Option<PathBuf>,
+    default_chrome: Option<PathBuf>,
+    default_edge: Option<PathBuf>,
 }
 
 impl BrowserPaths {
@@ -39,6 +41,8 @@ impl BrowserPaths {
         Self {
             chrome: resolve(&config.chrome_user_data_dir, r"Google\Chrome\User Data"),
             edge: resolve(&config.edge_user_data_dir, r"Microsoft\Edge\User Data"),
+            default_chrome: local.map(|path| path.join(r"Google\Chrome\User Data")),
+            default_edge: local.map(|path| path.join(r"Microsoft\Edge\User Data")),
         }
     }
 
@@ -58,6 +62,14 @@ impl BrowserPaths {
             "Edge Profile.ico"
         };
         Some(self.root(executable)?.join(profile).join(filename))
+    }
+
+    pub(crate) fn default_root(&self, executable: &str) -> Option<&Path> {
+        match exe_name(executable).to_ascii_lowercase().as_str() {
+            "chrome.exe" => self.default_chrome.as_deref(),
+            "msedge.exe" => self.default_edge.as_deref(),
+            _ => None,
+        }
     }
 }
 
@@ -96,7 +108,7 @@ pub(crate) fn group_key(path: &Arc<str>, hwnd: HWND) -> Arc<str> {
     }
 }
 
-fn get_aumid(hwnd: HWND) -> Option<String> {
+pub(crate) fn get_aumid(hwnd: HWND) -> Option<String> {
     let store: IPropertyStore = unsafe { SHGetPropertyStoreForWindow(hwnd) }.ok()?;
     let property = unsafe { store.GetValue(&PKEY_AppUserModel_ID) }.ok()?;
     let value = property.to_string();

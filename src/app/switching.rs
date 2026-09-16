@@ -1,12 +1,12 @@
 use super::{coordinator::PendingSnapshot, navigation, App, AppEntry, SwitchAppsState};
 use crate::{
     badge::BadgeStyle, config::SwitchOrder, icon_cache::IconKey, keyboard::state::SwitchKind,
-    layout::MonitorSnapshot, utils::get_foreground_window, window_snapshot::WindowSnapshot,
+    utils::get_foreground_window, window_snapshot::WindowSnapshot,
 };
 use anyhow::{ensure, Result};
 use indexmap::IndexMap;
 use std::{
-    sync::Weak,
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 
@@ -27,7 +27,7 @@ impl App {
         if kind == SwitchKind::Windows {
             self.hide_apps();
         }
-        let generation = self.snapshots.request(kind);
+        let generation = self.snapshots.request(kind, self.switching.scope);
         self.switching.pending = Some(PendingSnapshot {
             generation,
             kind,
@@ -59,12 +59,6 @@ impl App {
                     self.switching.actions.pop_front();
                     self.switching.paint_dirty = true;
                     continue;
-                }
-                if self.switching.monitor.is_none() {
-                    self.switching.monitor = Some(MonitorSnapshot::capture(
-                        &self.config,
-                        get_foreground_window(),
-                    )?);
                 }
             }
             if self
@@ -169,7 +163,7 @@ impl App {
         let selected = old
             .as_ref()
             .and_then(|state| state.apps.get(state.index))
-            .map(|entry| entry.key.group.clone())
+            .map(|entry| entry.application.key.clone())
             .or_else(|| {
                 if !mru || old.is_some() {
                     return None;
@@ -200,8 +194,8 @@ impl App {
         let mut ordered = Vec::with_capacity(groups.len());
         if let Some(old) = &old {
             for entry in &old.apps {
-                if let Some(windows) = groups.shift_remove(&entry.key.group) {
-                    ordered.push((entry.key.group.clone(), windows));
+                if let Some(windows) = groups.shift_remove(&entry.application.key) {
+                    ordered.push((entry.application.key.clone(), windows));
                 }
             }
         }
@@ -217,7 +211,7 @@ impl App {
                 first
             };
             let key = IconKey {
-                group,
+                group: record.application.icon_key.clone(),
                 identity: record.identity,
             };
             let icon = old_icons
@@ -227,26 +221,37 @@ impl App {
                 .filter(|icon| icon.expires > Instant::now());
             let display_name = old
                 .as_ref()
-                .and_then(|state| state.apps.iter().find(|entry| entry.key.group == key.group))
+                .and_then(|state| {
+                    state
+                        .apps
+                        .iter()
+                        .find(|entry| entry.application.key == group)
+                })
                 .map_or_else(
-                    || record.process.executable.clone(),
+                    || record.application.name(&record.process.executable),
                     |entry| entry.display_name.clone(),
                 );
             apps.push(AppEntry {
+                application: record.application.clone(),
                 key,
                 icon,
                 window_count: windows.len(),
                 executable: record.process.executable.clone(),
                 display_name,
+                windows: if self.config.details_enable {
+                    windows.into()
+                } else {
+                    Arc::from([])
+                },
             });
         }
-        if apps.is_empty() {
+        if apps.is_empty() && !self.details_active() {
             self.complete_switch();
             return Ok(());
         }
         let index = selected
-            .and_then(|group| apps.iter().position(|entry| entry.key.group == group))
-            .unwrap_or(old_index.min(apps.len() - 1));
+            .and_then(|group| apps.iter().position(|entry| entry.application.key == group))
+            .unwrap_or(old_index.min(apps.len().saturating_sub(1)));
         let monitor = self
             .switching
             .monitor
@@ -262,6 +267,7 @@ impl App {
         });
         self.switching.icon_keys.clear();
         self.switching.paint_dirty = true;
+        self.sync_details()?;
         Ok(())
     }
 }

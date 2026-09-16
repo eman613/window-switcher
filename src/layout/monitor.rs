@@ -39,6 +39,14 @@ impl MonitorSnapshot {
                 }
             }
         };
+        Self::read(config, monitor)
+    }
+
+    pub(crate) fn refresh(self, config: &Config) -> Result<Self> {
+        Self::read(config, HMONITOR(self.identity as _))
+    }
+
+    fn read(config: &Config, monitor: HMONITOR) -> Result<Self> {
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()

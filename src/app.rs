@@ -31,6 +31,7 @@ use windows::{
 
 mod bootstrap;
 mod coordinator;
+mod details;
 mod feedback;
 mod input;
 mod lifecycle;
@@ -78,6 +79,7 @@ struct App {
     switch_windows_state: SwitchWindowsState,
     switch_apps_state: Option<SwitchAppsState>,
     search: Option<crate::search::SearchSession>,
+    details: Option<crate::window_details::WindowDetails>,
     snapshots: SnapshotService,
     icons: IconService,
     remembered_icons: IndexMap<IconKey, Weak<CachedIcon>>,
@@ -162,6 +164,8 @@ pub(crate) struct SwitchAppsState {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppEntry {
+    pub(crate) application: crate::app_identity::AppIdentity,
+    pub(crate) windows: Arc<[crate::window_snapshot::WindowRecord]>,
     pub(crate) key: IconKey,
     pub(crate) icon: Option<Arc<CachedIcon>>,
     pub(crate) window_count: usize,

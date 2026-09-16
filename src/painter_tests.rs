@@ -71,6 +71,8 @@ fn state(hwnd: HWND) -> SwitchAppsState {
     SwitchAppsState {
         apps: (0..5)
             .map(|i| AppEntry {
+                application: crate::app_identity::AppIdentity::plain(format!("fixture-{i}").into()),
+                windows: Arc::from([]),
                 key: IconKey {
                     group: format!("fixture-{i}").into(),
                     identity,

@@ -31,3 +31,5 @@ choices!(Theme { Auto => "auto", Light => "light", Dark => "dark" });
 choices!(AppNameMode { Off => "off", Selected => "selected" });
 choices!(SearchMatch { Fuzzy => "fuzzy", Contains => "contains", Prefix => "prefix" });
 choices!(SwitchOrder { Existing => "existing", Mru => "mru" });
+choices!(Grouping { AppId => "app-id", Process => "process", Profile => "profile" });
+choices!(MonitorFilter { All => "all", Panel => "panel", Foreground => "foreground" });

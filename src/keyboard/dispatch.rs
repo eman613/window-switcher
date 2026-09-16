@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -9,7 +9,7 @@ use std::{
 
 use parking_lot::Mutex;
 
-use super::state::{InputAction, InputEvent};
+use super::state::{InputAction, InputEvent, InputSurface};
 use crate::window_target::WindowTarget;
 
 pub(crate) const WM_INPUT_READY: u32 = 6003;
@@ -31,6 +31,8 @@ pub(crate) struct InputDispatch {
     acknowledged: AtomicU64,
     revoked: AtomicU64,
     paused: AtomicBool,
+    panel_window: AtomicUsize,
+    details_window: AtomicUsize,
     pause_requested: AtomicBool,
     rejected: AtomicU64,
     callbacks: AtomicU64,
@@ -54,6 +56,8 @@ impl InputDispatch {
             acknowledged: AtomicU64::new(0),
             revoked: AtomicU64::new(0),
             paused: AtomicBool::new(false),
+            panel_window: AtomicUsize::new(0),
+            details_window: AtomicUsize::new(0),
             pause_requested: AtomicBool::new(false),
             rejected: AtomicU64::new(0),
             callbacks: AtomicU64::new(0),
@@ -159,6 +163,31 @@ impl InputDispatch {
     }
     pub(crate) fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Release);
+    }
+    pub(crate) fn set_surface(
+        &self,
+        surface: InputSurface,
+        hwnd: windows::Win32::Foundation::HWND,
+    ) {
+        self.panel_window.store(0, Ordering::Release);
+        self.details_window.store(0, Ordering::Release);
+        match surface {
+            InputSurface::Panel => self.panel_window.store(hwnd.0 as usize, Ordering::Release),
+            InputSurface::Details => self
+                .details_window
+                .store(hwnd.0 as usize, Ordering::Release),
+            InputSurface::None => {}
+        }
+    }
+    pub(super) fn surface(&self) -> InputSurface {
+        let foreground = crate::utils::get_foreground_window().0 as usize;
+        if foreground != 0 && foreground == self.panel_window.load(Ordering::Acquire) {
+            InputSurface::Panel
+        } else if foreground != 0 && foreground == self.details_window.load(Ordering::Acquire) {
+            InputSurface::Details
+        } else {
+            InputSurface::None
+        }
     }
     pub(crate) fn take_pause_request(&self) -> bool {
         self.pause_requested.swap(false, Ordering::AcqRel) && self.target.is_live()

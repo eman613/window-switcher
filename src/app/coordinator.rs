@@ -29,6 +29,8 @@ pub(super) struct SwitchCoordinator {
     pub(super) pending: Option<PendingSnapshot>,
     pub(super) finishing: Option<SwitchKind>,
     pub(super) monitor: Option<MonitorSnapshot>,
+    pub(super) scope: crate::monitor_scope::MonitorScope,
+    pub(super) sticky: bool,
     pub(super) anchor: usize,
     pub(super) paint_dirty: bool,
     pub(super) return_focus: Option<WindowIdentity>,

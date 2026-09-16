@@ -230,6 +230,9 @@ mod tests {
                             .map(|window| {
                                 let identity = WindowIdentity::fixture(window);
                                 WindowRecord {
+                                    application: crate::app_identity::AppIdentity::plain(
+                                        Arc::from(group),
+                                    ),
                                     identity,
                                     process: ProcessMetadata {
                                         identity: identity.process,

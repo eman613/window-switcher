@@ -1,8 +1,10 @@
-use super::{
-    controls::Controls,
-    messages::{self, ViewState},
-    SearchEntry, MAX_QUERY_UNITS,
-};
+//! Shared native list surface; search and details retain their own session models.
+mod controls;
+mod list;
+pub(crate) mod messages;
+pub(crate) use list::label;
+
+use self::{controls::Controls, messages::ViewState};
 use crate::{
     config::Config,
     layout::MonitorSnapshot,
@@ -16,26 +18,32 @@ use std::{cell::Cell, sync::Arc};
 use windows::{
     core::{w, HSTRING},
     Win32::{
-        Foundation::{COLORREF, HWND, LPARAM, WPARAM},
+        Foundation::{COLORREF, HWND},
         Graphics::Gdi::HBRUSH,
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Accessibility::NotifyWinEvent,
             Input::KeyboardAndMouse::{EnableWindow, SetFocus},
             WindowsAndMessaging::*,
         },
     },
 };
 
-static CLASS: OnceCell<u16> = OnceCell::new();
-const CLASS_NAME: windows::core::PCWSTR = w!("WindowSwitcher.Search");
+static SEARCH_CLASS: OnceCell<u16> = OnceCell::new();
+static DETAILS_CLASS: OnceCell<u16> = OnceCell::new();
+pub(crate) const MAX_QUERY_UNITS: usize = 256;
 
-pub(super) struct ViewEvents {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewKind {
+    Search,
+    Details,
+}
+
+pub(crate) struct ViewEvents {
     pub flags: u32,
     pub accept: Option<(u64, usize)>,
 }
 
-pub(super) struct SearchWindow {
+pub(crate) struct PickerWindow {
     pub hwnd: HWND,
     state: Option<Box<ViewState>>,
     controls: Option<Controls>,
@@ -43,15 +51,32 @@ pub(super) struct SearchWindow {
     text: Text,
 }
 
-impl SearchWindow {
-    pub(super) fn create(owner: HWND, target: Arc<WindowTarget>, text: Text) -> Result<Self> {
+impl PickerWindow {
+    pub(crate) fn create(
+        owner: HWND,
+        target: Arc<WindowTarget>,
+        text: Text,
+        kind: ViewKind,
+    ) -> Result<Self> {
         let module = unsafe { GetModuleHandleW(None) }?;
-        CLASS.get_or_try_init(|| -> Result<u16> {
+        let (class, class_name, title) = match kind {
+            ViewKind::Search => (
+                &SEARCH_CLASS,
+                w!("WindowSwitcher.Search"),
+                text.search_label(),
+            ),
+            ViewKind::Details => (
+                &DETAILS_CLASS,
+                w!("WindowSwitcher.Details"),
+                text.details_label(),
+            ),
+        };
+        class.get_or_try_init(|| -> Result<u16> {
             let class = WNDCLASSW {
                 lpfnWndProc: Some(messages::window_proc),
                 hInstance: module.into(),
                 hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }?,
-                lpszClassName: CLASS_NAME,
+                lpszClassName: class_name,
                 ..Default::default()
             };
             let atom = unsafe { RegisterClassW(&class) };
@@ -64,8 +89,10 @@ impl SearchWindow {
         })?;
         let state = Box::new(ViewState {
             target,
+            kind,
             edit: Cell::new(HWND::default()),
             list: Cell::new(HWND::default()),
+            back: Cell::new(HWND::default()),
             visible: Cell::new(false),
             busy: Cell::new(true),
             composing: Cell::new(false),
@@ -80,8 +107,8 @@ impl SearchWindow {
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
-                CLASS_NAME,
-                &HSTRING::from(text.search_label()),
+                class_name,
+                &HSTRING::from(title),
                 WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
                 0,
                 0,
@@ -112,14 +139,14 @@ impl SearchWindow {
     fn controls(&self) -> &Controls {
         self.controls.as_ref().unwrap()
     }
-    pub(super) fn visible(&self) -> bool {
+    pub(crate) fn visible(&self) -> bool {
         self.state().visible.get()
     }
-    pub(super) fn composing(&self) -> bool {
+    pub(crate) fn composing(&self) -> bool {
         self.state().composing.get()
     }
 
-    pub(super) fn position(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
+    pub(crate) fn position(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
         let area = monitor.available;
         let width = (640 * monitor.dpi / 96) as i32;
         let height = (440 * monitor.dpi / 96) as i32;
@@ -145,9 +172,11 @@ impl SearchWindow {
         )
     }
 
-    pub(super) fn show(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
+    pub(crate) fn show(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
         self.position(config, monitor)?;
-        unsafe { SetWindowTextW(self.controls().edit, w!("")) }?;
+        if self.state().kind == ViewKind::Search {
+            unsafe { SetWindowTextW(self.controls().edit, w!("")) }?;
+        }
         self.state().flags.set(0);
         self.state().composing.set(false);
         self.state().visible.set(true);
@@ -158,7 +187,7 @@ impl SearchWindow {
         self.focus()
     }
 
-    pub(super) fn focus(&self) -> Result<()> {
+    pub(crate) fn focus(&self) -> Result<()> {
         set_foreground_window(self.hwnd, || {
             self.visible() && self.state().target.is_live()
         });
@@ -166,11 +195,11 @@ impl SearchWindow {
             get_foreground_window() == self.hwnd,
             "search stage=focus denied"
         );
-        let _ = unsafe { SetFocus(Some(self.controls().edit)) };
+        let _ = unsafe { SetFocus(Some(self.state().focus_target())) };
         Ok(())
     }
 
-    pub(super) fn hide(&self) {
+    pub(crate) fn hide(&self) {
         self.state().visible.set(false);
         self.state().accept.set(None);
         self.state().flags.set(0);
@@ -178,22 +207,24 @@ impl SearchWindow {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
             SendMessageW(self.controls().list, LB_RESETCONTENT, None, None);
-            if let Err(error) = SetWindowTextW(self.controls().edit, w!("")) {
-                warn!("search stage=clear-input code={:#x}", error.code().0);
+            if self.state().kind == ViewKind::Search {
+                if let Err(error) = SetWindowTextW(self.controls().edit, w!("")) {
+                    warn!("search stage=clear-input code={:#x}", error.code().0);
+                }
             }
         }
     }
 
-    pub(super) fn take_events(&self) -> ViewEvents {
+    pub(crate) fn take_events(&self) -> ViewEvents {
         ViewEvents {
             flags: self.state().flags.replace(0),
             accept: self.state().accept.take(),
         }
     }
-    pub(super) fn layout(&self) -> Result<()> {
+    pub(crate) fn layout(&self) -> Result<()> {
         self.controls().layout(self.hwnd, self.dpi)
     }
-    pub(super) fn query(&self) -> Result<String> {
+    pub(crate) fn query(&self) -> Result<String> {
         let length = unsafe { GetWindowTextLengthW(self.controls().edit) } as usize;
         ensure!(
             length <= MAX_QUERY_UNITS,
@@ -204,14 +235,14 @@ impl SearchWindow {
         ensure!(copied == length, "search stage=query incomplete-read");
         Ok(String::from_utf16_lossy(&units[..copied]))
     }
-    pub(super) fn selected(&self) -> Option<usize> {
+    pub(crate) fn selected(&self) -> Option<usize> {
         let index = unsafe { SendMessageW(self.controls().list, LB_GETCURSEL, None, None) }.0;
         (index >= 0).then_some(index as usize)
     }
-    pub(super) fn status(&self, value: &str) -> Result<()> {
+    pub(crate) fn status(&self, value: &str) -> Result<()> {
         unsafe {
             SetWindowTextW(self.controls().status, &HSTRING::from(value))?;
-            NotifyWinEvent(
+            windows::Win32::UI::Accessibility::NotifyWinEvent(
                 EVENT_OBJECT_NAMECHANGE,
                 self.controls().status,
                 OBJID_CLIENT.0,
@@ -220,7 +251,7 @@ impl SearchWindow {
         }
         Ok(())
     }
-    pub(super) fn pending(&self) -> Result<()> {
+    pub(crate) fn pending(&self) -> Result<()> {
         self.state().busy.set(true);
         self.state().accept.set(None);
         unsafe {
@@ -228,63 +259,13 @@ impl SearchWindow {
         }
         self.status(self.text.search_loading())
     }
-    pub(super) fn failure(&self) -> Result<()> {
+    pub(crate) fn failure(&self) -> Result<()> {
         self.pending()?;
         self.status(self.text.search_failure())
     }
-
-    pub(super) fn replace(
-        &self,
-        entries: &[SearchEntry],
-        total: usize,
-        selected: usize,
-        epoch: u64,
-    ) -> Result<()> {
-        let list = self.controls().list;
-        self.state().busy.set(true);
-        unsafe {
-            SendMessageW(list, WM_SETREDRAW, Some(WPARAM(0)), None);
-        }
-        let result = (|| -> Result<()> {
-            unsafe {
-                SendMessageW(list, LB_RESETCONTENT, None, None);
-            }
-            for entry in entries {
-                let label = HSTRING::from(entry.label());
-                let index = unsafe {
-                    SendMessageW(
-                        list,
-                        LB_ADDSTRING,
-                        None,
-                        Some(LPARAM(label.as_ptr() as isize)),
-                    )
-                }
-                .0;
-                ensure!(index >= 0, "search stage=populate-list allocation-failed");
-            }
-            if !entries.is_empty() {
-                let index =
-                    unsafe { SendMessageW(list, LB_SETCURSEL, Some(WPARAM(selected)), None) }.0;
-                ensure!(index >= 0, "search stage=selection invalid-index");
-            }
-            Ok(())
-        })();
-        unsafe {
-            SendMessageW(list, WM_SETREDRAW, Some(WPARAM(1)), None);
-            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, true);
-        }
-        result?;
-        self.state().epoch.set(epoch);
-        self.state().accept.set(None);
-        self.state().busy.set(false);
-        unsafe {
-            let _ = EnableWindow(list, !entries.is_empty());
-        }
-        self.status(&self.text.search_count(entries.len(), total))
-    }
 }
 
-impl Drop for SearchWindow {
+impl Drop for PickerWindow {
     fn drop(&mut self) {
         self.state().visible.set(false);
         if let Err(error) = unsafe { DestroyWindow(self.hwnd) } {

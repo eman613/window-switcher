@@ -175,12 +175,16 @@ impl Scan {
         if self.text_bytes > TEXT_LIMIT {
             return;
         }
-        self.groups.entry(group).or_default().push(WindowRecord {
-            identity,
-            process,
-            title,
-            minimized,
-        });
+        self.groups
+            .entry(group.clone())
+            .or_default()
+            .push(WindowRecord {
+                application: crate::app_identity::AppIdentity::plain(group),
+                identity,
+                process,
+                title,
+                minimized,
+            });
     }
 
     pub(super) fn finish(self) -> Result<WindowSnapshot> {

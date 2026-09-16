@@ -69,6 +69,30 @@ impl Text {
     pub(crate) fn search_label(self) -> &'static str {
         self.choose("搜索窗口", "Search windows")
     }
+    pub(crate) fn details_label(self) -> &'static str {
+        self.choose("应用窗口", "Application windows")
+    }
+    pub(crate) fn details_back(self) -> &'static str {
+        self.choose("返回应用列表", "Back to applications")
+    }
+    pub(crate) fn details_status(self, count: usize) -> String {
+        if count == 0 {
+            return self
+                .choose(
+                    "没有可用窗口。请返回应用列表。",
+                    "No available windows. Return to applications.",
+                )
+                .into();
+        }
+        if self.chinese {
+            format!("{count} 个窗口 · Enter 切换 · Esc 返回")
+        } else {
+            format!("{count} windows · Enter to switch · Escape to go back")
+        }
+    }
+    pub(crate) fn untitled_window(self) -> &'static str {
+        self.choose("无标题窗口", "Untitled window")
+    }
     pub(crate) fn search_results_label(self) -> &'static str {
         self.choose("窗口结果", "Window results")
     }

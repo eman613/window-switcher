@@ -1,20 +1,21 @@
 //! Search owns a native text surface and one cancellable offline matcher.
-mod controls;
 mod matcher;
-mod messages;
 mod service;
-mod window;
 
 use crate::{
-    config::Config, layout::MonitorSnapshot, localization::Text,
-    utils::window_identity::WindowIdentity, window_snapshot::WindowSnapshot,
+    config::Config,
+    layout::MonitorSnapshot,
+    localization::Text,
+    picker::{messages, PickerWindow, ViewKind},
+    utils::window_identity::WindowIdentity,
+    window_snapshot::WindowSnapshot,
     window_target::WindowTarget,
 };
 use anyhow::Result;
 use std::sync::Arc;
 use windows::Win32::Foundation::HWND;
 
-pub(crate) const MAX_QUERY_UNITS: usize = 256;
+pub(crate) use crate::picker::MAX_QUERY_UNITS;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SearchEntry {
@@ -26,16 +27,7 @@ pub(crate) struct SearchEntry {
 
 impl SearchEntry {
     fn label(&self) -> String {
-        format!("{} — {}", self.title, self.app)
-            .chars()
-            .map(|character| {
-                if character.is_control() {
-                    ' '
-                } else {
-                    character
-                }
-            })
-            .collect()
+        crate::picker::label(&format!("{} — {}", self.title, self.app))
     }
 }
 
@@ -50,7 +42,8 @@ pub(crate) enum SearchAction {
 }
 
 pub(crate) struct SearchSession {
-    window: window::SearchWindow,
+    window: PickerWindow,
+    text: Text,
     service: service::SearchService,
     source: Option<Arc<WindowSnapshot>>,
     results: Vec<SearchEntry>,
@@ -69,7 +62,8 @@ impl SearchSession {
         text: Text,
     ) -> Result<Self> {
         Ok(Self {
-            window: window::SearchWindow::create(owner, target.clone(), text)?,
+            window: PickerWindow::create(owner, target.clone(), text, ViewKind::Search)?,
+            text,
             service: service::SearchService::start(config, target)?,
             source: None,
             results: Vec::new(),
@@ -193,8 +187,17 @@ impl SearchSession {
                         .position(|entry| entry.identity == identity)
                 })
                 .unwrap_or(0);
+            self.window.replace(
+                &result
+                    .entries
+                    .iter()
+                    .map(SearchEntry::label)
+                    .collect::<Vec<_>>(),
+                selected,
+                generation,
+            )?;
             self.window
-                .replace(&result.entries, result.total, selected, generation)?;
+                .status(&self.text.search_count(result.entries.len(), result.total))?;
             self.results = result.entries;
             self.pending = false;
             debug!(

@@ -64,7 +64,8 @@ impl App {
         let Some(target) = ordered.get(index).copied() else {
             return;
         };
-        let filter = WindowFilter::from_config(&self.config, SwitchKind::Windows);
+        let filter = WindowFilter::from_config(&self.config, SwitchKind::Windows)
+            .with_scope(self.switching.scope);
         if filter.allows(HWND(target.window as _)).is_none() {
             return;
         }
