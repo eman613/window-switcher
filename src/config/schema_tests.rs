@@ -52,6 +52,11 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ("switch-apps", "blacklist", "Game.EXE", "bad\0.exe"),
         ("input", "unknown_foreground", "handle", "ignore"),
         ("input", "injected_events", "passthrough", "ignore"),
+        ("input", "paused", "yes", "maybe"),
+        ("input", "pause_hotkey", "ctrl+f10", "shift+f10"),
+        ("switch-windows", "order", "mru", "alphabetical"),
+        ("switch-apps", "order", "mru", "alphabetical"),
+        ("behavior", "mru_limit", "512", "513"),
         ("search", "enable", "yes", "maybe"),
         ("search", "hotkey", "ctrl+f9", "shift+space"),
         ("search", "match", "contains", "regex"),
@@ -121,7 +126,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ]);
     }
     let template = document::parse_ini(DEFAULT_CONFIG).unwrap();
-    assert_eq!(SETTINGS.len(), 99);
+    assert_eq!(SETTINGS.len(), 104);
     assert_eq!(cases.len(), SETTINGS.len());
     assert_eq!(
         template

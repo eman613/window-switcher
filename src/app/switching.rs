@@ -1,7 +1,7 @@
 use super::{coordinator::PendingSnapshot, navigation, App, AppEntry, SwitchAppsState};
 use crate::{
-    badge::BadgeStyle, icon_cache::IconKey, keyboard::state::SwitchKind, layout::MonitorSnapshot,
-    utils::get_foreground_window, window_snapshot::WindowSnapshot,
+    badge::BadgeStyle, config::SwitchOrder, icon_cache::IconKey, keyboard::state::SwitchKind,
+    layout::MonitorSnapshot, utils::get_foreground_window, window_snapshot::WindowSnapshot,
 };
 use anyhow::{ensure, Result};
 use indexmap::IndexMap;
@@ -165,10 +165,25 @@ impl App {
 
     fn apply_app_snapshot(&mut self, snapshot: WindowSnapshot) -> Result<()> {
         let old = self.switch_apps_state.take();
+        let mru = self.config.switch_apps_order == SwitchOrder::Mru;
         let selected = old
             .as_ref()
             .and_then(|state| state.apps.get(state.index))
-            .map(|entry| entry.key.group.clone());
+            .map(|entry| entry.key.group.clone())
+            .or_else(|| {
+                if !mru || old.is_some() {
+                    return None;
+                }
+                snapshot
+                    .groups
+                    .iter()
+                    .find(|(_, records)| {
+                        records
+                            .iter()
+                            .any(|record| record.identity.window == self.switching.anchor)
+                    })
+                    .map(|(group, _)| group.clone())
+            });
         let old_index = old.as_ref().map_or(0, |state| state.index);
         let old_icons: IndexMap<_, _> = old
             .as_ref()
@@ -196,7 +211,7 @@ impl App {
             let Some(first) = windows.first() else {
                 continue;
             };
-            let record = if first.minimized {
+            let record = if first.minimized && !mru {
                 windows.last().unwrap()
             } else {
                 first

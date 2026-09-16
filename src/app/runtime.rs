@@ -110,6 +110,8 @@ pub(super) fn run(
         target.clone(),
         loaded.config.metrics_enabled,
     ));
+    input.set_paused(loaded.config.input_paused);
+    info!("pause stage=initial paused={}", loaded.config.input_paused);
     let lifecycle = super::lifecycle::Lifecycle::new(instance, child, loaded);
     lifecycle.attach(target.clone());
     let replacement = lifecycle.is_replacement();
@@ -120,6 +122,7 @@ pub(super) fn run(
             painter,
             accessibility,
             startup,
+            pause: crate::pause::PauseControl::new(loaded.path.clone(), target.clone()),
             config: loaded.config.clone(),
             trayicon: loaded.config.trayicon.then(TrayIcon::create).transpose()?,
             config_watcher: None,
@@ -516,6 +519,7 @@ mod tests {
                 switch_windows_state: Default::default(),
                 switch_apps_state: None,
                 search: None,
+                pause: crate::pause::PauseControl::new(Default::default(), target.clone()),
                 snapshots,
                 icons,
                 remembered_icons: Default::default(),

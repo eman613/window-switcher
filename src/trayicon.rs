@@ -1,5 +1,5 @@
 use crate::{
-    app::{IDM_CONFIGURE, IDM_EXIT, IDM_STARTUP, NAME, WM_USER_TRAYICON},
+    app::{IDM_CONFIGURE, IDM_EXIT, IDM_PAUSE, IDM_STARTUP, NAME, WM_USER_TRAYICON},
     localization::Text,
     startup::StartupState,
     utils::to_wstring,
@@ -87,6 +87,8 @@ impl TrayIcon {
         &mut self,
         startup: StartupState,
         busy: bool,
+        paused: bool,
+        pause_busy: bool,
         text: Text,
     ) -> Result<Option<u32>> {
         let hwnd = self.data.hWnd;
@@ -95,7 +97,7 @@ impl TrayIcon {
             .ok()
             .context("trayicon stage=foreground")?;
         unsafe { GetCursorPos(&mut cursor) }?;
-        let menu = self.create_menu(startup, busy, text)?;
+        let menu = self.create_menu(startup, busy, paused, pause_busy, text)?;
         unsafe { SetLastError(ERROR_SUCCESS) };
         let command = unsafe {
             TrackPopupMenu(
@@ -117,11 +119,23 @@ impl TrayIcon {
         Ok((command != 0).then_some(command))
     }
 
-    fn create_menu(&self, startup: StartupState, busy: bool, text: Text) -> Result<Menu> {
+    fn create_menu(
+        &self,
+        startup: StartupState,
+        busy: bool,
+        paused: bool,
+        pause_busy: bool,
+        text: Text,
+    ) -> Result<Menu> {
         let menu = Menu(unsafe { CreatePopupMenu() }?);
         let configure = to_wstring(text.configure());
         let startup_text = to_wstring(text.startup(startup, busy));
         let exit = to_wstring(text.exit());
+        let pause_text = to_wstring(text.pause(paused, pause_busy));
+        let mut pause_flags = if paused { MF_CHECKED } else { MF_UNCHECKED };
+        if pause_busy {
+            pause_flags |= MF_GRAYED;
+        }
         let mut flags = if matches!(
             startup,
             StartupState::Ready(true) | StartupState::Saved(true)
@@ -145,6 +159,12 @@ impl TrayIcon {
                 MF_STRING | flags,
                 IDM_STARTUP as usize,
                 PCWSTR(startup_text.as_ptr()),
+            )?;
+            AppendMenuW(
+                menu.0,
+                MF_STRING | pause_flags,
+                IDM_PAUSE as usize,
+                PCWSTR(pause_text.as_ptr()),
             )?;
             AppendMenuW(menu.0, MF_STRING, IDM_EXIT as usize, PCWSTR(exit.as_ptr()))?;
         }

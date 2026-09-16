@@ -81,8 +81,8 @@ impl HookContext {
         let decision = self.machine.handle(
             key,
             InputPermissions {
-                windows: self.foreground.allows_windows(),
-                apps: self.foreground.allows_apps(),
+                windows: !self.dispatch.paused() && self.foreground.allows_windows(),
+                apps: !self.dispatch.paused() && self.foreground.allows_apps(),
             },
             self.dispatch.acknowledged(),
             self.dispatch.revoked(),

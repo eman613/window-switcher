@@ -15,6 +15,7 @@ impl App {
             return;
         }
         self.poll_feedback();
+        self.poll_pause();
         self.switching.paint_dirty |= self.painter.poll_fonts();
         if self.diagnostics.tick() {
             self.input.log_summary();
@@ -84,6 +85,7 @@ impl App {
                 self.pump_switches()?;
             }
             InputAction::Cancel => self.complete_switch(),
+            InputAction::TogglePause => self.toggle_pause()?,
         }
         Ok(())
     }

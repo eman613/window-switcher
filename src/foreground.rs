@@ -1,6 +1,6 @@
 use crate::{
     config::{Config, ForegroundPolicy},
-    process_metadata::ProcessMetadataCache,
+    process_metadata::{ProcessIdentity, ProcessMetadataCache},
     utils::{get_foreground_window, get_window_pid},
     window_snapshot::lifetimes::WindowLifetimes,
 };
@@ -115,18 +115,25 @@ impl ForegroundStatus {
     }
 
     /// Only the snapshot worker calls this. Native event callbacks never query processes.
-    pub(crate) fn resolve_pending(&self, cache: &mut ProcessMetadataCache, resolved: &mut u64) {
+    pub(crate) fn resolve_pending(
+        &self,
+        cache: &mut ProcessMetadataCache,
+        resolved: &mut u64,
+    ) -> Option<(HWND, ProcessIdentity)> {
         let version = self.version.load(Ordering::Acquire);
         if *resolved == version {
-            return;
+            return None;
         }
         let window = self.requested.load(Ordering::Acquire);
         let metadata = cache.lookup(get_window_pid(HWND(window as _)));
         if self.version.load(Ordering::Acquire) != version
             || self.requested.load(Ordering::Acquire) != window
         {
-            return;
+            return None;
         }
+        let identity = metadata
+            .as_ref()
+            .map(|metadata| (HWND(window as _), metadata.identity));
         let snapshot = metadata.map(|metadata| Snapshot {
             window,
             version,
@@ -137,6 +144,7 @@ impl ForegroundStatus {
         });
         *self.snapshot.lock() = snapshot;
         *resolved = version;
+        identity
     }
 }
 

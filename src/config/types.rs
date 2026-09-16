@@ -30,3 +30,4 @@ choices!(RenderScale { Auto => "auto", One => "1", Two => "2", Four => "4", Six 
 choices!(Theme { Auto => "auto", Light => "light", Dark => "dark" });
 choices!(AppNameMode { Off => "off", Selected => "selected" });
 choices!(SearchMatch { Fuzzy => "fuzzy", Contains => "contains", Prefix => "prefix" });
+choices!(SwitchOrder { Existing => "existing", Mru => "mru" });

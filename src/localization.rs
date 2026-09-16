@@ -54,6 +54,15 @@ impl Text {
     pub(crate) fn exit(self) -> &'static str {
         self.choose("退出", "Exit")
     }
+    pub(crate) fn pause(self, paused: bool, busy: bool) -> &'static str {
+        if busy {
+            self.choose("正在保存暂停设置…", "Saving pause setting…")
+        } else if paused {
+            self.choose("恢复快捷键", "Resume shortcuts")
+        } else {
+            self.choose("暂停快捷键", "Pause shortcuts")
+        }
+    }
     pub(crate) fn switcher_name(self) -> &'static str {
         self.choose("应用切换器", "Application switcher")
     }

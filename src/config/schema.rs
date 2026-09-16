@@ -8,8 +8,8 @@ use ini::Ini;
 use log::LevelFilter;
 
 use super::{
-    parsers::*, types::*, Hotkey, SearchFields, SEARCH_HOTKEY_ID, SWITCH_APPS_HOTKEY_ID,
-    SWITCH_WINDOWS_HOTKEY_ID,
+    parsers::*, types::*, Hotkey, SearchFields, PAUSE_HOTKEY_ID, SEARCH_HOTKEY_ID,
+    SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID,
 };
 
 pub(super) struct Setting {
@@ -51,6 +51,7 @@ settings! {
     auto_restart: bool => ("", "auto_restart", "yes", boolean, "App::start_services");
     restart_delay_ms: u32 => ("", "restart_delay_ms", "1000", |v| integer(v, 200, 10000), "ConfigWatcher::start");
     switch_windows_enable: bool => ("switch-windows", "enable", "yes", boolean, "Config::to_hotkeys");
+    switch_windows_order: SwitchOrder => ("switch-windows", "order", "existing", str::parse::<SwitchOrder>, "SnapshotService/cycle_windows");
     switch_windows_hotkey: Vec<Hotkey> => ("switch-windows", "hotkey", "alt+`", |v| hotkeys(v, SWITCH_WINDOWS_HOTKEY_ID, "switch windows", "alt+`"), "KeyboardListener");
     switch_windows_blacklist: HashSet<String> => ("switch-windows", "blacklist", "", blacklist, "ForegroundWatcher::init");
     switch_windows_ignore_minimal: bool => ("switch-windows", "ignore_minimal", "no", boolean, "WindowFilter::from_config");
@@ -63,6 +64,7 @@ settings! {
     switch_windows_exclude_titles: HashSet<String> => ("switch-windows", "exclude_titles", "Windows Input Experience", titles, "WindowFilter::allows");
     switch_windows_exclude_processes: HashSet<String> => ("switch-windows", "exclude_processes", "", blacklist, "WindowFilter::allows");
     switch_apps_enable: bool => ("switch-apps", "enable", "no", boolean, "Config::to_hotkeys");
+    switch_apps_order: SwitchOrder => ("switch-apps", "order", "existing", str::parse::<SwitchOrder>, "SnapshotService");
     switch_apps_hotkey: Vec<Hotkey> => ("switch-apps", "hotkey", "alt+tab", |v| hotkeys(v, SWITCH_APPS_HOTKEY_ID, "switch apps", "alt+tab"), "KeyboardListener");
     switch_apps_ignore_minimal: bool => ("switch-apps", "ignore_minimal", "no", boolean, "WindowFilter::from_config");
     switch_apps_override_icons: IndexMap<String, String> => ("switch-apps", "override_icons", "", overrides, "IconLoader::native");
@@ -84,6 +86,9 @@ settings! {
     switch_apps_exclude_processes: HashSet<String> => ("switch-apps", "exclude_processes", "", blacklist, "WindowFilter::allows");
     unknown_foreground: ForegroundPolicy => ("input", "unknown_foreground", "passthrough", str::parse::<ForegroundPolicy>, "ForegroundStatus::allows");
     injected_events: InjectedPolicy => ("input", "injected_events", "handle", str::parse::<InjectedPolicy>, "KeyboardListener");
+    input_paused: bool => ("input", "paused", "no", boolean, "InputDispatch/PauseControl");
+    pause_hotkey: Option<Hotkey> => ("input", "pause_hotkey", "", |v: &str| if v.is_empty() { Ok(None) } else { Hotkey::create(PAUSE_HOTKEY_ID, "pause", v).map(Some) }, "KeyboardListener");
+    mru_limit: u32 => ("behavior", "mru_limit", "64", |v| integer(v, 16, 512), "Mru");
     search_enable: bool => ("search", "enable", "no", boolean, "Config::to_hotkeys");
     search_hotkey: Hotkey => ("search", "hotkey", "ctrl+space", |v| Hotkey::create(SEARCH_HOTKEY_ID, "search", v), "KeyboardListener");
     search_match: SearchMatch => ("search", "match", "fuzzy", str::parse::<SearchMatch>, "SearchService");
@@ -178,6 +183,6 @@ pub(super) fn load(ini: &Ini) -> Result<Config> {
         }
     }
     crate::layout::LayoutOptions::from_config(&configuration).validate()?;
-    super::search::validate_hotkeys(&configuration)?;
+    super::bindings::validate(&configuration)?;
     Ok(configuration)
 }

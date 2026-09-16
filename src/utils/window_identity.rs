@@ -66,8 +66,11 @@ impl WindowIdentity {
     }
 
     pub(crate) fn is_current(self, lifetimes: &WindowLifetimes) -> bool {
+        self.has_current_lifetime(lifetimes) && Self::capture(self.hwnd(), lifetimes) == Some(self)
+    }
+
+    pub(crate) fn has_current_lifetime(self, lifetimes: &WindowLifetimes) -> bool {
         lifetimes.matches(self.window, self.lifetime)
-            && Self::capture(self.hwnd(), lifetimes) == Some(self)
     }
 }
 

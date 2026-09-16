@@ -36,6 +36,7 @@ mod input;
 mod lifecycle;
 mod navigation;
 mod panel;
+mod pause;
 mod pointer;
 mod runtime;
 mod search;
@@ -52,6 +53,7 @@ pub(super) const WM_SCENE_INVALIDATED: u32 = 6012;
 pub const IDM_EXIT: u32 = 1;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
+pub const IDM_PAUSE: u32 = 4;
 
 pub fn start(loaded: &LoadedConfig) -> Result<()> {
     let instance = crate::utils::SingleInstance::create(crate::utils::INSTANCE_NAME)?;
@@ -70,6 +72,7 @@ struct App {
     is_admin: bool,
     trayicon: Option<TrayIcon>,
     startup: Startup,
+    pause: crate::pause::PauseControl,
     config: Config,
     config_watcher: Option<ConfigWatcher>,
     switch_windows_state: SwitchWindowsState,
@@ -102,9 +105,13 @@ impl App {
             WM_USER_TRAYICON => {
                 if matches!(lparam.0 as u32, WM_LBUTTONUP | WM_RBUTTONUP) {
                     if let Some(trayicon) = self.trayicon.as_mut() {
-                        if let Some(command) =
-                            trayicon.show(self.startup.state, self.startup.busy(), self.text)?
-                        {
+                        if let Some(command) = trayicon.show(
+                            self.startup.state,
+                            self.startup.busy(),
+                            self.config.input_paused,
+                            self.pause.busy(),
+                            self.text,
+                        )? {
                             self.handle_command(command)?;
                         }
                     }
@@ -124,6 +131,7 @@ impl App {
         match command {
             IDM_EXIT => self.request_exit(),
             IDM_STARTUP => self.startup.toggle()?,
+            IDM_PAUSE => self.toggle_pause()?,
             IDM_CONFIGURE => {
                 if let Err(error) = edit_config_file() {
                     self.report_config_error(&format!("{error:#}"));

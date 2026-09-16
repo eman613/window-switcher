@@ -2,6 +2,7 @@ use crate::{
     config::Config,
     foreground::ForegroundStatus,
     keyboard::state::SwitchKind,
+    mru::Mru,
     process_metadata::{ProcessMetadata, ProcessMetadataCache},
     utils::{com::ComApartment, window_identity::WindowIdentity},
     window_target::WindowTarget,
@@ -70,8 +71,12 @@ impl SnapshotService {
                 };
                 let mut metadata = ProcessMetadataCache::new(&configuration);
                 let mut foreground_version = 0;
+                let mut mru = Mru::new(&configuration);
                 while !shared.closed() && target.is_live() {
-                    foreground.resolve_pending(&mut metadata, &mut foreground_version);
+                    mru.observe_foreground(
+                        foreground.resolve_pending(&mut metadata, &mut foreground_version),
+                        &registry,
+                    );
                     let Some((generation, kind)) = shared.receive(Duration::from_millis(20)) else {
                         continue;
                     };
@@ -89,11 +94,17 @@ impl SnapshotService {
                                 &registry,
                                 Duration::from_millis(configuration.snapshot_budget_ms.into()),
                                 |metadata| {
-                                    foreground.resolve_pending(metadata, &mut foreground_version);
+                                    mru.observe_foreground(
+                                        foreground
+                                            .resolve_pending(metadata, &mut foreground_version),
+                                        &registry,
+                                    );
                                     !shared.current(generation) || !target.is_live()
                                 },
                             ) {
-                                return scan.finish().map(Some);
+                                let mut snapshot = scan.finish()?;
+                                mru.order(&mut snapshot, kind, &configuration);
+                                return Ok(Some(snapshot));
                             }
                             thread::yield_now();
                         }

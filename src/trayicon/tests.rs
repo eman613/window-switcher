@@ -16,10 +16,11 @@ fn native_menu_preserves_ids_chinese_labels_checks_and_pending_states() {
         (StartupState::Pending, true, false, true),
         (StartupState::Failed, false, false, true),
     ] {
-        let menu = tray.create_menu(state, busy, text).unwrap();
+        let menu = tray.create_menu(state, busy, false, false, text).unwrap();
         for (position, (id, expected)) in [
             (IDM_CONFIGURE, "编辑配置"),
             (IDM_STARTUP, text.startup(state, busy)),
+            (IDM_PAUSE, "暂停快捷键"),
             (IDM_EXIT, "退出"),
         ]
         .into_iter()
@@ -51,6 +52,8 @@ fn repeated_menu_creation_releases_native_handles_and_owned_icon() {
             .create_menu(
                 StartupState::Ready(false),
                 false,
+                false,
+                false,
                 Text::new(Language::English),
             )
             .unwrap();
@@ -61,6 +64,26 @@ fn repeated_menu_creation_releases_native_handles_and_owned_icon() {
     let icon = tray.data.hIcon;
     drop(tray);
     assert!(unsafe { GetIconInfo(icon, &mut ICONINFO::default()) }.is_err());
+}
+
+#[test]
+fn pause_menu_reflects_committed_state_and_disables_pending_save() {
+    let tray = TrayIcon::create().unwrap();
+    let text = Text::new(Language::Chinese);
+    for (paused, busy) in [(false, false), (true, false), (false, true), (true, true)] {
+        let menu = tray
+            .create_menu(StartupState::Ready(false), false, paused, busy, text)
+            .unwrap();
+        let flags = unsafe { GetMenuState(menu.0, 2, MF_BYPOSITION) };
+        assert_eq!(flags & MF_CHECKED.0 != 0, paused);
+        assert_eq!(flags & MF_GRAYED.0 != 0, busy);
+        let mut label = [0; 128];
+        let count = unsafe { GetMenuStringW(menu.0, 2, Some(&mut label), MF_BYPOSITION) };
+        assert_eq!(
+            String::from_utf16(&label[..count as usize]).unwrap(),
+            text.pause(paused, busy)
+        );
+    }
 }
 
 #[test]

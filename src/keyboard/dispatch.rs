@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -30,6 +30,8 @@ pub(crate) struct InputDispatch {
     pending: Mutex<PendingInput>,
     acknowledged: AtomicU64,
     revoked: AtomicU64,
+    paused: AtomicBool,
+    pause_requested: AtomicBool,
     rejected: AtomicU64,
     callbacks: AtomicU64,
     max_callback_us: AtomicU64,
@@ -51,6 +53,8 @@ impl InputDispatch {
             }),
             acknowledged: AtomicU64::new(0),
             revoked: AtomicU64::new(0),
+            paused: AtomicBool::new(false),
+            pause_requested: AtomicBool::new(false),
             rejected: AtomicU64::new(0),
             callbacks: AtomicU64::new(0),
             max_callback_us: AtomicU64::new(0),
@@ -59,6 +63,14 @@ impl InputDispatch {
     }
 
     pub(super) fn submit(&self, event: InputEvent) -> bool {
+        if event.action == InputAction::TogglePause {
+            if !self.target.is_live() {
+                return false;
+            }
+            self.pause_requested.store(true, Ordering::Release);
+            self.target.try_post(WM_INPUT_READY);
+            return true;
+        }
         if matches!(event.action, InputAction::Cancel) && self.permits(event.session) {
             // Cancellation already has an atomic delivery path. Do not depend
             // on queue space/ownership: rejecting Escape here would forward a
@@ -137,7 +149,19 @@ impl InputDispatch {
         self.revoked.load(Ordering::Acquire)
     }
     pub(crate) fn permits(&self, session: u64) -> bool {
-        self.target.is_live() && session > self.revoked() && session > self.acknowledged()
+        !self.paused()
+            && self.target.is_live()
+            && session > self.revoked()
+            && session > self.acknowledged()
+    }
+    pub(crate) fn paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+    pub(crate) fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Release);
+    }
+    pub(crate) fn take_pause_request(&self) -> bool {
+        self.pause_requested.swap(false, Ordering::AcqRel) && self.target.is_live()
     }
     pub(super) fn is_live(&self) -> bool {
         self.target.is_live()
@@ -189,6 +213,26 @@ mod tests {
             session,
             action: InputAction::Cycle(SwitchKind::Apps, false),
         }
+    }
+
+    #[test]
+    fn recovery_has_a_separate_slot_while_paused_or_queue_contended() {
+        let queue = queue();
+        queue.set_paused(true);
+        assert!(!queue.permits(1));
+        let _held = queue.pending.lock();
+        let recovery = InputEvent {
+            session: 0,
+            action: InputAction::TogglePause,
+        };
+        assert!(queue.submit(recovery));
+        assert!(queue.submit(recovery));
+        assert!(queue.take_pause_request());
+        assert!(!queue.take_pause_request());
+        queue.set_paused(false);
+        assert!(queue.permits(1));
+        queue.target.close();
+        assert!(!queue.submit(recovery));
     }
 
     #[test]

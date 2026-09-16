@@ -6,6 +6,7 @@ use windows::core::w;
 
 use crate::utils::{get_exe_folder, RegKey};
 
+mod bindings;
 mod document;
 mod encoding;
 mod file_identity;
@@ -44,6 +45,7 @@ mod validation_tests;
 pub const SWITCH_WINDOWS_HOTKEY_ID: u32 = 1;
 pub const SWITCH_APPS_HOTKEY_ID: u32 = 2;
 pub const SEARCH_HOTKEY_ID: u32 = 3;
+pub const PAUSE_HOTKEY_ID: u32 = 4;
 #[cfg(test)]
 pub const DEFAULT_BADGE_MAX: u32 = 99;
 #[cfg(test)]
@@ -62,7 +64,7 @@ pub use schema::Config;
 pub use search::{SearchField, SearchFields};
 pub use types::{
     AppNameMode, BatteryPolicy, ForegroundPolicy, InjectedPolicy, Language, MonitorPolicy,
-    RenderScale, RunLevel, SearchMatch, StartupEnabled, Theme, WatchMode,
+    RenderScale, RunLevel, SearchMatch, StartupEnabled, SwitchOrder, Theme, WatchMode,
 };
 
 impl Config {
@@ -82,6 +84,7 @@ impl Config {
         if self.search_enable {
             hotkeys.push(&self.search_hotkey);
         }
+        hotkeys.extend(self.pause_hotkey.iter());
         hotkeys
     }
 

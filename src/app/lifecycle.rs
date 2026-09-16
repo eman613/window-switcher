@@ -66,6 +66,10 @@ impl Lifecycle {
         self.child.is_some()
     }
 
+    pub(super) fn can_change_settings(&self) -> bool {
+        self.phase == Phase::Running && !self.exit_requested && self.restart.is_none()
+    }
+
     pub(super) fn attach(&self, target: Arc<crate::window_target::WindowTarget>) {
         if let Some(child) = &self.child {
             child.attach(target);
@@ -230,7 +234,7 @@ impl App {
     }
 
     fn poll_config(&mut self) {
-        if self.startup.busy() || self.lifecycle.restart.is_some() {
+        if self.startup.busy() || self.pause.busy() || self.lifecycle.restart.is_some() {
             return;
         }
         let event = self
@@ -332,6 +336,7 @@ impl App {
     pub(super) fn request_exit(&mut self) {
         self.lifecycle.exit_requested = true;
         self.startup.cancel();
+        self.pause.cancel();
         self.config_watcher.take();
         if let Some(activation) = &self.lifecycle.activation {
             let _ = activation.request(false);

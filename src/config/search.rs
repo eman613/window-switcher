@@ -1,7 +1,5 @@
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, Result};
 use std::str::FromStr;
-
-use super::Config;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchField {
@@ -35,27 +33,9 @@ impl FromStr for SearchFields {
     }
 }
 
-pub(super) fn validate_hotkeys(config: &Config) -> Result<()> {
-    let hotkeys = config.to_hotkeys();
-    for (index, first) in hotkeys.iter().enumerate() {
-        for second in &hotkeys[index + 1..] {
-            ensure!(
-                first.id == second.id
-                    || first.get_modifier() != second.get_modifier()
-                    || first.code != second.code,
-                "启用的热键冲突：{} / {}；请为两个功能设置不同组合键，原值未修改",
-                first.name,
-                second.name
-            );
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Hotkey, SEARCH_HOTKEY_ID};
 
     #[test]
     fn fields_are_a_nonempty_valid_subset() {
@@ -68,23 +48,5 @@ mod tests {
         let fields = "title,exe".parse::<SearchFields>().unwrap();
         assert!(!fields.contains(SearchField::App));
         assert!(fields.contains(SearchField::Title) && fields.contains(SearchField::Exe));
-    }
-
-    #[test]
-    fn only_enabled_bindings_conflict_and_search_is_independent() {
-        let mut config = Config {
-            search_hotkey: Hotkey::create(SEARCH_HOTKEY_ID, "search", "alt+tab").unwrap(),
-            switch_apps_enable: true,
-            ..Default::default()
-        };
-        assert!(validate_hotkeys(&config).is_ok());
-        config.search_enable = true;
-        assert!(validate_hotkeys(&config).is_err());
-        config.switch_apps_enable = false;
-        assert!(validate_hotkeys(&config).is_ok());
-        assert!(config
-            .to_hotkeys()
-            .iter()
-            .any(|key| key.id == SEARCH_HOTKEY_ID));
     }
 }

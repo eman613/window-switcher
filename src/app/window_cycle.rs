@@ -1,5 +1,6 @@
 use super::{navigation, App, SwitchWindowsState};
 use crate::{
+    config::SwitchOrder,
     keyboard::state::SwitchKind,
     utils::set_foreground_window,
     window_snapshot::{filter::WindowFilter, WindowSnapshot},
@@ -26,14 +27,23 @@ impl App {
             return;
         }
         let mut ordered = fresh.clone();
-        let mut anchor = fresh[0];
-        let mut index = if reverse { fresh.len() - 1 } else { 1 };
+        let mru = self.config.switch_windows_order == SwitchOrder::Mru;
+        let anchor_index = if mru {
+            fresh
+                .iter()
+                .position(|identity| identity.window == anchor_window)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let mut anchor = fresh[anchor_index];
+        let mut index = navigation::cycle_index(anchor_index, fresh.len(), reverse).unwrap_or(0);
         if let Some((cached_module, cached_anchor, cached_index, cached_windows)) =
             &self.switch_windows_state.cache
         {
             if cached_module == module {
                 if self.switch_windows_state.modifier_released {
-                    if *cached_anchor != fresh[0] {
+                    if !mru && *cached_anchor != fresh[0] {
                         if let Some(previous) =
                             fresh.iter().position(|identity| identity == cached_anchor)
                         {

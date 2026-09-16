@@ -1,4 +1,6 @@
-use crate::config::{Hotkey, SEARCH_HOTKEY_ID, SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID};
+use crate::config::{
+    Hotkey, PAUSE_HOTKEY_ID, SEARCH_HOTKEY_ID, SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwitchKind {
@@ -28,6 +30,7 @@ pub(crate) enum InputAction {
     Cycle(SwitchKind, bool),
     Finish(SwitchKind),
     Cancel,
+    TogglePause,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +128,24 @@ impl InputMachine {
         {
             self.active = None;
         }
+        let repeated = self.pressed[index];
         self.pressed[index] = key.down;
+        // Recovery is independent of candidate permissions and sticky sessions.
+        // Session zero denotes a control command, delivered through its own slot.
+        if key.down
+            && self
+                .hotkeys
+                .iter()
+                .any(|hotkey| hotkey.id == PAUSE_HOTKEY_ID && self.matches_hotkey(hotkey, key))
+        {
+            return Decision {
+                consume: true,
+                event: (!repeated).then_some(InputEvent {
+                    session: 0,
+                    action: InputAction::TogglePause,
+                }),
+            };
+        }
         if let Some(gesture) = self.active.as_mut() {
             let allowed = if gesture.kind != SwitchKind::Windows {
                 permissions.apps
@@ -172,12 +192,7 @@ impl InputMachine {
             let allowed = (matches!(hotkey.id, SWITCH_APPS_HOTKEY_ID | SEARCH_HOTKEY_ID)
                 && permissions.apps)
                 || (hotkey.id == SWITCH_WINDOWS_HOTKEY_ID && permissions.windows);
-            let altgr = self.pressed[0x38 + 256] && (self.pressed[0x1d] || self.injected_control);
-            allowed
-                && !(altgr && matches!(hotkey.get_modifier(), 0x38 | 0x1d))
-                && self.modifier_pressed(hotkey.get_modifier())
-                && hotkey.code == key.scan
-                && (!matches!(key.scan, 0x47..=0x53) || key.extended)
+            allowed && self.matches_hotkey(hotkey, key)
         });
         if let Some(hotkey) = matching {
             let kind = match hotkey.id {
@@ -270,6 +285,14 @@ impl InputMachine {
         }
     }
 
+    fn matches_hotkey(&self, hotkey: &Hotkey, key: KeyInput) -> bool {
+        let altgr = self.pressed[0x38 + 256] && (self.pressed[0x1d] || self.injected_control);
+        !(altgr && matches!(hotkey.get_modifier(), 0x38 | 0x1d))
+            && self.modifier_pressed(hotkey.get_modifier())
+            && hotkey.code == key.scan
+            && (!matches!(key.scan, 0x47..=0x53) || key.extended)
+    }
+
     fn modifier_pressed(&self, modifier: u32) -> bool {
         match modifier {
             0x38 | 0x1d => self.pressed[modifier as usize] || self.pressed[modifier as usize + 256],
@@ -294,6 +317,30 @@ mod tests {
             extended,
             down,
         }
+    }
+
+    #[test]
+    fn pause_recovery_bypasses_permissions_without_repeating_or_leaking_release() {
+        let mut state = machine();
+        state
+            .hotkeys
+            .push(Hotkey::create(PAUSE_HOTKEY_ID, "pause", "ctrl+f10").unwrap());
+        let denied = InputPermissions {
+            apps: false,
+            windows: false,
+        };
+        state.handle(key(0x1d, false, true), denied, 0, 0);
+        let down = key(0x44, false, true);
+        let first = state.handle(down, denied, 0, 0);
+        assert!(first.consume);
+        assert_eq!(first.event.unwrap().action, InputAction::TogglePause);
+        state.accepted(down, first.consume);
+        assert!(state.handle(down, denied, 0, 0).event.is_none());
+        assert!(state.handle(key(0x44, false, false), denied, 0, 0).consume);
+        assert!(!state.handle(key(0x1d, false, false), denied, 0, 0).consume);
+        state.handle(key(0x38, false, true), denied, 0, 0);
+        let normal = state.handle(key(0x0f, false, true), denied, 0, 0);
+        assert!(!normal.consume && normal.event.is_none());
     }
 
     #[test]
