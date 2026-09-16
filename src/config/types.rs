@@ -29,6 +29,7 @@ choices!(InjectedPolicy { Handle => "handle", Passthrough => "passthrough" });
 choices!(RenderScale { Auto => "auto", One => "1", Two => "2", Four => "4", Six => "6" });
 choices!(Theme { Auto => "auto", Light => "light", Dark => "dark" });
 choices!(AppNameMode { Off => "off", Selected => "selected" });
+choices!(BadgeShape { Circle => "circle", Square => "square" });
 choices!(SearchMatch { Fuzzy => "fuzzy", Contains => "contains", Prefix => "prefix" });
 choices!(SwitchOrder { Existing => "existing", Mru => "mru" });
 choices!(Grouping { AppId => "app-id", Process => "process", Profile => "profile" });

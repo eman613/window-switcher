@@ -21,7 +21,22 @@ pub(crate) fn rasterize(
     height: i32,
     color: u32,
 ) -> Result<PixelImage> {
+    rasterize_at(factory, layout, width, height, color, (0.0, 0.0))
+}
+
+pub(crate) fn rasterize_at(
+    factory: &IDWriteFactory,
+    layout: &IDWriteTextLayout,
+    width: i32,
+    height: i32,
+    color: u32,
+    origin: (f32, f32),
+) -> Result<PixelImage> {
     ensure!(width > 0 && height > 0, "font stage=raster dimensions");
+    ensure!(
+        origin.0.is_finite() && origin.1.is_finite(),
+        "font stage=raster origin"
+    );
     let mut black = RenderSurface::new(width, height)?;
     let mut white = RenderSurface::new(width, height)?;
     let interop = unsafe { factory.GetGdiInterop() }?;
@@ -57,7 +72,7 @@ pub(crate) fn rasterize(
         let dc = unsafe { target.GetMemoryDC() };
         fill(dc, rectangle, colorref(background))?;
         unsafe {
-            layout.Draw(None, &renderer, 0.0, 0.0)?;
+            layout.Draw(None, &renderer, origin.0, origin.1)?;
             BitBlt(surface.dc(), 0, 0, width, height, Some(dc), 0, 0, SRCCOPY)?;
         }
     }

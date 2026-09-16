@@ -39,6 +39,59 @@ fn every_new_setting_is_read_and_range_checked() {
 }
 
 #[test]
+fn badge_shape_and_size_preserve_defaults_and_reject_invalid_values() {
+    use super::BadgeShape;
+    let defaults = Config::default();
+    assert_eq!(defaults.switch_apps_badge_shape, BadgeShape::Circle);
+    assert_eq!(defaults.switch_apps_badge_size, None);
+    for (shape, expected_shape) in [
+        ("circle", BadgeShape::Circle),
+        ("square", BadgeShape::Square),
+    ] {
+        for (size, expected_size) in [
+            ("auto", None),
+            ("16", Some(16)),
+            ("24", Some(24)),
+            ("48", Some(48)),
+        ] {
+            let ini = parse_ini(&format!(
+                "[switch-apps]\nbadge_shape={shape}\nbadge_size={size}\n"
+            ))
+            .unwrap();
+            let config = Config::load(&ini).unwrap();
+            assert_eq!(config.switch_apps_badge_shape, expected_shape);
+            assert_eq!(config.switch_apps_badge_size, expected_size);
+            assert_eq!(config.switch_apps_badge_font_size, DEFAULT_BADGE_FONT_SIZE);
+        }
+    }
+    for (key, values) in [
+        ("badge_shape", &["", "round", "ellipse", "rectangle"][..]),
+        (
+            "badge_size",
+            &[
+                "",
+                "0",
+                "15",
+                "49",
+                "-1",
+                "16.5",
+                "999999999999999999999",
+                "large",
+            ][..],
+        ),
+    ] {
+        for value in values {
+            let ini = parse_ini(&format!("[switch-apps]\n{key}={value}\n")).unwrap();
+            let error = Config::load(&ini).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(key),
+                "missing key in diagnostic: {error:#}"
+            );
+        }
+    }
+}
+
+#[test]
 fn windows_and_unc_paths_remain_literal() {
     let ini = parse_ini("[log]\npath = \\\\server\\share\\logs\\switcher.log\n[switch-apps]\noverride_icons = app.exe=\\\\server\\share\\icon.png,other.exe=D:\\Icons\\other.ico\n").unwrap();
     let config = Config::load(&ini).unwrap();

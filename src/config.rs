@@ -64,7 +64,7 @@ const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 pub use schema::Config;
 pub use search::{SearchField, SearchFields};
 pub use types::{
-    AppNameMode, BatteryPolicy, ForegroundPolicy, Grouping, InjectedPolicy, Language,
+    AppNameMode, BadgeShape, BatteryPolicy, ForegroundPolicy, Grouping, InjectedPolicy, Language,
     MonitorFilter, MonitorPolicy, RenderScale, RunLevel, SearchMatch, StartupEnabled, SwitchOrder,
     Theme, WatchMode,
 };

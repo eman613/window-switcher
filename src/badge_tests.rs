@@ -3,17 +3,23 @@ use std::{
     io::{BufWriter, Write},
     path::Path,
 };
-
-use windows::Win32::{
-    Graphics::Gdi::{
-        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetBkMode,
-        GetCurrentObject, GetTextColor, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, HBITMAP, HGDIOBJ, OBJ_FONT, SRCCOPY,
-    },
-    System::Threading::{GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS},
-};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS};
 
 use super::*;
+use crate::{font_resources::FontResources, layout::PixelRect, pixels::PixelImage};
+
+const COUNTS: [(usize, u32); 8] = [
+    (0, 99),
+    (1, 99),
+    (2, 99),
+    (8, 99),
+    (11, 99),
+    (99, 99),
+    (100, 99),
+    (10_000, 9999),
+];
+const SHAPES: [BadgeShape; 2] = [BadgeShape::Circle, BadgeShape::Square];
+const SIZES: [Option<u32>; 4] = [None, Some(16), Some(24), Some(48)];
 
 #[test]
 fn badge_count_contract_is_preserved() {
@@ -37,49 +43,110 @@ fn badge_count_contract_is_preserved() {
 
 #[test]
 fn rgb_configuration_is_converted_to_gdi_color_order() {
-    assert_eq!(rgb_colorref(0x4c7094).0, 0x94704c);
-    assert_eq!(rgb_colorref(0xffffff).0, 0xffffff);
+    assert_eq!(crate::text_raster::colorref(0x4c7094).0, 0x94704c);
+    assert_eq!(crate::text_raster::colorref(0xffffff).0, 0xffffff);
 }
 
 #[test]
-fn native_badges_are_circular_readable_and_restore_gdi_state() {
-    let mut style = BadgeStyle::from_config(&Config::default());
-    for size in [64 * 6, 96 * 6, 128 * 6] {
-        let canvas = TestCanvas::new(size, size);
-        let font = unsafe { GetCurrentObject(canvas.hdc, OBJ_FONT) };
-        let text_color = unsafe { GetTextColor(canvas.hdc) };
-        let background_mode = unsafe { GetBkMode(canvas.hdc) };
-        for font_size in [8, 12, 24] {
-            style.font_size = font_size;
-            for (count, maximum) in [(2, 99), (99, 99), (100, 99), (10_000, 9999)] {
-                canvas.clear(0xa5a5a5);
-                draw_badge(canvas.hdc, count, maximum, canvas.bounds(), style).unwrap();
-                assert_eq!(unsafe { GetCurrentObject(canvas.hdc, OBJ_FONT) }, font);
-                assert_eq!(unsafe { GetTextColor(canvas.hdc) }, text_color);
-                assert_eq!(unsafe { GetBkMode(canvas.hdc) }, background_mode);
-                assert_circle(&canvas, style, 0xa5a5a5);
+fn native_badges_fit_shapes_sizes_and_center_visible_ink() {
+    let mut cases = 0;
+    for family in [None, Some("Segoe UI"), Some("Arial")] {
+        let mut fonts = system_fonts(family);
+        for icon_size in [24, 64, 96, 128] {
+            for shape in SHAPES {
+                for size in SIZES {
+                    for font_size in [8, 12, 24] {
+                        let style = BadgeStyle {
+                            background: 0,
+                            foreground: 0xffffff,
+                            font_size,
+                            shape,
+                            size,
+                        };
+                        for (count, maximum) in COUNTS {
+                            let image = render(fonts.as_mut(), count, maximum, icon_size, style);
+                            assert_badge(&image, count, style);
+                            cases += 1;
+                        }
+                    }
+                }
             }
         }
     }
-    style.font_size = 12;
-    let canvas = TestCanvas::new(384, 384);
-    assert!(draw_badge(HDC::default(), 2, 99, canvas.bounds(), style).is_err());
+    eprintln!("badge_native_cases={cases} ink_center_tolerance_px=0.5");
+    if let Some(directory) = std::env::var_os("WINDOW_SWITCHER_BADGE_PREVIEW") {
+        export_previews(Path::new(&directory));
+    }
+}
 
-    if let Some(path) = std::env::var_os("WINDOW_SWITCHER_BADGE_PREVIEW") {
-        export_preview(Path::new(&path), style);
+#[test]
+fn supersampling_preserves_centering_after_final_downsample() {
+    let mut fonts = system_fonts(Some("Segoe UI"));
+    for icon_size in [64, 96, 128] {
+        for scale in [1, 2, 4, 6] {
+            for shape in SHAPES {
+                for size in SIZES {
+                    let style = BadgeStyle {
+                        background: 0,
+                        foreground: 0xffffff,
+                        shape,
+                        size,
+                        ..BadgeStyle::from_config(&Config::default())
+                    };
+                    for (count, maximum) in [(2, 99), (99, 99), (100, 99), (10_000, 9999)] {
+                        let image =
+                            render(fonts.as_mut(), count, maximum, icon_size * scale, style)
+                                .downsample(scale)
+                                .unwrap();
+                        assert_badge(&image, count, style);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn auto_circle_keeps_the_original_default_size_and_small_icons_are_skipped() {
+    for family in [None, Some("Segoe UI")] {
+        let mut fonts = system_fonts(family);
+        let style = BadgeStyle::from_config(&Config::default());
+        let image = render(fonts.as_mut(), 2, 99, 64, style);
+        let bounds = pixel_bounds(&image, |pixel| pixel[3] != 0).unwrap();
+        assert_eq!((bounds.width(), bounds.height()), (24, 24));
+        assert_eq!((bounds.left, bounds.top), (38, 2));
+        let tiny = render(fonts.as_mut(), 2, 99, 3, style);
+        assert!(tiny.data.iter().all(|value| *value == 0));
     }
 }
 
 #[test]
 #[ignore = "process-wide GDI counters require an isolated serial process"]
 fn native_badge_resources_remain_bounded() {
-    let style = BadgeStyle::from_config(&Config::default());
-    let canvas = TestCanvas::new(384, 384);
-    draw_badge(canvas.hdc, 100, 99, canvas.bounds(), style).unwrap();
+    let mut fonts = system_fonts(Some("Segoe UI"));
+    let draw = |fonts: &mut Option<FontResources>, cycle: usize| {
+        let style = BadgeStyle {
+            shape: SHAPES[cycle % SHAPES.len()],
+            size: SIZES[cycle % SIZES.len()],
+            ..BadgeStyle::from_config(&Config::default())
+        };
+        for directwrite in [false, true] {
+            let _image = render(
+                if directwrite { fonts.as_mut() } else { None },
+                100,
+                99,
+                384,
+                style,
+            );
+        }
+    };
+    for cycle in 0..SIZES.len() {
+        draw(&mut fonts, cycle);
+    }
     let before = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
     assert!(before > 0, "GDI resource counter is unavailable");
-    for _ in 0..200 {
-        draw_badge(canvas.hdc, 100, 99, canvas.bounds(), style).unwrap();
+    for cycle in 0..200 {
+        draw(&mut fonts, cycle);
     }
     let after = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
     eprintln!("badge_resource_cycles=200 initial_gdi={before} final_gdi={after}");
@@ -89,218 +156,185 @@ fn native_badge_resources_remain_bounded() {
     );
 }
 
-fn assert_circle(canvas: &TestCanvas, style: BadgeStyle, background: u32) {
-    let pixels = canvas.pixels();
-    let mut left = canvas.width;
-    let mut top = canvas.height;
-    let mut right = 0;
-    let mut bottom = 0;
-    let mut has_background = false;
-    let mut has_text = false;
-    for (position, pixel) in pixels.iter().enumerate() {
-        let color = pixel & 0xffffff;
-        has_background |= color == style.background;
-        has_text |= color == style.foreground;
-        if color != background {
-            let x = position as i32 % canvas.width;
-            let y = position as i32 / canvas.width;
-            left = left.min(x);
-            right = right.max(x);
-            top = top.min(y);
-            bottom = bottom.max(y);
-        }
-    }
-    assert!(
-        has_background && has_text,
-        "Badge background or text was not rendered"
-    );
-    assert!(
-        ((right - left) - (bottom - top)).abs() <= 1,
-        "Badge is not circular"
-    );
-    assert!(left >= 0 && top >= 0 && right < canvas.width && bottom < canvas.height);
-    assert_eq!(
-        pixels[(top * canvas.width + left) as usize] & 0xffffff,
-        background,
-        "circle corner must be transparent"
-    );
-    let radius = f64::from(right - left + 1) / 2.0;
-    let center_x = f64::from(left + right + 1) / 2.0;
-    let center_y = f64::from(top + bottom + 1) / 2.0;
-    for y in top..=bottom {
-        for x in left..=right {
-            if pixels[(y * canvas.width + x) as usize] & 0xffffff != background {
-                let distance = (f64::from(x) + 0.5 - center_x).hypot(f64::from(y) + 0.5 - center_y);
-                assert!(distance <= radius + 1.0, "text or fill escaped the circle");
-            }
-        }
-    }
-}
-
-struct TestCanvas {
-    hdc: HDC,
-    bitmap: HBITMAP,
-    previous_bitmap: HGDIOBJ,
-    data: *mut u32,
-    width: i32,
-    height: i32,
-}
-
-impl TestCanvas {
-    fn new(width: i32, height: i32) -> Self {
-        let hdc = unsafe { CreateCompatibleDC(None) };
-        assert!(!hdc.is_invalid());
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
+fn system_fonts(family: Option<&str>) -> Option<FontResources> {
+    family.map(|family| {
+        FontResources::load(
+            &Config {
+                badge_font_family: family.into(),
                 ..Default::default()
             },
-            ..Default::default()
-        };
-        let mut data = std::ptr::null_mut();
-        let bitmap =
-            match unsafe { CreateDIBSection(Some(hdc), &info, DIB_RGB_COLORS, &mut data, None, 0) }
-            {
-                Ok(bitmap) => bitmap,
-                Err(err) => {
-                    unsafe {
-                        let _ = DeleteDC(hdc);
-                    }
-                    panic!("create badge test bitmap: {err}");
-                }
-            };
-        let previous_bitmap = unsafe { SelectObject(hdc, bitmap.into()) };
-        Self {
-            hdc,
-            bitmap,
-            previous_bitmap,
-            data: data.cast(),
-            width,
-            height,
-        }
-    }
+            Path::new("."),
+        )
+        .unwrap()
+    })
+}
 
-    fn bounds(&self) -> RECT {
-        RECT {
+fn render(
+    fonts: Option<&mut FontResources>,
+    count: usize,
+    maximum: u32,
+    icon_size: i32,
+    style: BadgeStyle,
+) -> PixelImage {
+    let mut image = PixelImage::new(icon_size, icon_size).unwrap();
+    compose(
+        &mut image,
+        fonts,
+        count,
+        maximum,
+        PixelRect {
             left: 0,
             top: 0,
-            right: self.width,
-            bottom: self.height,
-        }
-    }
-
-    fn clear(&self, color: u32) {
-        unsafe {
-            let _ = GdiFlush();
-            std::slice::from_raw_parts_mut(self.data, (self.width * self.height) as usize)
-                .fill(color);
-        }
-    }
-
-    fn pixels(&self) -> Vec<u32> {
-        unsafe {
-            let _ = GdiFlush();
-            std::slice::from_raw_parts(self.data, (self.width * self.height) as usize).to_vec()
-        }
-    }
+            right: icon_size,
+            bottom: icon_size,
+        },
+        style,
+    )
+    .unwrap_or_else(|error| panic!("icon={icon_size} count={count} style={style:?}: {error:#}"));
+    image
 }
 
-impl Drop for TestCanvas {
-    fn drop(&mut self) {
-        unsafe {
-            SelectObject(self.hdc, self.previous_bitmap);
-            let _ = DeleteObject(self.bitmap.into());
-            let _ = DeleteDC(self.hdc);
-        }
-    }
-}
-
-fn export_preview(path: &Path, style: BadgeStyle) {
-    let atlas = TestCanvas::new(512 * 6, 576 * 6);
-    atlas.clear(0xe0e0e0);
-    let mut top = 0;
-    for background in [0xe0e0e0, 0x4c4c4c] {
-        for size in [64 * 6, 96 * 6, 128 * 6] {
-            let row = RECT {
-                left: 0,
-                top,
-                right: atlas.width,
-                bottom: top + size,
-            };
-            let brush = unsafe { CreateSolidBrush(rgb_colorref(background)) };
-            let _brush = OwnedGdiObject::new(brush.into(), "preview brush").unwrap();
-            unsafe { windows::Win32::Graphics::Gdi::FillRect(atlas.hdc, &row, brush) };
-            for (column, (count, maximum)) in [(2, 99), (99, 99), (100, 99), (10_000, 9999)]
-                .into_iter()
-                .enumerate()
-            {
-                let left = column as i32 * 128 * 6;
-                draw_badge(
-                    atlas.hdc,
-                    count,
-                    maximum,
-                    RECT {
-                        left,
-                        top,
-                        right: left + size,
-                        bottom: top + size,
-                    },
-                    style,
-                )
-                .unwrap();
+fn pixel_bounds(image: &PixelImage, include: impl Fn(&[u8; 4]) -> bool) -> Option<PixelRect> {
+    image
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .filter(|(_, pixel)| include(pixel))
+        .map(|(index, _)| {
+            let x = index as i32 % image.width;
+            let y = index as i32 / image.width;
+            PixelRect {
+                left: x,
+                top: y,
+                right: x + 1,
+                bottom: y + 1,
             }
-            top += size;
-        }
-    }
-    let preview = TestCanvas::new(512, 576);
-    unsafe {
-        SetStretchBltMode(preview.hdc, HALFTONE);
-        StretchBlt(
-            preview.hdc,
-            0,
-            0,
-            preview.width,
-            preview.height,
-            Some(atlas.hdc),
-            0,
-            0,
-            atlas.width,
-            atlas.height,
-            SRCCOPY,
-        )
-        .unwrap();
-    }
-    write_bitmap(path, &preview);
+        })
+        .reduce(|a, b| PixelRect {
+            left: a.left.min(b.left),
+            top: a.top.min(b.top),
+            right: a.right.max(b.right),
+            bottom: a.bottom.max(b.bottom),
+        })
 }
 
-fn write_bitmap(path: &Path, canvas: &TestCanvas) {
-    let pixels: Vec<u8> = canvas
-        .pixels()
-        .into_iter()
-        .flat_map(u32::to_le_bytes)
-        .collect();
+fn assert_badge(image: &PixelImage, count: usize, style: BadgeStyle) {
+    let bounds = pixel_bounds(image, |pixel| pixel[3] != 0);
+    if count <= 1 {
+        assert!(bounds.is_none());
+        return;
+    }
+    let bounds = bounds.expect("Badge background is absent");
+    // White glyphs on a black Badge make the actual glyph coverage observable,
+    // independent of background alpha and of the production centering helper.
+    let ink = pixel_bounds(image, |pixel| pixel[0] != 0).expect("Badge text is absent");
+    assert_eq!(
+        bounds.width(),
+        bounds.height(),
+        "Badge became an ellipse or rectangle"
+    );
+    for (ink_edges, shape_edges) in [
+        (ink.left + ink.right, bounds.left + bounds.right),
+        (ink.top + ink.bottom, bounds.top + bounds.bottom),
+    ] {
+        assert!((ink_edges - shape_edges).abs() <= 1,
+            "ink is not centered: image={} count={count} style={style:?} badge={bounds:?} ink={ink:?}",
+            image.width);
+    }
+    let inset = (image.width / 32).max(1);
+    assert_eq!(bounds.top, inset);
+    assert_eq!(bounds.right, image.width - inset);
+    if let Some(size) = style.size {
+        let expected = ((size as i32 * image.width + 32) / 64).min(image.width - 2 * inset);
+        assert_eq!(bounds.width(), expected, "explicit size changed with text");
+    }
+    let corner = ((bounds.top * image.width + bounds.left) * 4) as usize;
+    match style.shape {
+        // A fractional outer edge may have partial coverage after downsampling.
+        BadgeShape::Square => assert!(image.data[corner + 3] > 0),
+        BadgeShape::Circle => {
+            assert_eq!(image.data[corner + 3], 0);
+            let radius = f64::from(bounds.width()) / 2.0;
+            let cx = f64::from(bounds.left + bounds.right) / 2.0;
+            let cy = f64::from(bounds.top + bounds.bottom) / 2.0;
+            for y in ink.top..ink.bottom {
+                for x in ink.left..ink.right {
+                    let pixel = ((y * image.width + x) * 4) as usize;
+                    if image.data[pixel] != 0 {
+                        assert!(
+                            (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy) <= radius,
+                            "glyph escaped circle"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn export_previews(directory: &Path) {
+    std::fs::create_dir_all(directory).unwrap();
+    for (name, family) in [
+        ("segoe", Some("Segoe UI")),
+        ("arial", Some("Arial")),
+        ("gdi", None),
+    ] {
+        let mut fonts = system_fonts(family);
+        for icon_size in [64, 96, 128] {
+            let mut atlas = PixelImage::new(icon_size * 6, icon_size * 8).unwrap();
+            for (shape_index, shape) in SHAPES.into_iter().enumerate() {
+                for (size_index, size) in SIZES.into_iter().enumerate() {
+                    let row = (shape_index * SIZES.len() + size_index) as i32;
+                    atlas.rounded_fill(
+                        PixelRect {
+                            left: 0,
+                            top: row * icon_size,
+                            right: atlas.width,
+                            bottom: (row + 1) * icon_size,
+                        },
+                        0.0,
+                        if row % 2 == 0 { 0xe0e0e0 } else { 0x303030 },
+                    );
+                    let style = BadgeStyle {
+                        shape,
+                        size,
+                        ..BadgeStyle::from_config(&Config::default())
+                    };
+                    for (column, (count, maximum)) in COUNTS[2..].iter().copied().enumerate() {
+                        let image = render(fonts.as_mut(), count, maximum, icon_size * 6, style)
+                            .downsample(6)
+                            .unwrap();
+                        atlas
+                            .compose(&image, column as i32 * icon_size, row * icon_size)
+                            .unwrap();
+                    }
+                }
+            }
+            write_bitmap(&directory.join(format!("{name}-{icon_size}.bmp")), &atlas);
+        }
+    }
+}
+
+fn write_bitmap(path: &Path, image: &PixelImage) {
     let mut writer = BufWriter::new(File::create(path).unwrap());
     writer.write_all(b"BM").unwrap();
     for value in [
-        54 + pixels.len() as u32,
+        54 + image.data.len() as u32,
         0,
         54,
         40,
-        canvas.width as u32,
-        (-canvas.height) as u32,
+        image.width as u32,
+        (-image.height) as u32,
     ] {
         writer.write_all(&value.to_le_bytes()).unwrap();
     }
     writer.write_all(&1u16.to_le_bytes()).unwrap();
     writer.write_all(&32u16.to_le_bytes()).unwrap();
-    for value in [0, pixels.len() as u32, 2835, 2835, 0, 0] {
+    for value in [0, image.data.len() as u32, 2835, 2835, 0, 0] {
         writer.write_all(&value.to_le_bytes()).unwrap();
     }
-    writer.write_all(&pixels).unwrap();
+    writer.write_all(&image.data).unwrap();
     writer.flush().unwrap();
 }

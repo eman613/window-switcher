@@ -22,6 +22,8 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ),
         ("switch-apps", "show_badge", "no", "maybe"),
         ("switch-apps", "badge_max", "250", "1"),
+        ("switch-apps", "badge_shape", "square", "ellipse"),
+        ("switch-apps", "badge_size", "32", "49"),
         ("switch-apps", "badge_color", "#123456", "#XYZXYZ"),
         ("switch-apps", "badge_text_color", "#654321", "#FFFFFFFF"),
         ("switch-apps", "badge_font_size", "18", "25"),
@@ -135,7 +137,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ]);
     }
     let template = document::parse_ini(DEFAULT_CONFIG).unwrap();
-    assert_eq!(SETTINGS.len(), 113);
+    assert_eq!(SETTINGS.len(), 115);
     assert_eq!(cases.len(), SETTINGS.len());
     assert_eq!(
         template
@@ -183,7 +185,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
 
 #[test]
 fn nondefault_values_reach_hotkeys_desktop_filter_and_badge_consumers() {
-    let config = Config::load(&document::parse_ini("[switch-windows]\nenable=no\nonly_current_desktop=no\n[switch-apps]\nenable=yes\nhotkey=ctrl+f12\nonly_current_desktop=yes\nbadge_max=250\nbadge_color=#123456\nbadge_text_color=#654321\nbadge_font_size=18\n").unwrap()).unwrap();
+    let config = Config::load(&document::parse_ini("[switch-windows]\nenable=no\nonly_current_desktop=no\n[switch-apps]\nenable=yes\nhotkey=ctrl+f12\nonly_current_desktop=yes\nbadge_max=250\nbadge_color=#123456\nbadge_text_color=#654321\nbadge_font_size=18\nbadge_shape=square\nbadge_size=32\n").unwrap()).unwrap();
     let hotkeys = config.to_hotkeys();
     assert_eq!(hotkeys.len(), 1);
     assert_eq!(hotkeys[0].id, SWITCH_APPS_HOTKEY_ID);
@@ -195,6 +197,8 @@ fn nondefault_values_reach_hotkeys_desktop_filter_and_badge_consumers() {
         (badge.background, badge.foreground, badge.font_size),
         (0x123456, 0x654321, 18)
     );
+    assert_eq!(badge.shape, super::BadgeShape::Square);
+    assert_eq!(badge.size, Some(32));
     assert_eq!(
         crate::badge::format_badge_count(251, config.switch_apps_badge_max).as_deref(),
         Some("250+")

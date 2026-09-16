@@ -73,6 +73,8 @@ settings! {
     switch_apps_override_icons: IndexMap<String, String> => ("switch-apps", "override_icons", "", overrides, "IconLoader::native");
     switch_apps_show_badge: bool => ("switch-apps", "show_badge", "yes", boolean, "App::apply_app_snapshot");
     switch_apps_badge_max: u32 => ("switch-apps", "badge_max", "99", |v| integer(v, 2, 9999), "App::apply_app_snapshot");
+    switch_apps_badge_shape: BadgeShape => ("switch-apps", "badge_shape", "circle", str::parse::<BadgeShape>, "BadgeStyle::from_config");
+    switch_apps_badge_size: Option<u32> => ("switch-apps", "badge_size", "auto", |v| automatic_integer(v, 16, 48), "BadgeStyle::from_config");
     switch_apps_badge_color: u32 => ("switch-apps", "badge_color", "#4C7094", color, "BadgeStyle::from_config");
     switch_apps_badge_text_color: u32 => ("switch-apps", "badge_text_color", "#FFFFFF", color, "BadgeStyle::from_config");
     switch_apps_badge_font_size: u32 => ("switch-apps", "badge_font_size", "12", |v| integer(v, 8, 24), "BadgeStyle::from_config");

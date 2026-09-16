@@ -26,6 +26,16 @@ pub(super) fn integer(value: &str, minimum: u32, maximum: u32) -> Result<u32> {
         .with_context(|| format!("可选整数 {minimum}-{maximum}"))
 }
 
+pub(super) fn automatic_integer(value: &str, minimum: u32, maximum: u32) -> Result<Option<u32>> {
+    if value == "auto" {
+        Ok(None)
+    } else {
+        integer(value, minimum, maximum)
+            .map(Some)
+            .with_context(|| format!("可选 auto 或整数 {minimum}-{maximum}"))
+    }
+}
+
 pub(super) fn color(value: &str) -> Result<u32> {
     super::validation::parse_color(value).context("请填写 #RRGGBB 六位十六进制颜色")
 }
@@ -41,11 +51,7 @@ pub(super) fn automatic_color(value: &str) -> Result<Option<u32>> {
 }
 
 pub(super) fn radius(value: &str, maximum: u32) -> Result<Option<u32>> {
-    if value == "auto" {
-        Ok(None)
-    } else {
-        integer(value, 0, maximum).map(Some)
-    }
+    automatic_integer(value, 0, maximum)
 }
 
 pub(super) fn font_family(value: &str) -> Result<String> {

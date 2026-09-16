@@ -169,40 +169,52 @@ fn format_cache_is_bounded_and_badge_counts_render_after_role_and_size_changes()
     }
     assert_eq!(fonts.formats.len(), 64);
     for size in [24, 64, 128, 256] {
-        for (count, maximum) in [
-            (0, 99),
-            (1, 99),
-            (2, 99),
-            (99, 99),
-            (100, 99),
-            (10000, 9999),
+        for shape in [
+            crate::config::BadgeShape::Circle,
+            crate::config::BadgeShape::Square,
         ] {
-            let mut image = PixelImage::new(size, size).unwrap();
-            crate::badge::compose(
-                &mut image,
-                Some(&mut fonts),
-                count,
-                maximum,
-                crate::layout::PixelRect {
-                    left: 0,
-                    top: 0,
-                    right: size,
-                    bottom: size,
-                },
-                crate::badge::BadgeStyle::from_config(&Config::default()),
-            )
-            .unwrap();
-            assert_eq!(
-                image
-                    .data
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .any(|pixel| pixel[3] != 0),
-                count > 1
-            );
+            for badge_size in [None, Some(16), Some(48)] {
+                for (count, maximum) in [
+                    (0, 99),
+                    (1, 99),
+                    (2, 99),
+                    (99, 99),
+                    (100, 99),
+                    (10000, 9999),
+                ] {
+                    let mut image = PixelImage::new(size, size).unwrap();
+                    crate::badge::compose(
+                        &mut image,
+                        Some(&mut fonts),
+                        count,
+                        maximum,
+                        crate::layout::PixelRect {
+                            left: 0,
+                            top: 0,
+                            right: size,
+                            bottom: size,
+                        },
+                        crate::badge::BadgeStyle {
+                            shape,
+                            size: badge_size,
+                            ..crate::badge::BadgeStyle::from_config(&Config::default())
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        image
+                            .data
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .any(|pixel| pixel[3] != 0),
+                        count > 1
+                    );
+                }
+            }
         }
     }
+    assert!(fonts.formats.len() <= 64);
 }
 
 #[test]
