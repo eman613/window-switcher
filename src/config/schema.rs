@@ -7,7 +7,10 @@ use indexmap::IndexMap;
 use ini::Ini;
 use log::LevelFilter;
 
-use super::{parsers::*, types::*, Hotkey, SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID};
+use super::{
+    parsers::*, types::*, Hotkey, SearchFields, SEARCH_HOTKEY_ID, SWITCH_APPS_HOTKEY_ID,
+    SWITCH_WINDOWS_HOTKEY_ID,
+};
 
 pub(super) struct Setting {
     pub(super) section: &'static str,
@@ -81,6 +84,11 @@ settings! {
     switch_apps_exclude_processes: HashSet<String> => ("switch-apps", "exclude_processes", "", blacklist, "WindowFilter::allows");
     unknown_foreground: ForegroundPolicy => ("input", "unknown_foreground", "passthrough", str::parse::<ForegroundPolicy>, "ForegroundStatus::allows");
     injected_events: InjectedPolicy => ("input", "injected_events", "handle", str::parse::<InjectedPolicy>, "KeyboardListener");
+    search_enable: bool => ("search", "enable", "no", boolean, "Config::to_hotkeys");
+    search_hotkey: Hotkey => ("search", "hotkey", "ctrl+space", |v| Hotkey::create(SEARCH_HOTKEY_ID, "search", v), "KeyboardListener");
+    search_match: SearchMatch => ("search", "match", "fuzzy", str::parse::<SearchMatch>, "SearchService");
+    search_fields: SearchFields => ("search", "fields", "app,title", str::parse::<SearchFields>, "SearchService");
+    search_max_results: u32 => ("search", "max_results", "50", |v| integer(v, 10, 200), "SearchService");
     monitor: MonitorPolicy => ("appearance", "monitor", "cursor", str::parse::<MonitorPolicy>, "MonitorSnapshot::capture");
     use_work_area: bool => ("appearance", "use_work_area", "yes", boolean, "MonitorSnapshot::capture");
     panel_width: u32 => ("appearance", "panel_width", "0", |v| integer(v, 0, 32768), "LayoutSnapshot::calculate");
@@ -170,5 +178,6 @@ pub(super) fn load(ini: &Ini) -> Result<Config> {
         }
     }
     crate::layout::LayoutOptions::from_config(&configuration).validate()?;
+    super::search::validate_hotkeys(&configuration)?;
     Ok(configuration)
 }

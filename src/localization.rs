@@ -57,6 +57,39 @@ impl Text {
     pub(crate) fn switcher_name(self) -> &'static str {
         self.choose("应用切换器", "Application switcher")
     }
+    pub(crate) fn search_label(self) -> &'static str {
+        self.choose("搜索窗口", "Search windows")
+    }
+    pub(crate) fn search_results_label(self) -> &'static str {
+        self.choose("窗口结果", "Window results")
+    }
+    pub(crate) fn search_loading(self) -> &'static str {
+        self.choose(
+            "正在查找窗口… 按 Esc 取消",
+            "Finding windows… Press Escape to cancel",
+        )
+    }
+    pub(crate) fn search_failure(self) -> &'static str {
+        self.choose(
+            "无法完成搜索。请按 Esc 返回，检查日志后重试或重启应用。",
+            "Search failed. Press Escape, check the log, and retry or restart the application.",
+        )
+    }
+    pub(crate) fn search_count(self, shown: usize, total: usize) -> String {
+        if total == 0 {
+            return self
+                .choose(
+                    "没有匹配窗口。请修改搜索内容，或按 Esc 返回。",
+                    "No matching windows. Change the search or press Escape to return.",
+                )
+                .into();
+        }
+        if self.chinese {
+            format!("显示 {shown} / {total} 个窗口 · Enter 切换 · Esc 取消")
+        } else {
+            format!("Showing {shown} of {total} windows · Enter to switch · Escape to cancel")
+        }
+    }
     pub(crate) fn switcher_help(self) -> &'static str {
         self.choose("循环选择应用，松开快捷键修饰键激活。按 Esc 取消；也可点击应用图标。", "Cycle through applications and release the shortcut modifier to activate. Press Escape to cancel, or click an application icon.")
     }

@@ -16,6 +16,7 @@ mod notifications;
 mod parsers;
 pub(crate) mod reload;
 mod schema;
+mod search;
 pub(crate) mod settings;
 mod storage;
 mod transaction;
@@ -42,6 +43,7 @@ mod validation_tests;
 
 pub const SWITCH_WINDOWS_HOTKEY_ID: u32 = 1;
 pub const SWITCH_APPS_HOTKEY_ID: u32 = 2;
+pub const SEARCH_HOTKEY_ID: u32 = 3;
 #[cfg(test)]
 pub const DEFAULT_BADGE_MAX: u32 = 99;
 #[cfg(test)]
@@ -57,9 +59,10 @@ const MAX_BADGE_MAX: u32 = 9999;
 const DEFAULT_CONFIG: &str = include_str!("../window-switcher.ini");
 
 pub use schema::Config;
+pub use search::{SearchField, SearchFields};
 pub use types::{
     AppNameMode, BatteryPolicy, ForegroundPolicy, InjectedPolicy, Language, MonitorPolicy,
-    RenderScale, RunLevel, StartupEnabled, Theme, WatchMode,
+    RenderScale, RunLevel, SearchMatch, StartupEnabled, Theme, WatchMode,
 };
 
 impl Config {
@@ -75,6 +78,9 @@ impl Config {
             .collect();
         if self.switch_apps_enable {
             hotkeys.extend(self.switch_apps_hotkey.iter());
+        }
+        if self.search_enable {
+            hotkeys.push(&self.search_hotkey);
         }
         hotkeys
     }

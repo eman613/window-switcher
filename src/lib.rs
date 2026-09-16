@@ -23,6 +23,7 @@ mod pixels;
 mod process_metadata;
 mod render_surface;
 mod restart;
+mod search;
 mod startup;
 mod text_raster;
 mod trayicon;

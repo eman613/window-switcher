@@ -1,9 +1,10 @@
-use crate::config::{Hotkey, SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID};
+use crate::config::{Hotkey, SEARCH_HOTKEY_ID, SWITCH_APPS_HOTKEY_ID, SWITCH_WINDOWS_HOTKEY_ID};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwitchKind {
     Apps,
     Windows,
+    Search,
 }
 
 #[derive(Clone, Copy)]
@@ -126,7 +127,7 @@ impl InputMachine {
         }
         self.pressed[index] = key.down;
         if let Some(gesture) = self.active.as_mut() {
-            let allowed = if gesture.kind == SwitchKind::Apps {
+            let allowed = if gesture.kind != SwitchKind::Windows {
                 permissions.apps
             } else {
                 permissions.windows
@@ -143,7 +144,10 @@ impl InputMachine {
             }
         }
         if let Some(gesture) = self.active.as_ref() {
-            if !gesture.finishing && !self.modifier_pressed(gesture.modifier) {
+            if gesture.kind != SwitchKind::Search
+                && !gesture.finishing
+                && !self.modifier_pressed(gesture.modifier)
+            {
                 let event = InputEvent {
                     session: gesture.session,
                     action: InputAction::Finish(gesture.kind),
@@ -165,7 +169,8 @@ impl InputMachine {
             return Decision::default();
         }
         let matching = self.hotkeys.iter().find(|hotkey| {
-            let allowed = (hotkey.id == SWITCH_APPS_HOTKEY_ID && permissions.apps)
+            let allowed = (matches!(hotkey.id, SWITCH_APPS_HOTKEY_ID | SEARCH_HOTKEY_ID)
+                && permissions.apps)
                 || (hotkey.id == SWITCH_WINDOWS_HOTKEY_ID && permissions.windows);
             let altgr = self.pressed[0x38 + 256] && (self.pressed[0x1d] || self.injected_control);
             allowed
@@ -175,12 +180,22 @@ impl InputMachine {
                 && (!matches!(key.scan, 0x47..=0x53) || key.extended)
         });
         if let Some(hotkey) = matching {
-            let kind = if hotkey.id == SWITCH_APPS_HOTKEY_ID {
-                SwitchKind::Apps
-            } else {
-                SwitchKind::Windows
+            let kind = match hotkey.id {
+                SWITCH_APPS_HOTKEY_ID => SwitchKind::Apps,
+                SEARCH_HOTKEY_ID => SwitchKind::Search,
+                _ => SwitchKind::Windows,
             };
             let modifier = hotkey.get_modifier();
+            // A normal switch replaces a sticky search with a new session.
+            // Search text, navigation and composition remain native control input.
+            if kind != SwitchKind::Search
+                && self
+                    .active
+                    .as_ref()
+                    .is_some_and(|g| g.kind == SwitchKind::Search)
+            {
+                self.active = None;
+            }
             if self.active.as_ref().is_some_and(|g| g.modifier != modifier) {
                 return Decision::default();
             }
@@ -279,6 +294,43 @@ mod tests {
             extended,
             down,
         }
+    }
+
+    #[test]
+    fn search_survives_modifier_release_and_preserves_native_text_input() {
+        let mut state = machine();
+        state
+            .hotkeys
+            .push(Hotkey::create(SEARCH_HOTKEY_ID, "search", "ctrl+space").unwrap());
+        state.handle(key(0x1d, false, true), true, 0, 0);
+        let search = state
+            .handle(key(0x39, false, true), true, 0, 0)
+            .event
+            .unwrap();
+        assert_eq!(search.action, InputAction::Cycle(SwitchKind::Search, false));
+        assert!(state
+            .handle(key(0x1d, false, false), true, 0, 0)
+            .event
+            .is_none());
+        for scan in [0x1e, 0x0e, 0x1c, 0x01, 0x48] {
+            let decision = state.handle(key(scan, scan == 0x48, true), true, 0, 0);
+            assert!(!decision.consume && decision.event.is_none());
+        }
+        state.handle(key(0x38, false, true), true, 0, 0);
+        let apps = state
+            .handle(key(0x0f, false, true), true, 0, 0)
+            .event
+            .unwrap();
+        assert!(apps.session > search.session);
+        assert_eq!(apps.action, InputAction::Cycle(SwitchKind::Apps, false));
+        assert_eq!(
+            state
+                .handle(key(0x38, false, false), true, 0, 0)
+                .event
+                .unwrap()
+                .action,
+            InputAction::Finish(SwitchKind::Apps)
+        );
     }
 
     #[test]

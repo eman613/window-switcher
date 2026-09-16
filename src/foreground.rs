@@ -96,13 +96,20 @@ impl ForegroundStatus {
         if blacklist.is_empty() {
             return true;
         }
+        let owned = current == self.owner
+            || unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetWindow(
+                    HWND(current as _),
+                    windows::Win32::UI::WindowsAndMessaging::GW_OWNER,
+                )
+                .is_ok_and(|owner| owner.0 as usize == self.owner)
+            };
         let Some(snapshot) = self.snapshot.try_lock() else {
             return unknown;
         };
         snapshot
             .filter(|s| {
-                s.version == self.version.load(Ordering::Acquire)
-                    && (s.window == current || current == self.owner)
+                s.version == self.version.load(Ordering::Acquire) && (s.window == current || owned)
             })
             .map_or(unknown, |s| if apps { s.apps } else { s.windows })
     }

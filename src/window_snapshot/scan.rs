@@ -23,11 +23,14 @@ struct Enumeration {
     windows: Vec<usize>,
     overflow: bool,
     excluded: usize,
+    excluded_process: u32,
 }
 const TEXT_LIMIT: usize = 16 * 1024 * 1024;
 unsafe extern "system" fn enumerate(hwnd: HWND, parameter: LPARAM) -> BOOL {
     let output = &mut *(parameter.0 as *mut Enumeration);
-    if hwnd.0 as usize == output.excluded {
+    if hwnd.0 as usize == output.excluded
+        || (output.excluded_process != 0 && utils::get_window_pid(hwnd) == output.excluded_process)
+    {
         return BOOL(1);
     }
     if output.windows.len() == MAX_WINDOWS {
@@ -65,6 +68,11 @@ impl Scan {
             windows: Vec::new(),
             overflow: false,
             excluded,
+            excluded_process: if excluded == 0 {
+                0
+            } else {
+                utils::get_window_pid(HWND(excluded as _))
+            },
         };
         let status =
             unsafe { EnumWindows(Some(enumerate), LPARAM(&mut enumeration as *mut _ as isize)) };

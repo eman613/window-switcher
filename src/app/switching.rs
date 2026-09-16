@@ -11,7 +11,7 @@ use std::{
 };
 
 impl App {
-    fn request_snapshot(&mut self, kind: SwitchKind, refresh: bool) -> Result<()> {
+    pub(super) fn request_snapshot(&mut self, kind: SwitchKind, refresh: bool) -> Result<()> {
         ensure!(
             self.snapshots.healthy(),
             "snapshot stage=request worker-unavailable"
@@ -110,6 +110,7 @@ impl App {
             self.switching.last_snapshot = Some(Instant::now());
             match pending.kind {
                 SwitchKind::Apps => self.apply_app_snapshot(snapshot)?,
+                SwitchKind::Search => self.apply_search_snapshot(snapshot)?,
                 SwitchKind::Windows => {
                     while self
                         .switching
@@ -135,16 +136,27 @@ impl App {
             }
         }
         if self.switching.pending.is_none() && self.switching.finishing.is_none() {
-            if let Some(state) = &self.switch_apps_state {
+            let revision = self
+                .switch_apps_state
+                .as_ref()
+                .map(|state| (SwitchKind::Apps, state.revision))
+                .or_else(|| {
+                    self.search
+                        .as_ref()
+                        .filter(|search| search.active())
+                        .and_then(|search| search.revision())
+                        .map(|revision| (SwitchKind::Search, revision))
+                });
+            if let Some((kind, revision)) = revision {
                 let elapsed = self
                     .switching
                     .last_snapshot
                     .map_or(Duration::MAX, |started| started.elapsed());
-                let changed = state.revision != self.snapshots.lifetimes.revision();
+                let changed = revision != self.snapshots.lifetimes.revision();
                 if (changed && elapsed >= Duration::from_millis(100))
                     || elapsed >= Duration::from_millis(self.config.metadata_ttl_ms.into())
                 {
-                    self.request_snapshot(SwitchKind::Apps, true)?;
+                    self.request_snapshot(kind, true)?;
                 }
             }
         }

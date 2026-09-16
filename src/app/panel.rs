@@ -196,9 +196,16 @@ impl App {
             // steal focus back after an external application became active.
             set_foreground_window(identity.hwnd(), || {
                 self.target.is_live()
-                    && crate::utils::get_foreground_window() == self.hwnd
+                    && (crate::utils::get_foreground_window() == self.hwnd
+                        || self.search.as_ref().is_some_and(|search| {
+                            search.active()
+                                && crate::utils::get_foreground_window() == search.hwnd()
+                        }))
                     && identity.is_current(&self.snapshots.lifetimes)
             });
+        }
+        if let Some(search) = self.search.as_mut() {
+            search.close();
         }
         self.hide_apps();
         self.snapshots.cancel();
@@ -207,6 +214,11 @@ impl App {
 
     pub(super) fn invalidate_display(&mut self) -> Result<()> {
         self.painter.invalidate();
+        if let Some(search) = self.search.as_mut().filter(|search| search.active()) {
+            let monitor = MonitorSnapshot::capture(&self.config, HWND(self.switching.anchor as _))?;
+            self.switching.monitor = Some(monitor);
+            search.reposition(&self.config, monitor)?;
+        }
         if self.switch_apps_state.is_none() {
             return Ok(());
         }

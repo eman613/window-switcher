@@ -1,6 +1,6 @@
 use super::App;
 use crate::{
-    keyboard::state::{InputAction, InputEvent},
+    keyboard::state::{InputAction, InputEvent, SwitchKind},
     utils::{get_foreground_window, window_identity::WindowIdentity},
 };
 use anyhow::Result;
@@ -53,6 +53,7 @@ impl App {
         }
         let result = self
             .poll_switching()
+            .and_then(|()| self.poll_search())
             .and_then(|()| self.pump_switches())
             .and_then(|()| self.flush_panel());
         if let Err(error) = result {
@@ -64,6 +65,7 @@ impl App {
 
     fn apply_input(&mut self, event: InputEvent, received: Option<Instant>) -> Result<()> {
         match event.action {
+            InputAction::Cycle(SwitchKind::Search, _) => self.start_search()?,
             InputAction::Cycle(kind, reverse) => {
                 self.switching.push(kind, reverse, received)?;
                 self.pump_switches()?;

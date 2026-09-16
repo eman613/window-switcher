@@ -76,6 +76,11 @@ pub(super) fn run(
     let text = crate::localization::Text::new(loaded.config.language);
     let accessibility = Accessibility::new(target.clone(), text).context("uia stage=initialize")?;
     let accessible_root = accessibility.root.clone();
+    let search = loaded
+        .config
+        .search_enable
+        .then(|| crate::search::SearchSession::new(hwnd, &loaded.config, target.clone(), text))
+        .transpose()?;
     if loaded.config.switch_apps_enable {
         painter.start_fonts(
             loaded
@@ -123,6 +128,7 @@ pub(super) fn run(
                 ..Default::default()
             },
             switch_apps_state: None,
+            search,
             snapshots,
             icons,
             remembered_icons: Default::default(),
@@ -509,6 +515,7 @@ mod tests {
                 config_watcher: None,
                 switch_windows_state: Default::default(),
                 switch_apps_state: None,
+                search: None,
                 snapshots,
                 icons,
                 remembered_icons: Default::default(),

@@ -28,7 +28,7 @@ impl WindowFilter {
             titles,
             processes,
         ) = match kind {
-            SwitchKind::Apps => (
+            SwitchKind::Apps | SwitchKind::Search => (
                 config.switch_apps_ignore_minimal,
                 config.switch_apps_only_current_desktop(),
                 config.switch_apps_include_topmost,

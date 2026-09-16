@@ -38,6 +38,7 @@ mod navigation;
 mod panel;
 mod pointer;
 mod runtime;
+mod search;
 mod switching;
 mod window_cycle;
 
@@ -73,6 +74,7 @@ struct App {
     config_watcher: Option<ConfigWatcher>,
     switch_windows_state: SwitchWindowsState,
     switch_apps_state: Option<SwitchAppsState>,
+    search: Option<crate::search::SearchSession>,
     snapshots: SnapshotService,
     icons: IconService,
     remembered_icons: IndexMap<IconKey, Weak<CachedIcon>>,
