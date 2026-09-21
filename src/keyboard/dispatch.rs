@@ -1,7 +1,7 @@
 use std::{
-    collections::VecDeque,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
         Arc,
     },
     time::{Duration, Instant},
@@ -15,11 +15,6 @@ use crate::window_target::WindowTarget;
 pub(crate) const WM_INPUT_READY: u32 = 6003;
 const INPUT_QUEUE_CAPACITY: usize = 64;
 
-struct PendingInput {
-    events: VecDeque<ReceivedInput>,
-    notified: bool,
-}
-
 pub(crate) struct ReceivedInput {
     pub(crate) event: InputEvent,
     pub(crate) received: Option<Instant>,
@@ -27,7 +22,10 @@ pub(crate) struct ReceivedInput {
 
 pub(crate) struct InputDispatch {
     target: Arc<WindowTarget>,
-    pending: Mutex<PendingInput>,
+    sender: SyncSender<ReceivedInput>,
+    pending: Mutex<Receiver<ReceivedInput>>,
+    queued: AtomicUsize,
+    notified: AtomicBool,
     acknowledged: AtomicU64,
     revoked: AtomicU64,
     paused: AtomicBool,
@@ -35,6 +33,10 @@ pub(crate) struct InputDispatch {
     details_window: AtomicUsize,
     pause_requested: AtomicBool,
     rejected: AtomicU64,
+    inactive_rejections: AtomicU64,
+    queue_full_rejections: AtomicU64,
+    disconnected_rejections: AtomicU64,
+    notification_deferrals: AtomicU64,
     callbacks: AtomicU64,
     max_callback_us: AtomicU64,
     metrics: bool,
@@ -47,12 +49,13 @@ impl InputDispatch {
     }
 
     pub(crate) fn with_metrics(target: Arc<WindowTarget>, metrics: bool) -> Self {
+        let (sender, receiver) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
         Self {
             target,
-            pending: Mutex::new(PendingInput {
-                events: VecDeque::with_capacity(INPUT_QUEUE_CAPACITY),
-                notified: false,
-            }),
+            sender,
+            pending: Mutex::new(receiver),
+            queued: AtomicUsize::new(0),
+            notified: AtomicBool::new(false),
             acknowledged: AtomicU64::new(0),
             revoked: AtomicU64::new(0),
             paused: AtomicBool::new(false),
@@ -60,6 +63,10 @@ impl InputDispatch {
             details_window: AtomicUsize::new(0),
             pause_requested: AtomicBool::new(false),
             rejected: AtomicU64::new(0),
+            inactive_rejections: AtomicU64::new(0),
+            queue_full_rejections: AtomicU64::new(0),
+            disconnected_rejections: AtomicU64::new(0),
+            notification_deferrals: AtomicU64::new(0),
             callbacks: AtomicU64::new(0),
             max_callback_us: AtomicU64::new(0),
             metrics,
@@ -91,29 +98,47 @@ impl InputDispatch {
 
     fn enqueue(&self, event: InputEvent, notify: impl FnOnce() -> bool) -> bool {
         if !self.permits(event.session) {
+            self.inactive_rejections.fetch_add(1, Ordering::Relaxed);
             return false;
         }
-        let Some(mut pending) = self.pending.try_lock() else {
-            return false;
-        };
         let limit = if matches!(event.action, InputAction::Cycle(..)) {
             INPUT_QUEUE_CAPACITY - 1
         } else {
             INPUT_QUEUE_CAPACITY
         };
-        if pending.events.len() >= limit {
+        // Reserve before publication so the receiver can never release an
+        // uncounted event. Ordinary cycles leave the final slot for a terminal.
+        if self
+            .queued
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < limit).then_some(count + 1)
+            })
+            .is_err()
+        {
+            self.queue_full_rejections.fetch_add(1, Ordering::Relaxed);
             return false;
         }
-        pending.events.push_back(ReceivedInput {
+        if let Err(error) = self.sender.try_send(ReceivedInput {
             event,
             received: self.sample_start(),
-        });
-        if !pending.notified {
-            if !notify() {
-                pending.events.pop_back();
+        }) {
+            self.queued.fetch_sub(1, Ordering::AcqRel);
+            let counter = match error {
+                TrySendError::Full(_) => &self.queue_full_rejections,
+                TrySendError::Disconnected(_) => &self.disconnected_rejections,
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if !self.notified.swap(true, Ordering::AcqRel) && !notify() {
+            self.notified.store(false, Ordering::Release);
+            if !self.target.is_live() {
+                self.inactive_rejections.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
-            pending.notified = true;
+            // Notification is only a wake-up hint. The UI timer also drains
+            // this bounded queue, including a finish queued after a cycle.
+            self.notification_deferrals.fetch_add(1, Ordering::Relaxed);
         }
         true
     }
@@ -126,9 +151,21 @@ impl InputDispatch {
     }
 
     pub(crate) fn take_timed(&self) -> Vec<ReceivedInput> {
-        let mut pending = self.pending.lock();
-        pending.notified = false;
-        pending.events.drain(..).collect()
+        let Some(pending) = self.pending.try_lock() else {
+            return Vec::new();
+        };
+        self.notified.store(false, Ordering::Release);
+        let mut events = Vec::with_capacity(self.queued.load(Ordering::Acquire));
+        // A producer may keep sending while the UI consumes. Bound each turn
+        // as well as the channel, so input cannot starve painting or shutdown.
+        for _ in 0..INPUT_QUEUE_CAPACITY {
+            let Ok(input) = pending.try_recv() else {
+                break;
+            };
+            self.queued.fetch_sub(1, Ordering::AcqRel);
+            events.push(input);
+        }
+        events
     }
 
     pub(crate) fn cancel(&self, session: u64) {
@@ -213,10 +250,14 @@ impl InputDispatch {
             return;
         }
         info!(
-            "input stage=summary callbacks={} rejected={} max_callback_us={}",
+            "input stage=summary callbacks={} rejected={} max_callback_us={} inactive={} queue_full={} disconnected={} notify_deferred={}",
             self.callbacks.load(Ordering::Relaxed),
             self.rejected.load(Ordering::Relaxed),
-            self.max_callback_us.load(Ordering::Relaxed)
+            self.max_callback_us.load(Ordering::Relaxed),
+            self.inactive_rejections.load(Ordering::Relaxed),
+            self.queue_full_rejections.load(Ordering::Relaxed),
+            self.disconnected_rejections.load(Ordering::Relaxed),
+            self.notification_deferrals.load(Ordering::Relaxed)
         );
     }
 
@@ -279,23 +320,87 @@ mod tests {
             || true
         ));
         assert_eq!(queue.acknowledged(), 0);
-        assert_eq!(queue.take().len(), INPUT_QUEUE_CAPACITY);
+        let events = queue.take();
+        assert_eq!(events.len(), INPUT_QUEUE_CAPACITY);
+        assert!(events[..INPUT_QUEUE_CAPACITY - 1]
+            .iter()
+            .all(|event| *event == cycle(1)));
+        assert_eq!(
+            events.last().unwrap().action,
+            InputAction::Finish(SwitchKind::Apps)
+        );
+        assert_eq!(queue.queued.load(Ordering::Acquire), 0);
         queue.acknowledge(1);
         assert_eq!(queue.acknowledged(), 1);
     }
 
     #[test]
-    fn contention_notification_failure_and_retirement_fail_open() {
+    fn consumer_contention_and_failed_notifications_keep_input_for_polling() {
         let queue = queue();
         let pending = queue.pending.lock();
-        assert!(!queue.enqueue(cycle(1), || true));
+        assert!(queue.enqueue(cycle(1), || true));
+        assert!(
+            queue.take().is_empty(),
+            "a busy receiver must not block the UI"
+        );
         drop(pending);
-        assert!(!queue.enqueue(cycle(1), || false));
-        assert!(queue.take().is_empty());
+        assert_eq!(queue.take(), vec![cycle(1)]);
+        assert!(queue.enqueue(cycle(1), || false));
+        assert_eq!(queue.notification_deferrals.load(Ordering::Relaxed), 1);
+        assert_eq!(queue.take(), vec![cycle(1)]);
+        assert_eq!(queue.rejected.load(Ordering::Relaxed), 0);
         queue.revoked.store(1, Ordering::Release);
         assert!(!queue.enqueue(cycle(1), || true));
         queue.target.close();
         assert!(!queue.enqueue(cycle(2), || true));
+        assert_eq!(queue.inactive_rejections.load(Ordering::Relaxed), 2);
+        assert_eq!(queue.queue_full_rejections.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn failed_native_notifications_preserve_cycle_and_finish_order() {
+        // HWND_BOTTOM is a positioning sentinel, never a message endpoint.
+        let queue = InputDispatch::new(Arc::new(WindowTarget::new(HWND(1 as _))));
+        let finish = InputEvent {
+            session: 1,
+            action: InputAction::Finish(SwitchKind::Apps),
+        };
+        assert!(queue.submit(cycle(1)));
+        assert!(queue.submit(finish));
+        assert_eq!(queue.notification_deferrals.load(Ordering::Relaxed), 2);
+        assert_eq!(queue.take(), vec![cycle(1), finish]);
+        assert_eq!(queue.revoked(), 0);
+        assert_eq!(queue.rejected.load(Ordering::Relaxed), 0);
+        queue.acknowledge(1);
+        assert!(!queue.permits(1));
+    }
+
+    #[test]
+    fn concurrent_delivery_preserves_order_and_bounds_each_ui_turn() {
+        const EVENTS: u64 = 10_000;
+        let queue = Arc::new(queue());
+        let consumer_queue = queue.clone();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let consumer = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            while received.len() < EVENTS as usize {
+                assert!(Instant::now() < deadline, "input delivery stalled");
+                let batch = consumer_queue.take();
+                assert!(batch.len() <= INPUT_QUEUE_CAPACITY);
+                received.extend(batch.into_iter().map(|event| event.session));
+                std::thread::yield_now();
+            }
+            received
+        });
+        for session in 1..=EVENTS {
+            while !queue.enqueue(cycle(session), || true) {
+                assert!(Instant::now() < deadline, "input producer stalled");
+                std::thread::yield_now();
+            }
+        }
+        assert_eq!(consumer.join().unwrap(), (1..=EVENTS).collect::<Vec<_>>());
+        assert_eq!(queue.queued.load(Ordering::Acquire), 0);
+        assert!(queue.take().is_empty());
     }
 
     #[test]

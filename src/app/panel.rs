@@ -32,12 +32,14 @@ impl App {
             if !self.input.permits(self.input_session) {
                 return Ok(());
             }
+            let accessibility_start = crate::diagnostics::sample_start(self.config.metrics_enabled);
             if let Some(layout) = self.painter.layout() {
                 self.switching.paint_dirty |=
                     !self
                         .accessibility
                         .publish(state, layout, self.input_session);
             }
+            crate::diagnostics::stage_elapsed("accessibility-publish", accessibility_start);
             if !self.switching.first_panel_done {
                 if let Some(started) = self.switching.first_panel_started {
                     let loaded = state

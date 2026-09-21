@@ -117,10 +117,15 @@ impl GdiAAPainter {
             return Ok(());
         }
         if !self.show {
+            let started = crate::diagnostics::sample_start(self.config.metrics_enabled);
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOW);
             }
+            crate::diagnostics::stage_elapsed("show-window", started);
+            let focus_started = crate::diagnostics::sample_start(self.config.metrics_enabled);
             crate::utils::focus_window(self.hwnd, &allowed);
+            crate::diagnostics::stage_elapsed("panel-focus", focus_started);
+            crate::diagnostics::stage_elapsed("panel-show", started);
             if !allowed() {
                 self.hide();
                 return Ok(());

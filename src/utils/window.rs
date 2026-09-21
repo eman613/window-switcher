@@ -163,7 +163,12 @@ pub fn get_foreground_window() -> HWND {
 }
 
 pub(crate) fn focus_window(hwnd: HWND, allowed: impl Fn() -> bool) -> bool {
-    if !set_foreground_window(hwnd, &allowed) || !allowed() {
+    // ShowWindow can already activate the panel. Reuse that activation while
+    // still checking permission and restoring keyboard focus for UIA Select.
+    if !allowed()
+        || (get_foreground_window() != hwnd && !set_foreground_window(hwnd, &allowed))
+        || !allowed()
+    {
         return false;
     }
     if unsafe { GetFocus() } != hwnd {
