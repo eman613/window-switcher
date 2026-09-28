@@ -100,8 +100,13 @@ impl App {
                 continue;
             }
             let pending = self.switching.pending.take().unwrap();
+            crate::diagnostics::stage_elapsed(
+                "snapshot-roundtrip",
+                self.config.metrics_enabled.then_some(pending.started),
+            );
             let snapshot = result?;
             self.switching.last_snapshot = Some(Instant::now());
+            let apply_started = crate::diagnostics::sample_start(self.config.metrics_enabled);
             match pending.kind {
                 SwitchKind::Apps => self.apply_app_snapshot(snapshot)?,
                 SwitchKind::Search => self.apply_search_snapshot(snapshot)?,
@@ -117,6 +122,7 @@ impl App {
                     }
                 }
             }
+            crate::diagnostics::stage_elapsed("snapshot-apply", apply_started);
         }
         self.poll_icons();
         if self.switching.pending.is_none() && self.switching.finishing.is_none() {

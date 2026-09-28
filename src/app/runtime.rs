@@ -9,6 +9,7 @@ use windows::{
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Controls::WM_MOUSELEAVE,
+            Input::Ime::{ImmAssociateContextEx, HIMC},
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
                 GetWindowLongPtrW, IsWindow, KillTimer, LoadCursorW, PostQuitMessage,
@@ -386,6 +387,12 @@ impl ApplicationWindow {
         }
         .context("ui stage=create-window")?;
         let window = Self(hwnd);
+        // This surface never edits text. Keep its modifier/navigation messages
+        // out of IME composition; Search owns a separate native EDIT context.
+        // Do not disable IME for the thread or for this window's children.
+        if !unsafe { ImmAssociateContextEx(hwnd, HIMC::default(), 0) }.as_bool() {
+            debug!("ui stage=panel-ime-detach unavailable; retaining system association");
+        }
         let style = check_error(|| unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) })? as u32;
         check_error(|| unsafe {
             SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_CAPTION.0) as isize)
@@ -500,6 +507,52 @@ unsafe extern "system" fn window_proc(
 mod tests {
     use super::*;
     use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+    #[test]
+    fn non_text_panel_detaches_ime_without_disabling_a_text_window_on_the_same_thread() {
+        use windows::Win32::UI::Input::Ime::{
+            ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetContext,
+            ImmReleaseContext,
+        };
+        let text = ApplicationWindow(unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("EDIT"),
+                w!(""),
+                windows::Win32::UI::WindowsAndMessaging::WS_POPUP,
+                0,
+                0,
+                100,
+                40,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        let context = unsafe { ImmCreateContext() };
+        assert!(!context.is_invalid());
+        let previous = unsafe { ImmAssociateContext(text.0, context) };
+        let panel = ApplicationWindow::create();
+        let panel_context = panel
+            .as_ref()
+            .ok()
+            .map(|panel| unsafe { ImmGetContext(panel.0) });
+        if let (Ok(panel), Some(context)) = (&panel, panel_context) {
+            if !context.is_invalid() {
+                let _ = unsafe { ImmReleaseContext(panel.0, context) };
+            }
+        }
+        let text_context = unsafe { ImmGetContext(text.0) };
+        let released = unsafe { ImmReleaseContext(text.0, text_context) }.as_bool();
+        unsafe { ImmAssociateContext(text.0, previous) };
+        let destroyed = unsafe { ImmDestroyContext(context) }.as_bool();
+        assert!(panel.is_ok());
+        assert!(panel_context.unwrap().is_invalid());
+        assert_eq!(text_context, context);
+        assert!(released && destroyed);
+    }
 
     #[test]
     fn nested_native_messages_defer_mutation_and_destroy_retires_owner() {

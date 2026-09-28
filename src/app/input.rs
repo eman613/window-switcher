@@ -8,6 +8,7 @@ use std::time::Instant;
 
 impl App {
     pub(super) fn drain_input(&mut self) {
+        let ui_started = crate::diagnostics::sample_start(self.config.metrics_enabled);
         if let Err(error) = self.poll_lifecycle() {
             self.lifecycle_error(&error);
         }
@@ -32,7 +33,13 @@ impl App {
         }
         // Drain input before accepting results, so queued cancellation/release
         // wins over a late worker completion in the same UI turn.
-        for received in self.input.take_timed() {
+        let inputs = self.input.take_timed();
+        if !inputs.is_empty() {
+            crate::diagnostics::stage_elapsed("ui-pre-input", ui_started);
+        }
+        for received in inputs {
+            crate::diagnostics::stage_elapsed("input-delivery", received.received);
+            let apply_started = crate::diagnostics::sample_start(self.config.metrics_enabled);
             let event = received.event;
             if !self.input.permits(event.session) {
                 self.input.acknowledge(event.session);
@@ -51,6 +58,7 @@ impl App {
                 self.input.cancel(event.session);
                 self.complete_switch();
             }
+            crate::diagnostics::stage_elapsed("input-apply", apply_started);
         }
         self.poll_accessibility();
         if self.input_session == 0 {

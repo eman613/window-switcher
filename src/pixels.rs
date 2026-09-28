@@ -34,6 +34,9 @@ impl PixelImage {
         color: u32,
         opacity: u8,
     ) {
+        if opacity == 0 {
+            return;
+        }
         for y in rect.top.max(0)..rect.bottom.min(self.height) {
             for x in rect.left.max(0)..rect.right.min(self.width) {
                 let coverage = rounded_coverage(rect, radius, x, y);
@@ -178,7 +181,16 @@ fn rounded_coverage(rect: PixelRect, radius: f32, x: i32, y: i32) -> f32 {
     if radius == 0.0 {
         1.0
     } else {
-        (radius + 0.5 - (px - cx).hypot(py - cy)).clamp(0.0, 1.0)
+        // Only corner pixels need a two-dimensional distance. The straight
+        // strips retain the exact hypot(x, 0) result without a library call.
+        let distance = if px == cx {
+            (py - cy).abs()
+        } else if py == cy {
+            (px - cx).abs()
+        } else {
+            (px - cx).hypot(py - cy)
+        };
+        (radius + 0.5 - distance).clamp(0.0, 1.0)
     }
 }
 

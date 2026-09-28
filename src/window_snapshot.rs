@@ -16,7 +16,7 @@ use std::{
     path::Path,
     sync::Arc,
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use windows::Win32::Foundation::HWND;
 
@@ -44,14 +44,21 @@ pub(crate) struct WindowSnapshot {
 }
 
 pub(crate) struct SnapshotService {
-    mailbox: Arc<Mailbox<SnapshotRequest, Result<WindowSnapshot>>>,
+    mailbox: Arc<Mailbox<SnapshotRequest, SnapshotOutput>>,
     thread: Option<JoinHandle<()>>,
     pub(crate) lifetimes: Arc<lifetimes::WindowLifetimes>,
+    metrics_enabled: bool,
 }
 
 struct SnapshotRequest {
     kind: SwitchKind,
     scope: MonitorScope,
+    submitted: Option<Instant>,
+}
+
+struct SnapshotOutput {
+    result: Result<WindowSnapshot>,
+    completed: Option<Instant>,
 }
 
 impl SnapshotService {
@@ -63,7 +70,7 @@ impl SnapshotService {
         lifetimes: Arc<lifetimes::WindowLifetimes>,
         target: Arc<WindowTarget>,
     ) -> Result<Self> {
-        let mailbox = Mailbox::<SnapshotRequest, Result<WindowSnapshot>>::new(1);
+        let mailbox = Mailbox::<SnapshotRequest, SnapshotOutput>::new(1);
         let shared = mailbox.clone();
         let configuration = config.clone();
         let ini_dir = ini_dir.to_path_buf();
@@ -93,7 +100,12 @@ impl SnapshotService {
                     else {
                         continue;
                     };
-                    let SnapshotRequest { kind, scope } = request;
+                    let SnapshotRequest {
+                        kind,
+                        scope,
+                        submitted,
+                    } = request;
+                    crate::diagnostics::stage_elapsed("snapshot-queue", submitted);
                     let started = crate::diagnostics::sample_start(configuration.metrics_enabled);
                     let result = (|| {
                         let mut scan = scan::Scan::begin(
@@ -103,6 +115,7 @@ impl SnapshotService {
                             registry.revision(),
                             target.window_id(),
                         )?;
+                        crate::diagnostics::stage_elapsed("snapshot-setup", started);
                         while shared.current(generation) && target.is_live() {
                             if scan.step(
                                 &mut metadata,
@@ -145,6 +158,10 @@ impl SnapshotService {
                         Ok(None) => continue,
                         Err(error) => Err(error),
                     };
+                    let output = SnapshotOutput {
+                        result: output,
+                        completed: crate::diagnostics::sample_start(configuration.metrics_enabled),
+                    };
                     if shared.publish(generation, output) {
                         target.try_post(WM_SNAPSHOT);
                     }
@@ -155,17 +172,29 @@ impl SnapshotService {
             mailbox,
             thread: Some(thread),
             lifetimes,
+            metrics_enabled: config.metrics_enabled,
         })
     }
 
     pub(crate) fn request(&self, kind: SwitchKind, scope: MonitorScope) -> u64 {
-        self.mailbox.request(SnapshotRequest { kind, scope })
+        self.mailbox.request(SnapshotRequest {
+            kind,
+            scope,
+            submitted: crate::diagnostics::sample_start(self.metrics_enabled),
+        })
     }
     pub(crate) fn cancel(&self) {
         self.mailbox.cancel();
     }
     pub(crate) fn take(&self) -> Vec<(u64, Result<WindowSnapshot>)> {
-        self.mailbox.take()
+        self.mailbox
+            .take()
+            .into_iter()
+            .map(|(generation, output)| {
+                crate::diagnostics::stage_elapsed("snapshot-delivery", output.completed);
+                (generation, output.result)
+            })
+            .collect()
     }
     pub(crate) fn healthy(&self) -> bool {
         !self.mailbox.closed()
