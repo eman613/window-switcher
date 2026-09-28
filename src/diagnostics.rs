@@ -10,6 +10,8 @@ use windows::Win32::{
 
 use crate::config::Config;
 
+pub(crate) mod ui;
+
 pub(crate) fn sample_start(enabled: bool) -> Option<Instant> {
     enabled.then(Instant::now)
 }

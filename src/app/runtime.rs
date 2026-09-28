@@ -436,6 +436,7 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let _callback_time = crate::diagnostics::ui::UiRegion::callback();
     if msg == WM_NCHITTEST {
         return LRESULT(HTCLIENT as isize);
     }
@@ -451,6 +452,7 @@ unsafe extern "system" fn window_proc(
         {
             // UIA must receive its LRESULT immediately, even during a reentrant
             // native callback. The provider owns values, never a borrow of App.
+            let _uia_time = crate::diagnostics::ui::UiRegion::accessibility();
             return windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(
                 hwnd,
                 wparam,
@@ -500,6 +502,7 @@ unsafe extern "system" fn window_proc(
         PostQuitMessage(0);
         return LRESULT(0);
     }
+    let _default_time = crate::diagnostics::ui::UiRegion::default_proc(msg);
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
