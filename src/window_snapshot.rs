@@ -26,6 +26,7 @@ pub(crate) mod lifetimes;
 mod scan;
 #[cfg(test)]
 mod tests;
+mod timings;
 
 pub(crate) const WM_SNAPSHOT: u32 = 6010;
 
@@ -131,14 +132,22 @@ impl SnapshotService {
                                     !shared.current(generation) || !target.is_live()
                                 },
                             ) {
+                                let snapshot = scan.finish()?;
+                                let grouping_started = crate::diagnostics::sample_start(
+                                    log::log_enabled!(log::Level::Debug),
+                                );
                                 let Some(mut snapshot) =
-                                    grouping.regroup(scan.finish()?, kind, || {
+                                    grouping.regroup(snapshot, kind, || {
                                         shared.current(generation) && target.is_live()
                                     })?
                                 else {
                                     return Ok(None);
                                 };
                                 mru.order(&mut snapshot, kind, &configuration);
+                                crate::diagnostics::stage_elapsed(
+                                    "snapshot-grouping",
+                                    grouping_started,
+                                );
                                 return Ok(Some(snapshot));
                             }
                             thread::yield_now();

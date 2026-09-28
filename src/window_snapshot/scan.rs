@@ -2,6 +2,7 @@ use super::{
     enumeration,
     filter::{FilterRejection, WindowFilter, FILTER_REJECTION_COUNT},
     lifetimes::WindowLifetimes,
+    timings::{QueryStage, QueryTimings},
     WindowRecord, WindowSnapshot,
 };
 use crate::{
@@ -30,6 +31,7 @@ pub(super) struct Scan {
     revision: u64,
     text_bytes: usize,
     rejected: [u32; FILTER_REJECTION_COUNT],
+    timings: QueryTimings,
 }
 
 impl Scan {
@@ -70,6 +72,7 @@ impl Scan {
             revision,
             text_bytes: 0,
             rejected: [0; FILTER_REJECTION_COUNT],
+            timings: QueryTimings::new(log::log_enabled!(log::Level::Debug)),
         })
     }
 
@@ -83,7 +86,10 @@ impl Scan {
     ) -> bool {
         let started = Instant::now();
         while self.next < self.windows.len() {
-            if cancelled(metadata) {
+            if self
+                .timings
+                .measure(QueryStage::Interruption, || cancelled(metadata))
+            {
                 return false;
             }
             let window = self.windows[self.next];
@@ -107,14 +113,20 @@ impl Scan {
     ) {
         let hwnd = HWND(window as _);
         let inspected = (|| {
-            let state = self.filter.inspect_window_style(hwnd)?;
-            let pid = utils::get_window_pid(hwnd);
+            let state = self
+                .timings
+                .measure(QueryStage::Style, || self.filter.inspect_window_style(hwnd))?;
+            let pid = self
+                .timings
+                .measure(QueryStage::ProcessId, || utils::get_window_pid(hwnd));
             // Exclude our own windows before text queries: GetWindowText can
             // dispatch WM_GETTEXT synchronously for windows in this process.
             if self.excluded_process != 0 && pid == self.excluded_process {
                 return Err(FilterRejection::Process);
             }
-            let (title, minimized) = self.filter.inspect_content(hwnd, state)?;
+            let (title, minimized) = self
+                .filter
+                .inspect_content(hwnd, state, &mut self.timings)?;
             Ok((title, minimized, pid))
         })();
         let (title, minimized, pid) = match inspected {
@@ -124,12 +136,16 @@ impl Scan {
                 return;
             }
         };
-        let Some(native_process) = metadata.lookup(pid) else {
+        let Some(native_process) = self
+            .timings
+            .measure(QueryStage::Metadata, || metadata.lookup(pid))
+        else {
             self.reject(FilterRejection::Metadata);
             return;
         };
-        let Some(identity) = WindowIdentity::from_process(hwnd, native_process.identity, lifetimes)
-        else {
+        let Some(identity) = self.timings.measure(QueryStage::Identity, || {
+            WindowIdentity::from_process(hwnd, native_process.identity, lifetimes)
+        }) else {
             self.reject(FilterRejection::Identity);
             return;
         };
@@ -137,11 +153,11 @@ impl Scan {
             .executable
             .eq_ignore_ascii_case("ApplicationFrameHost.exe")
         {
-            let Some(child) = self
-                .owners
-                .get(&window)
-                .and_then(|child| metadata.lookup(utils::get_window_pid(HWND(*child as _))))
-            else {
+            let Some(child) = self.timings.measure(QueryStage::OwnerMetadata, || {
+                self.owners
+                    .get(&window)
+                    .and_then(|child| metadata.lookup(utils::get_window_pid(HWND(*child as _))))
+            }) else {
                 self.reject(FilterRejection::Metadata);
                 return;
             };
@@ -161,7 +177,9 @@ impl Scan {
             self.reject(FilterRejection::Elevated);
             return;
         }
-        let group = browser::group_key(&process.path, hwnd);
+        let group = self.timings.measure(QueryStage::GroupKey, || {
+            browser::group_key(&process.path, hwnd)
+        });
         // Count shared strings conservatively for every retained record. A
         // pathological desktop must not allocate 4096 maximum-length titles.
         self.text_bytes = self.text_bytes.saturating_add(
@@ -187,6 +205,7 @@ impl Scan {
     }
 
     pub(super) fn finish(self) -> Result<WindowSnapshot> {
+        self.timings.report();
         ensure!(
             self.text_bytes <= TEXT_LIMIT,
             "snapshot stage=text-budget exceeded"

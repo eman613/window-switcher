@@ -188,8 +188,10 @@ pub(crate) fn focus_window(hwnd: HWND, allowed: impl Fn() -> bool) -> bool {
 
 pub fn get_window_title(hwnd: HWND) -> String {
     const LIMIT: usize = 32768;
-    let mut capacity = (unsafe { GetWindowTextLengthW(hwnd) }.max(0) as usize + 1).clamp(2, LIMIT);
-    for _ in 0..3 {
+    let mut capacity = 512;
+    // Most captions fit on the first read. Query their length only after a
+    // full buffer, then retain the original three bounded fallback attempts.
+    for attempt in 0..4 {
         let mut buffer = vec![0u16; capacity];
         let length = unsafe { GetWindowTextW(hwnd, &mut buffer) }.max(0) as usize;
         if length < capacity - 1 {
@@ -198,7 +200,11 @@ pub fn get_window_title(hwnd: HWND) -> String {
         if capacity == LIMIT {
             break;
         }
-        capacity = (capacity * 2).min(LIMIT);
+        capacity = if attempt == 0 {
+            (unsafe { GetWindowTextLengthW(hwnd) }.max(0) as usize + 1).clamp(capacity * 2, LIMIT)
+        } else {
+            (capacity * 2).min(LIMIT)
+        };
     }
     debug!("window stage=title truncated-or-changing");
     String::new()

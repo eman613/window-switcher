@@ -1,3 +1,4 @@
+use super::timings::{QueryStage, QueryTimings};
 use crate::{
     config::{Config, MonitorFilter},
     keyboard::state::SwitchKind,
@@ -142,7 +143,11 @@ impl WindowFilter {
     }
 
     pub(super) fn inspect(&self, hwnd: HWND) -> Result<(String, bool), FilterRejection> {
-        self.inspect_content(hwnd, self.inspect_window_style(hwnd)?)
+        self.inspect_content(
+            hwnd,
+            self.inspect_window_style(hwnd)?,
+            &mut QueryTimings::default(),
+        )
     }
 
     pub(super) fn inspect_window_style(
@@ -161,17 +166,23 @@ impl WindowFilter {
         &self,
         hwnd: HWND,
         state: (bool, bool, bool, bool),
+        timings: &mut QueryTimings,
     ) -> Result<(String, bool), FilterRejection> {
-        if utils::is_cloaked_window(hwnd, self.only_current_desktop) {
+        if timings.measure(QueryStage::Cloak, || {
+            utils::is_cloaked_window(hwnd, self.only_current_desktop)
+        }) {
             return Err(FilterRejection::Cloaked);
         }
-        let (width, height) =
-            utils::get_window_size(hwnd).map_err(|_| FilterRejection::Geometry)?;
-        let dpi = crate::layout::window_monitor_dpi(hwnd).map_err(|_| FilterRejection::Geometry)?;
+        let (width, height) = timings
+            .measure(QueryStage::Geometry, || utils::get_window_size(hwnd))
+            .map_err(|_| FilterRejection::Geometry)?;
+        let dpi = timings
+            .measure(QueryStage::Dpi, || crate::layout::window_monitor_dpi(hwnd))
+            .map_err(|_| FilterRejection::Geometry)?;
         if (!state.0 && (width <= 0 || height <= 0)) || !self.allows_size(width, height, dpi) {
             return Err(FilterRejection::Geometry);
         }
-        let title = utils::get_window_title(hwnd);
+        let title = timings.measure(QueryStage::Title, || utils::get_window_title(hwnd));
         if (!self.untitled && title.is_empty()) || self.titles.contains(&title) {
             return Err(FilterRejection::Title);
         }

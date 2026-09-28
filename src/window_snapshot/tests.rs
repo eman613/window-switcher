@@ -48,6 +48,24 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn native_title_buffer_boundaries_preserve_full_unicode_text() {
+    let window = Fixture::new(false);
+    for title in [
+        String::new(),
+        "短标题".into(),
+        "x".repeat(511),
+        "x".repeat(512),
+        "x".repeat(1023),
+        format!("{}😀", "x".repeat(510)),
+        "窗口".repeat(1000),
+        "x".repeat(32766),
+    ] {
+        window.title(&title);
+        assert_eq!(utils::get_window_title(window.0), title);
+    }
+}
+
+#[test]
 fn long_native_titles_and_process_metadata_survive_background_scan() {
     let window = Fixture::new(false);
     let title = "窗口标题 ".repeat(900);
