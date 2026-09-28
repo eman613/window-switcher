@@ -6,10 +6,10 @@ use windows::{
     core::w,
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-        System::LibraryLoader::GetModuleHandleW,
+        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
         UI::{
             Controls::WM_MOUSELEAVE,
-            Input::Ime::{ImmAssociateContextEx, HIMC},
+            Input::Ime::{ImmAssociateContextEx, ImmDisableIME, HIMC},
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
                 GetWindowLongPtrW, IsWindow, KillTimer, LoadCursorW, PostQuitMessage,
@@ -62,6 +62,11 @@ pub(super) fn run(
     diagnostics: crate::diagnostics::Diagnostics,
 ) -> Result<()> {
     let _com = ComApartment::sta()?;
+    if !loaded.config.search_enable && !loaded.config.details_enable {
+        // This process cannot create text entry surfaces until a config restart.
+        let disabled = unsafe { ImmDisableIME(GetCurrentThreadId()) }.as_bool();
+        debug!("ui stage=nontext-thread-ime disabled={disabled}");
+    }
     let window = ApplicationWindow::create()?;
     let hwnd = window.0;
     let mut painter = GdiAAPainter::new(hwnd, &loaded.config)?;
@@ -388,8 +393,8 @@ impl ApplicationWindow {
         .context("ui stage=create-window")?;
         let window = Self(hwnd);
         // This surface never edits text. Keep its modifier/navigation messages
-        // out of IME composition; Search owns a separate native EDIT context.
-        // Do not disable IME for the thread or for this window's children.
+        // out of IME composition. Text-capable UI threads retain their input
+        // services and Search owns a separate native EDIT context.
         if !unsafe { ImmAssociateContextEx(hwnd, HIMC::default(), 0) }.as_bool() {
             debug!("ui stage=panel-ime-detach unavailable; retaining system association");
         }
