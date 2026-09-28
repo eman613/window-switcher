@@ -20,6 +20,7 @@ use std::{
 };
 use windows::Win32::Foundation::HWND;
 
+mod enumeration;
 pub(crate) mod filter;
 pub(crate) mod lifetimes;
 mod scan;

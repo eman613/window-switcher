@@ -1,53 +1,28 @@
 use super::{
+    enumeration,
     filter::{FilterRejection, WindowFilter, FILTER_REJECTION_COUNT},
     lifetimes::WindowLifetimes,
     WindowRecord, WindowSnapshot,
 };
 use crate::{
-    layout::MAX_WINDOWS,
     process_metadata::ProcessMetadataCache,
     utils::{self, browser, window_identity::WindowIdentity},
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 use indexmap::IndexMap;
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
-use windows::{
-    core::BOOL,
-    Win32::{
-        Foundation::{HWND, LPARAM},
-        UI::WindowsAndMessaging::EnumWindows,
-    },
-};
+use windows::Win32::Foundation::HWND;
 
-struct Enumeration {
-    windows: Vec<usize>,
-    overflow: bool,
-    excluded: usize,
-    excluded_process: u32,
-}
 const TEXT_LIMIT: usize = 16 * 1024 * 1024;
-unsafe extern "system" fn enumerate(hwnd: HWND, parameter: LPARAM) -> BOOL {
-    let output = &mut *(parameter.0 as *mut Enumeration);
-    if hwnd.0 as usize == output.excluded
-        || (output.excluded_process != 0 && utils::get_window_pid(hwnd) == output.excluded_process)
-    {
-        return BOOL(1);
-    }
-    if output.windows.len() == MAX_WINDOWS {
-        output.overflow = true;
-        return BOOL(0);
-    }
-    output.windows.push(hwnd.0 as usize);
-    BOOL(1)
-}
 
 pub(super) struct Scan {
     windows: Vec<usize>,
     owners: HashMap<usize, usize>,
+    excluded_process: u32,
     next: usize,
     groups: IndexMap<Arc<str>, Vec<WindowRecord>>,
     filter: WindowFilter,
@@ -69,33 +44,21 @@ impl Scan {
         revision: u64,
         excluded: usize,
     ) -> Result<Self> {
-        let mut enumeration = Enumeration {
-            windows: Vec::new(),
-            overflow: false,
-            excluded,
-            excluded_process: if excluded == 0 {
-                0
-            } else {
-                utils::get_window_pid(HWND(excluded as _))
-            },
-        };
-        let status =
-            unsafe { EnumWindows(Some(enumerate), LPARAM(&mut enumeration as *mut _ as isize)) };
-        anyhow::ensure!(
-            !enumeration.overflow,
-            "snapshot stage=enumerate window-limit-exceeded"
-        );
-        status.context("snapshot stage=enumerate")?;
+        let (windows, excluded_process) = enumeration::collect(excluded)?;
         let mut owners = HashMap::new();
-        for &window in &enumeration.windows {
+        for &window in &windows {
             let owner = utils::get_owner_window(HWND(window as _)).0 as usize;
-            if owner != 0 {
+            if owner != 0
+                && (excluded_process == 0
+                    || utils::get_window_pid(HWND(window as _)) != excluded_process)
+            {
                 owners.entry(owner).or_insert(window);
             }
         }
         Ok(Self {
-            windows: enumeration.windows,
+            windows,
             owners,
+            excluded_process,
             next: 0,
             groups: IndexMap::new(),
             filter,
@@ -139,14 +102,25 @@ impl Scan {
         lifetimes: &WindowLifetimes,
     ) {
         let hwnd = HWND(window as _);
-        let (title, minimized) = match self.filter.inspect(hwnd) {
+        let inspected = (|| {
+            let state = self.filter.inspect_window_style(hwnd)?;
+            let pid = utils::get_window_pid(hwnd);
+            // Exclude our own windows before text queries: GetWindowText can
+            // dispatch WM_GETTEXT synchronously for windows in this process.
+            if self.excluded_process != 0 && pid == self.excluded_process {
+                return Err(FilterRejection::Process);
+            }
+            let (title, minimized) = self.filter.inspect_content(hwnd, state)?;
+            Ok((title, minimized, pid))
+        })();
+        let (title, minimized, pid) = match inspected {
             Ok(value) => value,
             Err(reason) => {
                 self.reject(reason);
                 return;
             }
         };
-        let Some(native_process) = metadata.lookup(utils::get_window_pid(hwnd)) else {
+        let Some(native_process) = metadata.lookup(pid) else {
             self.reject(FilterRejection::Metadata);
             return;
         };

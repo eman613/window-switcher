@@ -142,11 +142,26 @@ impl WindowFilter {
     }
 
     pub(super) fn inspect(&self, hwnd: HWND) -> Result<(String, bool), FilterRejection> {
+        self.inspect_content(hwnd, self.inspect_window_style(hwnd)?)
+    }
+
+    pub(super) fn inspect_window_style(
+        &self,
+        hwnd: HWND,
+    ) -> Result<(bool, bool, bool, bool), FilterRejection> {
         if !self.scope.allows(self.monitor, hwnd) {
             return Err(FilterRejection::Scope);
         }
         let state = utils::get_window_state(hwnd);
         self.inspect_style(state)?;
+        Ok(state)
+    }
+
+    pub(super) fn inspect_content(
+        &self,
+        hwnd: HWND,
+        state: (bool, bool, bool, bool),
+    ) -> Result<(String, bool), FilterRejection> {
         if utils::is_cloaked_window(hwnd, self.only_current_desktop) {
             return Err(FilterRejection::Cloaked);
         }

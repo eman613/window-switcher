@@ -3,8 +3,8 @@ use crate::utils;
 use windows::{
     core::{w, PCWSTR},
     Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, SetWindowTextW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+        CreateWindowExW, DestroyWindow, SetWindowLongPtrW, SetWindowTextW, GWLP_HWNDPARENT,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
     },
 };
 
@@ -119,4 +119,29 @@ fn native_tool_topmost_untitled_and_title_exclusions_follow_ini_filters() {
         .values()
         .flatten()
         .any(|record| record.identity.hwnd() == window.0));
+}
+
+#[test]
+fn deferred_process_exclusion_rejects_other_own_top_level_and_owned_windows() {
+    let excluded = Fixture::new(false);
+    let sibling = Fixture::new(false);
+    let owned = Fixture::new(false);
+    unsafe { SetWindowLongPtrW(owned.0, GWLP_HWNDPARENT, sibling.0 .0 as isize) };
+    assert_eq!(utils::get_owner_window(owned.0), sibling.0);
+    let config = Config::default();
+    let filter = filter::WindowFilter::from_config(&config, SwitchKind::Apps);
+    assert!(filter.allows(sibling.0).is_some());
+    assert!(filter.allows(owned.0).is_some());
+    let registry = lifetimes::WindowLifetimes::default();
+    let mut metadata = ProcessMetadataCache::new(&config);
+    let mut scan = scan::Scan::begin(filter, true, 0, excluded.0 .0 as usize).unwrap();
+    while !scan.step(&mut metadata, &registry, Duration::from_millis(50), |_| {
+        false
+    }) {}
+    let snapshot = scan.finish().unwrap();
+    assert!(!snapshot
+        .groups
+        .values()
+        .flatten()
+        .any(|record| { [excluded.0, sibling.0, owned.0].contains(&record.identity.hwnd()) }));
 }
