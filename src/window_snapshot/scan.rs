@@ -44,7 +44,10 @@ impl Scan {
         revision: u64,
         excluded: usize,
     ) -> Result<Self> {
+        let started = crate::diagnostics::sample_start(log::log_enabled!(log::Level::Debug));
         let (windows, excluded_process) = enumeration::collect(excluded)?;
+        crate::diagnostics::stage_elapsed("snapshot-collect", started);
+        let started = crate::diagnostics::sample_start(log::log_enabled!(log::Level::Debug));
         let mut owners = HashMap::new();
         for &window in &windows {
             let owner = utils::get_owner_window(HWND(window as _)).0 as usize;
@@ -55,6 +58,7 @@ impl Scan {
                 owners.entry(owner).or_insert(window);
             }
         }
+        crate::diagnostics::stage_elapsed("snapshot-owners", started);
         Ok(Self {
             windows,
             owners,
