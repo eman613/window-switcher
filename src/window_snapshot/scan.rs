@@ -54,6 +54,7 @@ impl Scan {
         for &window in &windows {
             let owner = utils::get_owner_window(HWND(window as _)).0 as usize;
             if owner != 0
+                && !owners.contains_key(&owner)
                 && (excluded_process == 0
                     || utils::get_window_pid(HWND(window as _)) != excluded_process)
             {
@@ -237,6 +238,29 @@ impl Scan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_map_preserves_first_owned_window_and_excludes_own_process() {
+        use super::super::tests::Fixture;
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowLongPtrW, GWLP_HWNDPARENT};
+
+        let owner = Fixture::new(false);
+        let first = Fixture::new(false);
+        let second = Fixture::new(false);
+        for owned in [&first, &second] {
+            unsafe { SetWindowLongPtrW(owned.0, GWLP_HWNDPARENT, owner.0 .0 as isize) };
+        }
+        let config = crate::config::Config::default();
+        let filter = WindowFilter::from_config(&config, crate::keyboard::state::SwitchKind::Apps);
+        let scan = Scan::begin(filter.clone(), true, 0, 0).unwrap();
+        assert_eq!(
+            scan.owners.get(&(owner.0 .0 as usize)),
+            Some(&(second.0 .0 as usize))
+        );
+        let scan = Scan::begin(filter, true, 0, first.0 .0 as usize).unwrap();
+        assert!(!scan.owners.contains_key(&(owner.0 .0 as usize)));
+    }
+
     #[test]
     fn oversized_text_is_rejected_instead_of_publishing_an_incomplete_snapshot() {
         let config = crate::config::Config::default();

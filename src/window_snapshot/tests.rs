@@ -8,9 +8,9 @@ use windows::{
     },
 };
 
-struct Fixture(HWND);
+pub(super) struct Fixture(pub(super) HWND);
 impl Fixture {
-    fn new(tool: bool) -> Self {
+    pub(super) fn new(tool: bool) -> Self {
         let style = if tool {
             WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
         } else {
