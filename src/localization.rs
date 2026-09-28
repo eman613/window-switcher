@@ -1,5 +1,7 @@
 use crate::{config::Language, startup::StartupState};
 use std::sync::atomic::{AtomicBool, Ordering};
+mod quick_settings;
+mod search;
 
 static CHINESE: AtomicBool = AtomicBool::new(true);
 
@@ -53,6 +55,20 @@ impl Text {
     }
     pub(crate) fn exit(self) -> &'static str {
         self.choose("退出", "Exit")
+    }
+    pub(crate) fn privilege(self, elevated: bool) -> &'static str {
+        if elevated {
+            self.choose("当前运行权限：管理员", "Running as administrator")
+        } else {
+            self.choose("当前运行权限：普通", "Running with standard permissions")
+        }
+    }
+    pub(crate) fn elevate(self, busy: bool) -> &'static str {
+        if busy {
+            self.choose("正在交接运行实例…", "Handing over to the new instance…")
+        } else {
+            self.choose("以管理员身份重新启动", "Restart as administrator")
+        }
     }
     pub(crate) fn pause(self, paused: bool, busy: bool) -> &'static str {
         if busy {
@@ -120,36 +136,6 @@ impl Text {
     pub(crate) fn untitled_window(self) -> &'static str {
         self.choose("无标题窗口", "Untitled window")
     }
-    pub(crate) fn search_results_label(self) -> &'static str {
-        self.choose("窗口结果", "Window results")
-    }
-    pub(crate) fn search_loading(self) -> &'static str {
-        self.choose(
-            "正在查找窗口… 按 Esc 取消",
-            "Finding windows… Press Escape to cancel",
-        )
-    }
-    pub(crate) fn search_failure(self) -> &'static str {
-        self.choose(
-            "无法完成搜索。请按 Esc 返回，检查日志后重试或重启应用。",
-            "Search failed. Press Escape, check the log, and retry or restart the application.",
-        )
-    }
-    pub(crate) fn search_count(self, shown: usize, total: usize) -> String {
-        if total == 0 {
-            return self
-                .choose(
-                    "没有匹配窗口。请修改搜索内容，或按 Esc 返回。",
-                    "No matching windows. Change the search or press Escape to return.",
-                )
-                .into();
-        }
-        if self.chinese {
-            format!("显示 {shown} / {total} 个窗口 · Enter 切换 · Esc 取消")
-        } else {
-            format!("Showing {shown} of {total} windows · Enter to switch · Escape to cancel")
-        }
-    }
     pub(crate) fn switcher_help(self) -> &'static str {
         self.choose("循环选择应用，松开快捷键修饰键激活。按 Esc 取消；也可点击应用图标。", "Cycle through applications and release the shortcut modifier to activate. Press Escape to cancel, or click an application icon.")
     }
@@ -168,10 +154,6 @@ impl Text {
     pub(crate) fn config_saved(self) -> &'static str {
         self.choose("设置已保存", "Settings saved")
     }
-    pub(crate) fn restart_required(self) -> &'static str {
-        self.choose("设置已写入 INI。自动重启已关闭，请退出并重新启动应用后生效。", "Settings were saved to the INI. Automatic restart is disabled; exit and restart the application to apply them.")
-    }
-
     pub(crate) fn failure(self, kind: FailureKind, detail: &str) -> String {
         let (code, chinese, english) = match kind {
             FailureKind::Configuration => ("WS-CONFIG", "设置未能应用。请检查 INI 的格式、合法值和文件权限；原有配置不会被默认值覆盖。",

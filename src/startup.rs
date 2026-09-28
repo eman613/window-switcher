@@ -12,7 +12,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 
 use crate::{
-    config::{settings::save_startup_enabled, Config},
+    config::{settings::save_startup_enabled, Config, LoadedConfig, StartupEnabled},
     utils::scheduled_task::current_user_sid,
     window_target::WindowTarget,
 };
@@ -33,7 +33,7 @@ pub(crate) enum StartupState {
 
 pub(crate) enum StartupUpdate {
     Inspected(Result<bool, String>),
-    Saved(Result<(), String>),
+    Saved(Result<Box<LoadedConfig>, String>),
 }
 
 #[derive(Default)]
@@ -41,7 +41,6 @@ pub(crate) struct Startup {
     pub(crate) state: StartupState,
     events: Option<Receiver<StartupUpdate>>,
     canceled: Arc<AtomicBool>,
-    configuration: Option<Config>,
     path: PathBuf,
     target: Option<Arc<WindowTarget>>,
 }
@@ -87,7 +86,6 @@ impl Startup {
             state: StartupState::Pending,
             events: Some(events),
             canceled,
-            configuration: Some(configuration.clone()),
             path,
             target: Some(target),
         })
@@ -109,10 +107,10 @@ impl Startup {
         match &result {
             StartupUpdate::Inspected(Ok(enabled)) => self.state = StartupState::Ready(*enabled),
             StartupUpdate::Inspected(Err(_)) => self.state = StartupState::Failed,
-            StartupUpdate::Saved(Ok(())) => {
+            StartupUpdate::Saved(Ok(_)) => {
                 // Actual OS state is unchanged until the replacement applies the
-                // saved INI. Keep the old checkmark and disable repeated toggles.
-                if let StartupState::Ready(enabled) = self.state {
+                // saved INI. Keep actual state separate from the saved preference.
+                if let StartupState::Ready(enabled) | StartupState::Saved(enabled) = self.state {
                     self.state = StartupState::Saved(enabled);
                 }
             }
@@ -122,17 +120,22 @@ impl Startup {
         Some(result)
     }
 
-    pub(crate) fn toggle(&mut self) -> Result<()> {
+    pub(crate) fn toggle(&mut self, expected: &Config) -> Result<()> {
         if self.canceled.load(Ordering::Acquire) {
             bail!("应用正在退出；自启动设置未修改");
         }
-        let StartupState::Ready(enabled) = self.state else {
-            bail!("自启动状态尚未确认，或设置正在等待重启生效");
+        let (StartupState::Ready(actual) | StartupState::Saved(actual)) = self.state else {
+            bail!("自启动状态尚未确认，请稍后重试");
         };
         if self.events.is_some() {
             bail!("自启动设置正在保存，请稍后再试");
         }
-        let configuration = self.configuration.clone().context("自启动尚未初始化")?;
+        let configuration = expected.clone();
+        let enabled = match configuration.startup_enabled {
+            StartupEnabled::Auto => actual,
+            StartupEnabled::Yes => true,
+            StartupEnabled::No => false,
+        };
         let path = self.path.clone();
         let target = self.target.clone().context("自启动窗口已关闭")?;
         let canceled = self.canceled.clone();
@@ -144,6 +147,7 @@ impl Startup {
                     return;
                 }
                 let result = save_startup_enabled(&path, &configuration, !enabled)
+                    .map(Box::new)
                     .map_err(|error| format!("{error:#}"));
                 if !canceled.load(Ordering::Acquire) {
                     let _ = tx.try_send(StartupUpdate::Saved(result));

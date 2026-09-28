@@ -5,26 +5,25 @@ use crate::config::{reload::load_snapshot, test_support::TestDirectory, StartupE
 use windows::Win32::Foundation::HWND;
 
 #[test]
-fn tray_save_changes_desired_ini_and_keeps_the_effective_checkmark_until_restart() {
+fn tray_saves_can_continue_from_pending_ini_without_changing_effective_startup() {
     let directory = TestDirectory::new();
     let text = "; custom comment\nauto_restart=no\n[switch-apps]\nbadge_max=300\n[startup]\nenabled=auto\n";
     fs::write(directory.ini(), text).unwrap();
     let loaded = load_snapshot(text.as_bytes(), &directory.ini()).unwrap();
     let mut startup = Startup {
         state: StartupState::Ready(true),
-        configuration: Some(loaded.config),
         path: directory.ini(),
         target: Some(Arc::new(WindowTarget::new(HWND::default()))),
         events: None,
         canceled: Arc::new(AtomicBool::new(false)),
     };
-    startup.toggle().unwrap();
+    startup.toggle(&loaded.config).unwrap();
     assert!(startup.busy());
-    assert!(startup.toggle().is_err());
+    assert!(startup.toggle(&loaded.config).is_err());
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(result) = startup.poll() {
-            assert!(matches!(result, StartupUpdate::Saved(Ok(()))));
+            assert!(matches!(result, StartupUpdate::Saved(Ok(_))));
             break;
         }
         assert!(Instant::now() < deadline);
@@ -32,7 +31,6 @@ fn tray_save_changes_desired_ini_and_keeps_the_effective_checkmark_until_restart
     }
     assert_eq!(startup.state, StartupState::Saved(true));
     assert!(!startup.busy());
-    assert!(startup.toggle().is_err());
     let saved = fs::read(directory.ini()).unwrap();
     let configured = load_snapshot(&saved, &directory.ini()).unwrap().config;
     assert_eq!(configured.startup_enabled, StartupEnabled::No);
@@ -41,6 +39,20 @@ fn tray_save_changes_desired_ini_and_keeps_the_effective_checkmark_until_restart
     assert!(String::from_utf8(saved)
         .unwrap()
         .starts_with("; custom comment\n"));
+    startup.toggle(&configured).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(result) = startup.poll() {
+            let StartupUpdate::Saved(Ok(loaded)) = result else {
+                panic!("save failed")
+            };
+            assert_eq!(loaded.config.startup_enabled, StartupEnabled::Yes);
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(startup.state, StartupState::Saved(true));
 }
 
 #[test]
@@ -50,7 +62,6 @@ fn worker_exit_is_unknown_instead_of_disabled_and_canceled_ui_cannot_write() {
         events: Some(rx),
         state: StartupState::Pending,
         canceled: Arc::new(AtomicBool::new(false)),
-        configuration: None,
         path: PathBuf::new(),
         target: None,
     };
@@ -64,5 +75,5 @@ fn worker_exit_is_unknown_instead_of_disabled_and_canceled_ui_cannot_write() {
     assert!(!startup.busy());
     startup.state = StartupState::Ready(false);
     startup.cancel();
-    assert!(startup.toggle().is_err());
+    assert!(startup.toggle(&Config::default()).is_err());
 }

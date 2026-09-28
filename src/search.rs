@@ -4,9 +4,10 @@ mod service;
 
 use crate::{
     config::Config,
+    icon_cache::{CachedIcon, IconKey},
     layout::MonitorSnapshot,
     localization::Text,
-    picker::{messages, PickerWindow, ViewKind},
+    picker::{messages, PickerRow, PickerWindow, ViewKind},
     utils::window_identity::WindowIdentity,
     window_snapshot::WindowSnapshot,
     window_target::WindowTarget,
@@ -21,13 +22,25 @@ pub(crate) use crate::picker::MAX_QUERY_UNITS;
 pub(crate) struct SearchEntry {
     pub(crate) identity: WindowIdentity,
     pub(crate) executable: Arc<str>,
+    key: IconKey,
+    elevated: Option<bool>,
+    minimized: bool,
     title: Arc<str>,
     app: Arc<str>,
 }
 
 impl SearchEntry {
-    fn label(&self) -> String {
-        crate::picker::label(&format!("{} — {}", self.title, self.app))
+    fn row(&self, text: Text) -> PickerRow {
+        PickerRow {
+            key: self.key.clone(),
+            primary: crate::picker::label(&self.app),
+            secondary: crate::picker::label(&self.title),
+            meta: text
+                .search_window_meta(self.elevated, self.minimized)
+                .into(),
+            icon: None,
+            remembered: Default::default(),
+        }
     }
 }
 
@@ -91,6 +104,14 @@ impl SearchSession {
     }
     pub(crate) fn revision(&self) -> Option<u64> {
         self.source.as_ref().map(|source| source.revision)
+    }
+    pub(crate) fn visible_icon_keys(&self) -> Vec<IconKey> {
+        self.window.visible_icon_keys()
+    }
+    pub(crate) fn apply_icon(&self, key: &IconKey, image: Arc<CachedIcon>) {
+        if self.active() && !self.pending && !self.window.composing() {
+            self.window.apply_icon(key, image);
+        }
     }
     pub(crate) fn open(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
         if self.active() {
@@ -196,11 +217,11 @@ impl SearchSession {
                         .position(|entry| entry.identity == identity)
                 })
                 .unwrap_or(0);
-            self.window.replace(
-                &result
+            self.window.replace_rows(
+                result
                     .entries
                     .iter()
-                    .map(SearchEntry::label)
+                    .map(|entry| entry.row(self.text))
                     .collect::<Vec<_>>(),
                 selected,
                 generation,

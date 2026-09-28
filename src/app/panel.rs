@@ -123,7 +123,22 @@ impl App {
         for (generation, result) in self.icons.take() {
             if generation != self.switching.icon_generation
                 || !self.input.permits(self.input_session)
+                || !result.key.identity.is_current(&self.snapshots.lifetimes)
             {
+                continue;
+            }
+            if let Some(image) = result.image.as_ref().filter(|_| result.image_requested) {
+                self.remembered_icons.shift_remove(&result.key);
+                while self.remembered_icons.len() >= self.config.icon_cache_limit as usize {
+                    self.remembered_icons.shift_remove_index(0);
+                }
+                self.remembered_icons
+                    .insert(result.key.clone(), Arc::downgrade(image));
+            }
+            if let Some(search) = self.search.as_ref().filter(|search| search.active()) {
+                if let Some(image) = result.image {
+                    search.apply_icon(&result.key, image);
+                }
                 continue;
             }
             let Some(state) = &mut self.switch_apps_state else {
@@ -132,23 +147,15 @@ impl App {
             if let Some(entry) = state.apps.iter_mut().find(|entry| entry.key == result.key) {
                 let display_name = entry.application.name(&result.display_name);
                 let mut changed = entry.display_name != display_name;
-                if result.image_requested {
+                if result.image_requested && result.image.is_some() {
                     changed |= entry.icon.as_ref().map(|icon| icon.revision)
                         != result.image.as_ref().map(|icon| icon.revision);
-                    self.remembered_icons.shift_remove(&result.key);
-                    if let Some(image) = &result.image {
-                        while self.remembered_icons.len() >= self.config.icon_cache_limit as usize {
-                            self.remembered_icons.shift_remove_index(0);
-                        }
-                        self.remembered_icons
-                            .insert(result.key, Arc::downgrade(image));
-                    }
                     entry.icon = result.image;
                 }
                 entry.display_name = display_name;
                 self.switching.paint_dirty |= changed;
             }
-            if !result.image_requested {
+            if !result.image_requested || !result.complete {
                 continue;
             }
             self.switching.icon_pending = self.switching.icon_pending.saturating_sub(1);

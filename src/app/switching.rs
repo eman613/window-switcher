@@ -119,16 +119,6 @@ impl App {
             }
         }
         self.poll_icons();
-        if let Some(state) = &mut self.switch_apps_state {
-            let now = Instant::now();
-            for entry in &mut state.apps {
-                if entry.icon.as_ref().is_some_and(|icon| icon.expires <= now) {
-                    entry.icon = None;
-                    self.switching.paint_dirty = true;
-                    self.switching.icon_keys.clear();
-                }
-            }
-        }
         if self.switching.pending.is_none() && self.switching.finishing.is_none() {
             let revision = self
                 .switch_apps_state
@@ -217,8 +207,7 @@ impl App {
             let icon = old_icons
                 .get(&key)
                 .cloned()
-                .or_else(|| self.remembered_icons.get(&key).and_then(Weak::upgrade))
-                .filter(|icon| icon.expires > Instant::now());
+                .or_else(|| self.remembered_icons.get(&key).and_then(Weak::upgrade));
             let display_name = old
                 .as_ref()
                 .and_then(|state| {

@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 
-const MAGIC: &[u8; 4] = b"WSR2";
+const MAGIC: &[u8; 4] = b"WSR3";
 const MAX_SNAPSHOT: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub(super) enum Signal {
     Commit = 4,
     Committed = 5,
     Abort = 6,
+    Accepted = 7,
+    AcceptedAck = 8,
 }
 
 impl Signal {
@@ -33,6 +35,8 @@ impl Signal {
             4 => Self::Commit,
             5 => Self::Committed,
             6 => Self::Abort,
+            7 => Self::Accepted,
+            8 => Self::AcceptedAck,
             _ => bail!("restart stage=protocol unknown signal"),
         })
     }
@@ -98,7 +102,7 @@ mod tests {
         assert_eq!(read_snapshot(&mut wire.as_slice()).unwrap(), source);
         wire.pop();
         assert!(read_snapshot(&mut wire.as_slice()).is_err());
-        assert!(read_snapshot(&mut b"WSR2\xff\xff\xff\xff".as_slice()).is_err());
+        assert!(read_snapshot(&mut b"WSR3\xff\xff\xff\xff".as_slice()).is_err());
         assert!(read_snapshot(&mut b"FAKE\x01\0\0\0x".as_slice()).is_err());
         assert!(Signal::read(&mut [0u8].as_slice()).is_err());
     }

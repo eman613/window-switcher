@@ -15,6 +15,7 @@ mod logging;
 mod metadata;
 mod notifications;
 mod parsers;
+pub(crate) mod quick;
 pub(crate) mod reload;
 mod schema;
 mod search;

@@ -7,7 +7,9 @@ fn main() {
     if let Err(error) = window_switcher::run() {
         // A replacement reports failure through its owned pipe/process status;
         // a modal startup dialog must not keep the failed candidate alive.
-        if !std::env::args_os().any(|argument| argument == "--restart-child") {
+        if !std::env::args_os()
+            .any(|argument| argument == "--restart-child" || argument == "--restart-elevated")
+        {
             window_switcher::alert!("{error:#}");
         }
         std::process::exit(1);

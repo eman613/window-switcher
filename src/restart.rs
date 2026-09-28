@@ -12,12 +12,17 @@ use anyhow::{bail, Result};
 use crate::{config::reload::ConfigCandidate, window_target::WindowTarget};
 
 mod child;
+mod elevation;
 mod handshake;
+mod identity;
+mod named_pipe;
 mod parent;
 mod protocol;
+mod transport;
 
 pub(crate) use child::{ChildEvent, ChildSession};
 pub(crate) const CHILD_ARGUMENT: &str = "--restart-child";
+pub(crate) const ELEVATED_CHILD_ARGUMENT: &str = "--restart-elevated";
 pub(crate) const WM_RESTART: u32 = 6004;
 const TICK: Duration = Duration::from_millis(25);
 
@@ -26,6 +31,7 @@ pub(crate) enum ParentEvent {
     Suspend,
     Ready,
     Done,
+    Complete,
     Failed {
         message: String,
         safe_to_resume: bool,
@@ -78,7 +84,17 @@ impl RestartController {
         latest: Arc<std::sync::atomic::AtomicU64>,
         target: Arc<WindowTarget>,
     ) -> Result<Self> {
-        parent::start(candidate, path, timeout_ms, latest, target)
+        parent::start(candidate, path, timeout_ms, latest, target, false)
+    }
+
+    pub(crate) fn elevated(
+        candidate: ConfigCandidate,
+        path: std::path::PathBuf,
+        timeout_ms: u32,
+        latest: Arc<std::sync::atomic::AtomicU64>,
+        target: Arc<WindowTarget>,
+    ) -> Result<Self> {
+        parent::start(candidate, path, timeout_ms, latest, target, true)
     }
 
     pub(crate) fn next_event(&self) -> Option<ParentEvent> {

@@ -23,6 +23,7 @@ enum Phase {
     Prepared,
     Activating,
     Active,
+    Committed,
     Pausing,
     Suspended,
     Restoring,
@@ -78,6 +79,44 @@ impl Lifecycle {
 }
 
 impl App {
+    pub(super) fn request_elevation(&mut self) -> Result<()> {
+        self.read_saved_settings(true)
+    }
+
+    pub(super) fn restart_saved(&mut self, contents: Arc<[u8]>, elevate: bool) -> Result<()> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        anyhow::ensure!(
+            self.lifecycle.can_change_settings() && !self.startup.busy() && !self.pause.busy(),
+            "设置操作正在进行；请稍后重试"
+        );
+        let loaded = self.lifecycle.loaded.as_ref().context("缺少当前配置")?;
+        let latest = self
+            .config_watcher
+            .as_ref()
+            .map(ConfigWatcher::latest)
+            .unwrap_or_else(|| Arc::new(AtomicU64::new(1)));
+        let candidate = crate::config::reload::ConfigCandidate {
+            generation: latest.load(Ordering::Acquire),
+            contents,
+        };
+        let start = if elevate {
+            RestartController::elevated
+        } else {
+            RestartController::start
+        };
+        let restart = start(
+            candidate,
+            loaded.path.clone(),
+            self.config.config_restart_timeout_ms,
+            latest,
+            self.target.clone(),
+        )?;
+        self.diagnostics.begin_restart();
+        self.lifecycle.restart = Some(restart);
+        info!("restart stage=request elevated={elevate}");
+        Ok(())
+    }
+
     pub(super) fn poll_lifecycle(&mut self) -> Result<()> {
         if self.lifecycle.activation.is_none() {
             return Ok(());
@@ -107,9 +146,13 @@ impl App {
                     self.lifecycle.phase = Phase::Activating;
                 }
                 ChildEvent::Commit if self.lifecycle.phase == Phase::Active => {
+                    self.lifecycle.phase = Phase::Committed;
+                    self.lifecycle.child.as_ref().unwrap().committed()?;
+                }
+                ChildEvent::Accept if self.lifecycle.phase == Phase::Committed => {
                     self.lifecycle.phase = Phase::Running;
                     self.start_services();
-                    self.lifecycle.child.as_ref().unwrap().committed()?;
+                    self.lifecycle.child.as_ref().unwrap().accepted()?;
                 }
                 _ => anyhow::bail!("restart stage=child invalid lifecycle transition"),
             }
@@ -138,6 +181,8 @@ impl App {
                     if !self.lifecycle.restart.as_ref().unwrap().accept() {
                         continue;
                     }
+                }
+                ParentEvent::Complete => {
                     let restart = self.lifecycle.restart.take().unwrap();
                     if let Some(watcher) = &self.config_watcher {
                         watcher.complete(restart.candidate.generation, true);
@@ -224,6 +269,7 @@ impl App {
         if self.lifecycle.phase == Phase::Running && !self.lifecycle.exit_requested {
             self.start_services();
             self.poll_startup();
+            self.poll_settings();
             self.poll_config();
         }
         Ok(())
@@ -234,7 +280,11 @@ impl App {
     }
 
     fn poll_config(&mut self) {
-        if self.startup.busy() || self.pause.busy() || self.lifecycle.restart.is_some() {
+        if self.startup.busy()
+            || self.pause.busy()
+            || self.quick_settings.busy()
+            || self.lifecycle.restart.is_some()
+        {
             return;
         }
         let event = self
@@ -312,11 +362,17 @@ impl App {
                     Err(error) => self.report_failure(FailureKind::Startup, &error),
                 }
             }
-            Some(StartupUpdate::Saved(Ok(()))) if !self.config.auto_restart => self.notify(
-                self.text.config_saved(),
-                self.text.restart_required(),
-                false,
-            ),
+            Some(StartupUpdate::Saved(Ok(loaded))) => {
+                self.quick_settings.remember_saved(loaded.config);
+                self.notify(
+                    self.text.config_saved(),
+                    self.text.settings_saved_detail(
+                        self.quick_settings.pending(&self.config),
+                        self.config.auto_restart,
+                    ),
+                    false,
+                );
+            }
             Some(StartupUpdate::Saved(Err(error))) => self.report_config_error(&error),
             _ => {}
         }
@@ -337,6 +393,7 @@ impl App {
         self.lifecycle.exit_requested = true;
         self.startup.cancel();
         self.pause.cancel();
+        self.quick_settings.cancel();
         self.config_watcher.take();
         if let Some(activation) = &self.lifecycle.activation {
             let _ = activation.request(false);

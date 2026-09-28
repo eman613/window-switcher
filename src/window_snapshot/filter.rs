@@ -7,10 +7,29 @@ use crate::{
 use std::collections::HashSet;
 use windows::Win32::Foundation::HWND;
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum FilterRejection {
+    Scope,
+    Invisible,
+    Minimized,
+    Tool,
+    Topmost,
+    Cloaked,
+    Geometry,
+    Title,
+    Process,
+    Elevated,
+    Metadata,
+    Identity,
+}
+
+pub(super) const FILTER_REJECTION_COUNT: usize = FilterRejection::Identity as usize + 1;
+
 #[derive(Clone)]
 pub(crate) struct WindowFilter {
     pub(crate) ignore_minimal: bool,
     pub(crate) only_current_desktop: bool,
+    hidden_minimized: bool,
     topmost: bool,
     tool: bool,
     untitled: bool,
@@ -61,6 +80,12 @@ impl WindowFilter {
         Self {
             ignore_minimal,
             only_current_desktop,
+            hidden_minimized: match kind {
+                SwitchKind::Windows => config.switch_windows_include_hidden_minimized,
+                SwitchKind::Apps | SwitchKind::Search => {
+                    config.switch_apps_include_hidden_minimized
+                }
+            },
             topmost,
             tool,
             untitled,
@@ -85,11 +110,26 @@ impl WindowFilter {
         !self.processes.contains(&executable.to_lowercase())
     }
 
-    fn allows_style(&self, (visible, iconic, tool, topmost): (bool, bool, bool, bool)) -> bool {
-        visible
-            && (!self.ignore_minimal || !iconic)
-            && (self.tool || !tool)
-            && (self.topmost || !topmost)
+    fn inspect_style(
+        &self,
+        (visible, iconic, tool, topmost): (bool, bool, bool, bool),
+    ) -> Result<(), FilterRejection> {
+        if !visible && !(self.hidden_minimized && iconic) {
+            Err(FilterRejection::Invisible)
+        } else if self.ignore_minimal && iconic {
+            Err(FilterRejection::Minimized)
+        } else if !self.tool && tool {
+            Err(FilterRejection::Tool)
+        } else if !self.topmost && topmost {
+            Err(FilterRejection::Topmost)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    fn allows_style(&self, state: (bool, bool, bool, bool)) -> bool {
+        self.inspect_style(state).is_ok()
     }
 
     fn allows_size(&self, width: i32, height: i32, dpi: u32) -> bool {
@@ -98,29 +138,55 @@ impl WindowFilter {
     }
 
     pub(crate) fn allows(&self, hwnd: HWND) -> Option<(String, bool)> {
+        self.inspect(hwnd).ok()
+    }
+
+    pub(super) fn inspect(&self, hwnd: HWND) -> Result<(String, bool), FilterRejection> {
         if !self.scope.allows(self.monitor, hwnd) {
-            return None;
+            return Err(FilterRejection::Scope);
         }
         let state = utils::get_window_state(hwnd);
-        if !self.allows_style(state) || utils::is_cloaked_window(hwnd, self.only_current_desktop) {
-            return None;
+        self.inspect_style(state)?;
+        if utils::is_cloaked_window(hwnd, self.only_current_desktop) {
+            return Err(FilterRejection::Cloaked);
         }
-        let (width, height) = utils::get_window_size(hwnd).ok()?;
-        let dpi = crate::layout::window_monitor_dpi(hwnd).ok()?;
-        if !self.allows_size(width, height, dpi) {
-            return None;
+        let (width, height) =
+            utils::get_window_size(hwnd).map_err(|_| FilterRejection::Geometry)?;
+        let dpi = crate::layout::window_monitor_dpi(hwnd).map_err(|_| FilterRejection::Geometry)?;
+        if (!state.0 && (width <= 0 || height <= 0)) || !self.allows_size(width, height, dpi) {
+            return Err(FilterRejection::Geometry);
         }
         let title = utils::get_window_title(hwnd);
         if (!self.untitled && title.is_empty()) || self.titles.contains(&title) {
-            return None;
+            return Err(FilterRejection::Title);
         }
-        Some((title, state.1))
+        Ok((title, state.1))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hidden_minimized_is_opt_in_and_keeps_other_filters_and_modes_independent() {
+        let mut config = Config::default();
+        assert!(!WindowFilter::from_config(&config, SwitchKind::Apps)
+            .allows_style((false, true, false, false)));
+        config.switch_apps_include_hidden_minimized = true;
+        for kind in [SwitchKind::Apps, SwitchKind::Search] {
+            let filter = WindowFilter::from_config(&config, kind);
+            assert!(filter.allows_style((false, true, false, false)));
+            assert!(!filter.allows_style((false, false, false, false)));
+            assert!(!filter.allows_style((false, true, true, false)));
+            assert!(!filter.allows_style((false, true, false, true)));
+        }
+        assert!(!WindowFilter::from_config(&config, SwitchKind::Windows)
+            .allows_style((false, true, false, false)));
+        config.switch_apps_ignore_minimal = true;
+        assert!(!WindowFilter::from_config(&config, SwitchKind::Apps)
+            .allows_style((false, true, false, false)));
+    }
+
     #[test]
     fn both_switch_modes_have_independent_filters_and_default_exclusions() {
         let mut config = Config {

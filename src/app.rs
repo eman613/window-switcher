@@ -42,6 +42,7 @@ mod pointer;
 mod preview;
 mod runtime;
 mod search;
+mod settings;
 mod switching;
 mod window_cycle;
 
@@ -56,6 +57,8 @@ pub const IDM_EXIT: u32 = 1;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
 pub const IDM_PAUSE: u32 = 4;
+pub const IDM_ELEVATE: u32 = 5;
+pub const IDM_APPLY_SETTINGS: u32 = 6;
 
 pub fn start(loaded: &LoadedConfig) -> Result<()> {
     let instance = crate::utils::SingleInstance::create(crate::utils::INSTANCE_NAME)?;
@@ -75,6 +78,7 @@ struct App {
     trayicon: Option<TrayIcon>,
     startup: Startup,
     pause: crate::pause::PauseControl,
+    quick_settings: settings::QuickSettingsState,
     config: Config,
     config_watcher: Option<ConfigWatcher>,
     switch_windows_state: SwitchWindowsState,
@@ -110,10 +114,21 @@ impl App {
                 if matches!(lparam.0 as u32, WM_LBUTTONUP | WM_RBUTTONUP) {
                     if let Some(trayicon) = self.trayicon.as_mut() {
                         if let Some(command) = trayicon.show(
-                            self.startup.state,
-                            self.startup.busy(),
-                            self.config.input_paused,
-                            self.pause.busy(),
+                            crate::trayicon::TrayMenuState {
+                                startup: self.startup.state,
+                                startup_busy: self.startup.busy(),
+                                paused: self.config.input_paused,
+                                pause_busy: self.pause.busy(),
+                                elevated: self.is_admin,
+                                restarting: !self.lifecycle.can_change_settings(),
+                                settings_busy: self.quick_settings.busy(),
+                                pending_settings: self.quick_settings.pending(&self.config)
+                                    || matches!(
+                                        self.startup.state,
+                                        crate::startup::StartupState::Saved(_)
+                                    ),
+                                configuration: self.quick_settings.configuration(&self.config),
+                            },
                             self.text,
                         )? {
                             self.handle_command(command)?;
@@ -135,14 +150,33 @@ impl App {
     fn handle_command(&mut self, command: u32) -> Result<()> {
         match command {
             IDM_EXIT => self.request_exit(),
-            IDM_STARTUP => self.startup.toggle()?,
+            IDM_STARTUP => self.toggle_startup()?,
             IDM_PAUSE => self.toggle_pause()?,
+            IDM_ELEVATE => {
+                if let Err(error) = self.request_elevation() {
+                    self.report_failure(
+                        crate::localization::FailureKind::Restart,
+                        &format!("{error:#}"),
+                    );
+                }
+            }
+            IDM_APPLY_SETTINGS => {
+                if let Err(error) = self.read_saved_settings(false) {
+                    self.report_config_error(&format!("{error:#}"));
+                }
+            }
             IDM_CONFIGURE => {
                 if let Err(error) = edit_config_file() {
                     self.report_config_error(&format!("{error:#}"));
                 }
             }
-            _ => {}
+            _ => {
+                if let Some(setting) = crate::trayicon::quick_settings::setting(command) {
+                    if let Err(error) = self.change_setting(setting) {
+                        self.report_config_error(&format!("{error:#}"));
+                    }
+                }
+            }
         }
         Ok(())
     }

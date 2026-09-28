@@ -1,4 +1,8 @@
-use super::{filter::WindowFilter, lifetimes::WindowLifetimes, WindowRecord, WindowSnapshot};
+use super::{
+    filter::{FilterRejection, WindowFilter, FILTER_REJECTION_COUNT},
+    lifetimes::WindowLifetimes,
+    WindowRecord, WindowSnapshot,
+};
 use crate::{
     layout::MAX_WINDOWS,
     process_metadata::ProcessMetadataCache,
@@ -50,6 +54,7 @@ pub(super) struct Scan {
     is_admin: bool,
     revision: u64,
     text_bytes: usize,
+    rejected: [u32; FILTER_REJECTION_COUNT],
 }
 
 impl Scan {
@@ -97,6 +102,7 @@ impl Scan {
             is_admin,
             revision,
             text_bytes: 0,
+            rejected: [0; FILTER_REJECTION_COUNT],
         })
     }
 
@@ -133,14 +139,20 @@ impl Scan {
         lifetimes: &WindowLifetimes,
     ) {
         let hwnd = HWND(window as _);
-        let Some((title, minimized)) = self.filter.allows(hwnd) else {
-            return;
+        let (title, minimized) = match self.filter.inspect(hwnd) {
+            Ok(value) => value,
+            Err(reason) => {
+                self.reject(reason);
+                return;
+            }
         };
         let Some(native_process) = metadata.lookup(utils::get_window_pid(hwnd)) else {
+            self.reject(FilterRejection::Metadata);
             return;
         };
         let Some(identity) = WindowIdentity::from_process(hwnd, native_process.identity, lifetimes)
         else {
+            self.reject(FilterRejection::Identity);
             return;
         };
         let process = if native_process
@@ -152,6 +164,7 @@ impl Scan {
                 .get(&window)
                 .and_then(|child| metadata.lookup(utils::get_window_pid(HWND(*child as _))))
             else {
+                self.reject(FilterRejection::Metadata);
                 return;
             };
             child
@@ -162,8 +175,12 @@ impl Scan {
             .executable
             .eq_ignore_ascii_case("ApplicationFrameHost.exe")
             || !self.filter.allows_process(&process.executable)
-            || (!self.is_admin && process.elevated == Some(true))
         {
+            self.reject(FilterRejection::Process);
+            return;
+        }
+        if !self.is_admin && process.elevated == Some(true) {
+            self.reject(FilterRejection::Elevated);
             return;
         }
         let group = browser::group_key(&process.path, hwnd);
@@ -187,15 +204,31 @@ impl Scan {
             });
     }
 
+    fn reject(&mut self, reason: FilterRejection) {
+        self.rejected[reason as usize] += 1;
+    }
+
     pub(super) fn finish(self) -> Result<WindowSnapshot> {
         ensure!(
             self.text_bytes <= TEXT_LIMIT,
             "snapshot stage=text-budget exceeded"
         );
         debug!(
-            "window stage=enumerated groups={} windows={}",
+            "window stage=enumerated groups={} windows={} rejected_scope={} rejected_hidden={} rejected_minimized={} rejected_tool={} rejected_topmost={} rejected_cloaked={} rejected_geometry={} rejected_title={} rejected_process={} rejected_elevated={} rejected_metadata={} rejected_identity={}",
             self.groups.len(),
-            self.groups.values().map(Vec::len).sum::<usize>()
+            self.groups.values().map(Vec::len).sum::<usize>(),
+            self.rejected[FilterRejection::Scope as usize],
+            self.rejected[FilterRejection::Invisible as usize],
+            self.rejected[FilterRejection::Minimized as usize],
+            self.rejected[FilterRejection::Tool as usize],
+            self.rejected[FilterRejection::Topmost as usize],
+            self.rejected[FilterRejection::Cloaked as usize],
+            self.rejected[FilterRejection::Geometry as usize],
+            self.rejected[FilterRejection::Title as usize],
+            self.rejected[FilterRejection::Process as usize],
+            self.rejected[FilterRejection::Elevated as usize],
+            self.rejected[FilterRejection::Metadata as usize],
+            self.rejected[FilterRejection::Identity as usize],
         );
         Ok(WindowSnapshot {
             groups: self.groups,

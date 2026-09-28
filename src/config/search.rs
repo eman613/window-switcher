@@ -12,8 +12,36 @@ pub enum SearchField {
 pub struct SearchFields(u8);
 
 impl SearchFields {
+    pub(crate) fn toggle(self, field: SearchField) -> Result<Self> {
+        let fields = self.0 ^ field as u8;
+        if fields == 0 {
+            bail!("至少保留一种搜索内容");
+        }
+        Ok(Self(fields))
+    }
+
     pub(crate) fn contains(self, field: SearchField) -> bool {
         self.0 & field as u8 != 0
+    }
+}
+
+impl std::fmt::Display for SearchFields {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first = true;
+        for (field, name) in [
+            (SearchField::App, "app"),
+            (SearchField::Title, "title"),
+            (SearchField::Exe, "exe"),
+        ] {
+            if self.contains(field) {
+                if !first {
+                    formatter.write_str(",")?;
+                }
+                formatter.write_str(name)?;
+                first = false;
+            }
+        }
+        Ok(())
     }
 }
 

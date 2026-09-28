@@ -134,6 +134,10 @@ pub(super) fn run(
             accessibility,
             startup,
             pause: crate::pause::PauseControl::new(loaded.path.clone(), target.clone()),
+            quick_settings: super::settings::QuickSettingsState::new(
+                loaded.path.clone(),
+                target.clone(),
+            ),
             config: loaded.config.clone(),
             trayicon: loaded.config.trayicon.then(TrayIcon::create).transpose()?,
             config_watcher: None,
@@ -536,6 +540,10 @@ mod tests {
                 details: None,
                 preview: None,
                 pause: crate::pause::PauseControl::new(Default::default(), target.clone()),
+                quick_settings: super::super::settings::QuickSettingsState::new(
+                    Default::default(),
+                    target.clone(),
+                ),
                 snapshots,
                 icons,
                 remembered_icons: Default::default(),

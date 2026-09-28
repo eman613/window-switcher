@@ -1,8 +1,17 @@
 //! Shared native list surface; search and details retain their own session models.
 mod controls;
+mod drawing;
+mod input;
+mod layout;
 mod list;
 pub(crate) mod messages;
+mod paint;
+mod rows;
+mod skin;
+#[cfg(test)]
+mod tests;
 pub(crate) use list::label;
+pub(crate) use rows::PickerRow;
 
 use self::{controls::Controls, messages::ViewState};
 use crate::{
@@ -14,7 +23,10 @@ use crate::{
 };
 use anyhow::{ensure, Context, Result};
 use once_cell::sync::OnceCell;
-use std::{cell::Cell, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    sync::Arc,
+};
 use windows::{
     core::{w, HSTRING},
     Win32::{
@@ -22,7 +34,7 @@ use windows::{
         Graphics::Gdi::HBRUSH,
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Input::KeyboardAndMouse::{EnableWindow, SetFocus},
+            Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus},
             WindowsAndMessaging::*,
         },
     },
@@ -47,7 +59,7 @@ pub(crate) struct PickerWindow {
     pub hwnd: HWND,
     state: Option<Box<ViewState>>,
     controls: Option<Controls>,
-    dpi: u32,
+    configuration: Option<Config>,
     text: Text,
 }
 
@@ -90,11 +102,15 @@ impl PickerWindow {
         let state = Box::new(ViewState {
             target,
             kind,
+            text,
             edit: Cell::new(HWND::default()),
             list: Cell::new(HWND::default()),
             back: Cell::new(HWND::default()),
+            clear: Cell::new(HWND::default()),
+            dismiss: Cell::new(HWND::default()),
             visible: Cell::new(false),
             busy: Cell::new(true),
+            failed: Cell::new(false),
             composing: Cell::new(false),
             suppress_enter: Cell::new(false),
             flags: Cell::new(0),
@@ -102,14 +118,29 @@ impl PickerWindow {
             accept: Cell::new(None),
             background: Cell::new(COLORREF(0)),
             foreground: Cell::new(COLORREF(0)),
+            muted: Cell::new(COLORREF(0)),
             brush: Cell::new(HBRUSH::default()),
+            dpi: Cell::new(96),
+            query_bottom: Cell::new(0),
+            visual: RefCell::new(rows::PickerVisual::default()),
+            hover: Cell::new(None),
+            pressed: Cell::new(None),
+            hot_control: Cell::new(HWND::default()),
+            paint_error: Cell::new(false),
         });
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
                 class_name,
                 &HSTRING::from(title),
-                WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
+                WS_POPUP
+                    | WS_SYSMENU
+                    | WS_CLIPCHILDREN
+                    | if kind == ViewKind::Details {
+                        WS_CAPTION
+                    } else {
+                        WINDOW_STYLE(0)
+                    },
                 0,
                 0,
                 640,
@@ -125,7 +156,7 @@ impl PickerWindow {
             hwnd,
             state: Some(state),
             controls: None,
-            dpi: 96,
+            configuration: None,
             text,
         };
         check_error(|| set_window_user_data(hwnd, window.state() as *const ViewState as isize))?;
@@ -147,10 +178,22 @@ impl PickerWindow {
     }
 
     pub(crate) fn position(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
+        self.controls.as_mut().unwrap().style(
+            self.hwnd,
+            self.state.as_deref().unwrap(),
+            config,
+            monitor.dpi,
+        )?;
+        self.configuration = Some(config.clone());
         let area = monitor.available;
-        let width = (640 * monitor.dpi / 96) as i32;
-        let height = (440 * monitor.dpi / 96) as i32;
-        let (width, height) = (width.min(area.width()), height.min(area.height()));
+        let (row_height, text_height) = self.controls().metrics(self.state(), monitor.dpi);
+        let (width, height) = layout::PickerLayout::target(
+            config,
+            monitor,
+            self.state().kind,
+            row_height,
+            text_height,
+        );
         unsafe {
             SetWindowPos(
                 self.hwnd,
@@ -163,13 +206,7 @@ impl PickerWindow {
             )
         }
         .context("search stage=position")?;
-        self.dpi = monitor.dpi;
-        self.controls.as_mut().unwrap().style(
-            self.hwnd,
-            self.state.as_deref().unwrap(),
-            config,
-            self.dpi,
-        )
+        self.controls().layout(self.hwnd, self.state(), monitor.dpi)
     }
 
     pub(crate) fn show(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
@@ -179,6 +216,7 @@ impl PickerWindow {
         }
         self.state().flags.set(0);
         self.state().composing.set(false);
+        self.state().suppress_enter.set(false);
         self.state().visible.set(true);
         self.pending()?;
         unsafe {
@@ -204,6 +242,15 @@ impl PickerWindow {
         self.state().accept.set(None);
         self.state().flags.set(0);
         self.state().composing.set(false);
+        self.state().suppress_enter.set(false);
+        self.state().busy.set(true);
+        self.state().failed.set(false);
+        self.state().hover.set(None);
+        self.state().pressed.set(None);
+        self.state().hot_control.set(HWND::default());
+        if let Ok(mut visual) = self.state().visual.try_borrow_mut() {
+            visual.rows.clear();
+        }
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
             SendMessageW(self.controls().list, LB_RESETCONTENT, None, None);
@@ -221,8 +268,17 @@ impl PickerWindow {
             accept: self.state().accept.take(),
         }
     }
-    pub(crate) fn layout(&self) -> Result<()> {
-        self.controls().layout(self.hwnd, self.dpi)
+    pub(crate) fn layout(&mut self) -> Result<()> {
+        let dpi = self.state().dpi.get();
+        if let Some(config) = &self.configuration {
+            self.controls.as_mut().unwrap().style(
+                self.hwnd,
+                self.state.as_deref().unwrap(),
+                config,
+                dpi,
+            )?;
+        }
+        self.controls().layout(self.hwnd, self.state(), dpi)
     }
     pub(crate) fn query(&self) -> Result<String> {
         let length = unsafe { GetWindowTextLengthW(self.controls().edit) } as usize;
@@ -253,15 +309,23 @@ impl PickerWindow {
     }
     pub(crate) fn pending(&self) -> Result<()> {
         self.state().busy.set(true);
+        self.state().failed.set(false);
         self.state().accept.set(None);
+        self.state().pressed.set(None);
         unsafe {
+            if GetFocus() == self.controls().list && GetForegroundWindow() == self.hwnd {
+                let _ = SetFocus(Some(self.state().focus_target()));
+            }
             let _ = EnableWindow(self.controls().list, false);
         }
-        self.status(self.text.search_loading())
+        self.status(self.text.search_loading())?;
+        self.controls().refresh_notice(self.state())
     }
     pub(crate) fn failure(&self) -> Result<()> {
         self.pending()?;
-        self.status(self.text.search_failure())
+        self.state().failed.set(true);
+        self.status(self.text.search_failed_title())?;
+        self.controls().refresh_notice(self.state())
     }
 }
 

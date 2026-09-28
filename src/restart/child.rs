@@ -1,4 +1,5 @@
 use std::{
+    io::Write,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -18,7 +19,8 @@ use windows::Win32::{
 
 use super::{
     protocol::{self, Signal},
-    CHILD_ARGUMENT, TICK, WM_RESTART,
+    transport::Streams,
+    CHILD_ARGUMENT, ELEVATED_CHILD_ARGUMENT, TICK, WM_RESTART,
 };
 use crate::{config::reload::ConfigCandidate, utils::HandleWrapper, window_target::WindowTarget};
 
@@ -26,6 +28,7 @@ use crate::{config::reload::ConfigCandidate, utils::HandleWrapper, window_target
 pub(crate) enum ChildEvent {
     Activate,
     Commit,
+    Accept,
     Abort,
 }
 
@@ -42,7 +45,12 @@ impl ChildSession {
         if arguments.is_empty() {
             return Ok(None);
         }
-        if arguments.len() != 3 || arguments[0] != CHILD_ARGUMENT {
+        let elevated = arguments
+            .first()
+            .is_some_and(|value| value == ELEVATED_CHILD_ARGUMENT);
+        if (!elevated && (arguments.len() != 3 || arguments[0] != CHILD_ARGUMENT))
+            || (elevated && arguments.len() != 5)
+        {
             bail!("启动参数无效；请直接运行 window-switcher.exe");
         }
         let parent = arguments[1]
@@ -56,12 +64,25 @@ impl ChildSession {
         if parent == 0 || parent == std::process::id() || !(1000..=60000).contains(&timeout) {
             bail!("restart stage=arguments invalid parent or timeout");
         }
+        let Streams { reader, writer } = if elevated {
+            let created = arguments[3]
+                .to_str()
+                .context("父进程身份无效")?
+                .parse::<u64>()?;
+            let nonce = arguments[4].to_str().context("交接标识无效")?;
+            super::elevation::child_streams(parent, timeout, created, nonce)?
+        } else {
+            Streams {
+                reader: Box::new(std::io::stdin()),
+                writer: Box::new(std::io::stdout()),
+            }
+        };
         let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
         let (signal_tx, signals) = mpsc::sync_channel(8);
         thread::Builder::new()
             .name("restart-parent-pipe".into())
             .spawn(move || {
-                let mut input = std::io::stdin();
+                let mut input = reader;
                 let snapshot = protocol::read_snapshot(&mut input);
                 let failed = snapshot.is_err();
                 if snapshot_tx.send(snapshot).is_err() || failed {
@@ -98,7 +119,7 @@ impl ChildSession {
         thread::Builder::new()
             .name("restart-child-control".into())
             .spawn(move || {
-                if let Err(err) = worker.run(parent) {
+                if let Err(err) = worker.run(parent, writer) {
                     error!("restart stage=child-abort error={err:#}");
                     worker.canceled.store(true, Ordering::Release);
                     let _ = worker.post(ChildEvent::Abort);
@@ -136,6 +157,9 @@ impl ChildSession {
     pub(crate) fn committed(&self) -> Result<()> {
         self.reply(Signal::Committed)
     }
+    pub(crate) fn accepted(&self) -> Result<()> {
+        self.reply(Signal::AcceptedAck)
+    }
 
     fn reply(&self, signal: Signal) -> Result<()> {
         self.replies
@@ -162,10 +186,9 @@ struct ChildWorker {
 }
 
 impl ChildWorker {
-    fn run(&self, parent: u32) -> Result<()> {
+    fn run(&self, parent: u32, mut output: Box<dyn Write + Send>) -> Result<()> {
         let parent =
             HandleWrapper::new(unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent) }?);
-        let mut output = std::io::stdout();
         self.reply(&parent, Signal::Prepared)?;
         Signal::Prepared.write(&mut output)?;
         self.command(&parent, Signal::Activate)?;
@@ -179,24 +202,14 @@ impl ChildWorker {
         self.post(ChildEvent::Commit)?;
         self.reply(&parent, Signal::Committed)?;
         Signal::Committed.write(&mut output)?;
-        // A committed child survives normal EOF / parent exit. Before commit,
-        // either condition aborts. The parent still owns and can cancel this PID
-        // until its UI has accepted the committed ACK.
-        loop {
-            match self.signals.recv_timeout(TICK) {
-                Ok(Ok(Signal::Abort)) => bail!("restart stage=parent user exit"),
-                Ok(Ok(_)) => bail!("restart stage=protocol unexpected post-commit command"),
-                Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if self.canceled.load(Ordering::Acquire) {
-                        return Ok(());
-                    }
-                    if unsafe { WaitForSingleObject(parent.get_handle(), 0) } != WAIT_TIMEOUT {
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        // Crossing UAC means the parent may not terminate this process. Until
+        // explicit acceptance, EOF/timeout must abort instead of keeping hooks.
+        self.command(&parent, Signal::Accepted)?;
+        self.require_current()?;
+        self.post(ChildEvent::Accept)?;
+        self.reply(&parent, Signal::AcceptedAck)?;
+        Signal::AcceptedAck.write(&mut output)?;
+        Ok(())
     }
 
     fn require_current(&self) -> Result<()> {

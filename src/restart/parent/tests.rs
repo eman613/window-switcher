@@ -29,6 +29,9 @@ $writer.WriteByte(3); $writer.Flush()
 if ($reader.ReadByte() -ne 4) { exit 24 }
 if ($env:WINDOW_SWITCHER_RESTART_PHASE -eq 'commit') { exit 25 }
 $writer.WriteByte(5); $writer.Flush()
+if ($reader.ReadByte() -ne 7) { exit 26 }
+if ($env:WINDOW_SWITCHER_RESTART_PHASE -eq 'accepted-timeout') { Start-Sleep -Seconds 60 }
+$writer.WriteByte(8); $writer.Flush()
 Start-Sleep -Seconds 60
 "#;
 
@@ -96,9 +99,12 @@ fn run_peer(phase: &str, cancel: bool, supersede: bool) {
             }
             ParentEvent::Done => {
                 assert!(ready);
-                accepted = controller.accept();
-                assert!(accepted);
-                // Reproduce closing the UI immediately after accepting the ACK.
+                assert!(controller.accept());
+            }
+            ParentEvent::Complete => {
+                assert!(ready);
+                accepted = true;
+                // The old UI closes only after the final ownership ACK.
                 target.close();
                 break;
             }
@@ -136,7 +142,14 @@ fn run_peer(phase: &str, cancel: bool, supersede: bool) {
 
 #[test]
 fn owned_peer_failure_matrix_confirms_stop_before_old_instance_can_resume() {
-    for phase in ["spawn", "startup", "activate", "commit", "active-timeout"] {
+    for phase in [
+        "spawn",
+        "startup",
+        "activate",
+        "commit",
+        "active-timeout",
+        "accepted-timeout",
+    ] {
         run_peer(phase, false, false);
     }
 }

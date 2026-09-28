@@ -1,6 +1,57 @@
 use super::{document::parse_ini, Config, DEFAULT_BADGE_COLOR, DEFAULT_BADGE_FONT_SIZE};
 
 #[test]
+fn search_cache_and_hidden_window_settings_accept_boundaries_and_reject_invalid_values() {
+    for (section, key, minimum, maximum) in [
+        ("search", "width", 480, 1600),
+        ("search", "visible_rows", 4, 12),
+        ("performance", "icon_refresh_interval_s", 30, 86400),
+    ] {
+        for value in [minimum, maximum] {
+            assert!(
+                Config::load(&parse_ini(&format!("[{section}]\n{key}={value}\n")).unwrap()).is_ok()
+            );
+        }
+        for value in [
+            (minimum - 1).to_string(),
+            (maximum + 1).to_string(),
+            "-1".into(),
+            "1.5".into(),
+            String::new(),
+        ] {
+            let error = Config::load(&parse_ini(&format!("[{section}]\n{key}={value}\n")).unwrap())
+                .unwrap_err();
+            assert!(format!("{error:#}").contains(key));
+        }
+    }
+    let default = Config::default();
+    assert_eq!(
+        (
+            default.search_width,
+            default.search_visible_rows,
+            default.icon_refresh_interval_s
+        ),
+        (720, 7, 300)
+    );
+    assert!(
+        !default.switch_apps_include_hidden_minimized
+            && !default.switch_windows_include_hidden_minimized
+    );
+    let enabled =
+        Config::load(&parse_ini("[switch-apps]\ninclude_hidden_minimized=yes\n").unwrap()).unwrap();
+    assert!(
+        enabled.switch_apps_include_hidden_minimized
+            && !enabled.switch_windows_include_hidden_minimized
+    );
+    for section in ["switch-apps", "switch-windows"] {
+        assert!(Config::load(
+            &parse_ini(&format!("[{section}]\ninclude_hidden_minimized=maybe\n")).unwrap()
+        )
+        .is_err());
+    }
+}
+
+#[test]
 fn every_new_setting_is_read_and_range_checked() {
     let config = Config::load(&parse_ini("auto_restart = no\nrestart_delay_ms = 2500\n[switch-apps]\nbadge_color = #91a2B3\nbadge_text_color = 102030\nbadge_font_size = 10\nbadge_max = 987\n").unwrap()).unwrap();
     assert!(!config.auto_restart);

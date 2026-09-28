@@ -15,6 +15,9 @@ impl PickerWindow {
     pub(crate) fn replace(&self, labels: &[String], selected: usize, epoch: u64) -> Result<()> {
         let list = self.controls().list;
         self.state().busy.set(true);
+        self.state().accept.set(None);
+        self.state().hover.set(None);
+        self.state().pressed.set(None);
         unsafe {
             SendMessageW(list, WM_SETREDRAW, Some(WPARAM(0)), None);
         }
@@ -46,9 +49,13 @@ impl PickerWindow {
             SendMessageW(list, WM_SETREDRAW, Some(WPARAM(1)), None);
             let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, true);
         }
-        result?;
+        if let Err(error) = result {
+            self.failure()?;
+            return Err(error);
+        }
         self.state().epoch.set(epoch);
         self.state().accept.set(None);
+        self.state().failed.set(false);
         self.state().busy.set(false);
         unsafe {
             let focused_list = GetFocus() == list;
@@ -58,7 +65,7 @@ impl PickerWindow {
                 debug!("picker stage=empty-focus moved-to-recovery");
             }
         }
-        Ok(())
+        self.controls().refresh_notice(self.state())
     }
 }
 

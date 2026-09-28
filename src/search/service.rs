@@ -53,6 +53,12 @@ impl SearchIndex {
                 }
                 let entry = SearchEntry {
                     identity: record.identity,
+                    key: crate::icon_cache::IconKey {
+                        group: record.application.icon_key.clone(),
+                        identity: record.identity,
+                    },
+                    elevated: record.process.elevated,
+                    minimized: record.minimized,
                     executable: record.process.executable.clone(),
                     title: Arc::from(record.title.as_str()),
                     app: record
@@ -225,6 +231,12 @@ mod tests {
                 .map(|n| IndexedEntry {
                     entry: SearchEntry {
                         identity: WindowIdentity::fixture(n + 1),
+                        key: crate::icon_cache::IconKey {
+                            group: Arc::from("fixture.exe"),
+                            identity: WindowIdentity::fixture(n + 1),
+                        },
+                        elevated: None,
+                        minimized: false,
                         executable: Arc::from("fixture.exe"),
                         title: Arc::from(format!("窗口 {n}")),
                         app: Arc::from("应用"),

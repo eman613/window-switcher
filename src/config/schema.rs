@@ -56,6 +56,7 @@ settings! {
     switch_windows_hotkey: Vec<Hotkey> => ("switch-windows", "hotkey", "alt+`", |v| hotkeys(v, SWITCH_WINDOWS_HOTKEY_ID, "switch windows", "alt+`"), "KeyboardListener");
     switch_windows_blacklist: HashSet<String> => ("switch-windows", "blacklist", "", blacklist, "ForegroundWatcher::init");
     switch_windows_ignore_minimal: bool => ("switch-windows", "ignore_minimal", "no", boolean, "WindowFilter::from_config");
+    switch_windows_include_hidden_minimized: bool => ("switch-windows", "include_hidden_minimized", "no", boolean, "WindowFilter::inspect");
     switch_windows_only_current_desktop: Option<bool> => ("switch-windows", "only_current_desktop", "auto", automatic_bool, "Config::switch_windows_only_current_desktop");
     switch_windows_include_topmost: bool => ("switch-windows", "include_topmost", "no", boolean, "WindowFilter::allows");
     switch_windows_include_tool_windows: bool => ("switch-windows", "include_tool_windows", "no", boolean, "WindowFilter::allows");
@@ -70,6 +71,7 @@ settings! {
     switch_apps_monitor_filter: MonitorFilter => ("switch-apps", "monitor_filter", "all", str::parse::<MonitorFilter>, "MonitorScope/WindowFilter");
     switch_apps_hotkey: Vec<Hotkey> => ("switch-apps", "hotkey", "alt+tab", |v| hotkeys(v, SWITCH_APPS_HOTKEY_ID, "switch apps", "alt+tab"), "KeyboardListener");
     switch_apps_ignore_minimal: bool => ("switch-apps", "ignore_minimal", "no", boolean, "WindowFilter::from_config");
+    switch_apps_include_hidden_minimized: bool => ("switch-apps", "include_hidden_minimized", "no", boolean, "WindowFilter::inspect");
     switch_apps_override_icons: IndexMap<String, String> => ("switch-apps", "override_icons", "", overrides, "IconLoader::native");
     switch_apps_show_badge: bool => ("switch-apps", "show_badge", "yes", boolean, "App::apply_app_snapshot");
     switch_apps_badge_max: u32 => ("switch-apps", "badge_max", "99", |v| integer(v, 2, 9999), "App::apply_app_snapshot");
@@ -99,6 +101,8 @@ settings! {
     search_match: SearchMatch => ("search", "match", "fuzzy", str::parse::<SearchMatch>, "SearchService");
     search_fields: SearchFields => ("search", "fields", "app,title", str::parse::<SearchFields>, "SearchService");
     search_max_results: u32 => ("search", "max_results", "50", |v| integer(v, 10, 200), "SearchService");
+    search_width: u32 => ("search", "width", "720", |v| integer(v, 480, 1600), "PickerLayout::target");
+    search_visible_rows: u32 => ("search", "visible_rows", "7", |v| integer(v, 4, 12), "PickerLayout::target");
     details_enable: bool => ("details", "enable", "no", boolean, "WindowDetails/Config::to_hotkeys");
     details_hotkey: Hotkey => ("details", "hotkey", "ctrl+enter", |v| Hotkey::create(DETAILS_HOTKEY_ID, "window details", v), "InputMachine");
     preview_enable: bool => ("preview", "enable", "no", boolean, "WindowPreview");
@@ -154,6 +158,7 @@ settings! {
     icon_cache_limit: u32 => ("performance", "icon_cache_limit", "256", |v| integer(v, 16, 1024), "IconCache::new");
     icon_cache_mb: u32 => ("performance", "icon_cache_mb", "32", |v| integer(v, 4, 256), "IconCache::new");
     icon_failure_ttl_ms: u32 => ("performance", "icon_failure_ttl_ms", "3000", |v| integer(v, 100, 60000), "IconCache::new");
+    icon_refresh_interval_s: u32 => ("performance", "icon_refresh_interval_s", "300", |v| integer(v, 30, 86400), "IconCache::new");
     metadata_cache_limit: u32 => ("performance", "metadata_cache_limit", "512", |v| integer(v, 16, 4096), "ProcessMetadataCache::new");
     metadata_ttl_ms: u32 => ("performance", "metadata_ttl_ms", "5000", |v| integer(v, 100, 60000), "ProcessMetadataCache::new");
     icon_query_timeout_ms: u32 => ("performance", "icon_query_timeout_ms", "100", |v| integer(v, 10, 500), "IconLoader::native");

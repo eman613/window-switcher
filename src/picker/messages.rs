@@ -1,22 +1,36 @@
-//! Callbacks retain only scalar state; they never borrow App or run a search.
-use super::ViewKind;
+//! Window callbacks own only picker state, never an App borrow or a search job.
+use super::{rows::PickerVisual, skin::px, ViewKind};
 use crate::{
-    keyboard::dispatch::WM_INPUT_READY, utils::get_window_user_data, window_target::WindowTarget,
+    keyboard::dispatch::WM_INPUT_READY, localization::Text, utils::get_window_user_data,
+    window_target::WindowTarget,
 };
-use std::{cell::Cell, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    sync::Arc,
+};
 use windows::Win32::{
-    Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
-    Graphics::Gdi::{FillRect, SetBkColor, SetTextColor, HBRUSH, HDC},
+    Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Graphics::Gdi::{
+        FillRect, InvalidateRect, ScreenToClient, SetBkColor, SetTextColor, HBRUSH, HDC,
+    },
     UI::{
-        Input::KeyboardAndMouse::{EnableWindow, GetKeyState, SetFocus, VK_RETURN},
-        Shell::{DefSubclassProc, RemoveWindowSubclass},
+        Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODT_LISTBOX},
+        Input::KeyboardAndMouse::{EnableWindow, SetFocus},
         WindowsAndMessaging::*,
     },
 };
 
+pub(super) use super::input::control_proc;
+pub(super) const LABEL_ID: usize = 100;
 pub(super) const EDIT_ID: usize = 101;
 pub(super) const LIST_ID: usize = 102;
+pub(super) const RESULTS_ID: usize = 103;
+pub(super) const STATUS_ID: usize = 104;
 pub(super) const BACK_ID: usize = 105;
+pub(super) const CLEAR_ID: usize = 106;
+pub(super) const DISMISS_ID: usize = 107;
+pub(super) const NOTICE_ID: usize = 108;
+pub(super) const HELP_ID: usize = 109;
 pub(crate) const CHANGED: u32 = 1;
 pub(crate) const CANCEL: u32 = 2;
 pub(crate) const RELAYOUT: u32 = 4;
@@ -25,11 +39,15 @@ pub(crate) const BACK: u32 = 8;
 pub(super) struct ViewState {
     pub target: Arc<WindowTarget>,
     pub kind: ViewKind,
+    pub text: Text,
     pub edit: Cell<HWND>,
     pub list: Cell<HWND>,
     pub back: Cell<HWND>,
+    pub clear: Cell<HWND>,
+    pub dismiss: Cell<HWND>,
     pub visible: Cell<bool>,
     pub busy: Cell<bool>,
+    pub failed: Cell<bool>,
     pub composing: Cell<bool>,
     pub suppress_enter: Cell<bool>,
     pub flags: Cell<u32>,
@@ -37,7 +55,15 @@ pub(super) struct ViewState {
     pub accept: Cell<Option<(u64, usize)>>,
     pub background: Cell<COLORREF>,
     pub foreground: Cell<COLORREF>,
+    pub muted: Cell<COLORREF>,
     pub brush: Cell<HBRUSH>,
+    pub dpi: Cell<u32>,
+    pub query_bottom: Cell<i32>,
+    pub visual: RefCell<PickerVisual>,
+    pub hover: Cell<Option<usize>>,
+    pub pressed: Cell<Option<(u64, usize)>>,
+    pub hot_control: Cell<HWND>,
+    pub paint_error: Cell<bool>,
 }
 
 impl ViewState {
@@ -52,28 +78,62 @@ impl ViewState {
             self.list.get()
         }
     }
+
     pub(super) fn signal(&self, flags: u32) {
         if self.visible.get() {
             self.flags.set(self.flags.get() | flags);
             self.target.try_post(WM_INPUT_READY);
         }
     }
+
     pub(super) fn changed(&self) {
         self.busy.set(true);
+        self.failed.set(false);
         self.accept.set(None);
+        self.pressed.set(None);
         unsafe {
             let _ = EnableWindow(self.list.get(), false);
+            if !self.clear.get().is_invalid() {
+                let _ = EnableWindow(
+                    self.clear.get(),
+                    !self.composing.get() && GetWindowTextLengthW(self.edit.get()) > 0,
+                );
+                let _ = InvalidateRect(Some(self.edit.get()), None, true);
+            }
         }
         if !self.composing.get() {
             self.signal(CHANGED);
         }
     }
-    fn accept(&self) {
+
+    pub(super) fn accept(&self) {
         if self.visible.get() && !self.busy.get() && !self.composing.get() {
             let index = unsafe { SendMessageW(self.list.get(), LB_GETCURSEL, None, None) }.0;
             if index >= 0 {
                 self.accept.set(Some((self.epoch.get(), index as usize)));
                 self.target.try_post(WM_INPUT_READY);
+            }
+        }
+    }
+
+    pub(super) fn command(&self, id: usize) {
+        match id {
+            BACK_ID => self.signal(BACK),
+            DISMISS_ID => self.signal(CANCEL),
+            CLEAR_ID => unsafe {
+                if let Err(error) = SetWindowTextW(self.edit.get(), windows::core::w!("")) {
+                    warn!("picker stage=clear-query code={:#x}", error.code().0);
+                }
+                let _ = SetFocus(Some(self.edit.get()));
+            },
+            _ => {}
+        }
+    }
+
+    pub(super) fn paint_result(&self, result: anyhow::Result<()>) {
+        if let Err(error) = result {
+            if !self.paint_error.replace(true) {
+                error!("picker stage=paint error={error:#}");
             }
         }
     }
@@ -97,25 +157,92 @@ pub(super) unsafe extern "system" fn window_proc(
             WM_SETFOCUS if state.visible.get() => {
                 let _ = SetFocus(Some(state.focus_target()));
             }
-            WM_SIZE | WM_DPICHANGED | WM_THEMECHANGED => state.signal(RELAYOUT),
+            WM_DPICHANGED => {
+                let dpi = (wparam.0 as u32 & 0xffff).clamp(48, 768);
+                state.dpi.set(dpi);
+                if lparam.0 != 0 {
+                    let bounds = &*(lparam.0 as *const RECT);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        bounds.left,
+                        bounds.top,
+                        bounds.right - bounds.left,
+                        bounds.bottom - bounds.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                state.signal(RELAYOUT);
+            }
+            WM_SIZE | WM_THEMECHANGED | WM_SETTINGCHANGE => state.signal(RELAYOUT),
+            WM_NCHITTEST if state.kind == ViewKind::Search => {
+                let mut point = POINT {
+                    x: (lparam.0 as u16 as i16) as i32,
+                    y: ((lparam.0 >> 16) as u16 as i16) as i32,
+                };
+                if ScreenToClient(hwnd, &mut point).as_bool()
+                    && point.y >= 0
+                    && point.y < state.query_bottom.get()
+                    && (point.x < px(44, state.dpi.get()) || point.y < px(8, state.dpi.get()))
+                {
+                    return LRESULT(HTCAPTION as isize);
+                }
+            }
             WM_COMMAND => {
                 let (id, notification) = (wparam.0 & 0xffff, (wparam.0 >> 16) as u32);
                 if id == EDIT_ID && notification == EN_CHANGE {
                     state.changed();
                 }
-                if id == LIST_ID && notification == LBN_DBLCLK {
+                if id == LIST_ID && notification == LBN_DBLCLK && state.kind == ViewKind::Details {
                     state.accept();
                 }
-                if id == BACK_ID && notification == BN_CLICKED {
-                    state.signal(BACK);
+                if notification == BN_CLICKED {
+                    state.command(id);
                 }
+            }
+            WM_MEASUREITEM if state.kind == ViewKind::Search && lparam.0 != 0 => {
+                let measure = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
+                if measure.CtlType == ODT_LISTBOX && measure.CtlID as usize == LIST_ID {
+                    measure.itemHeight = state
+                        .visual
+                        .try_borrow()
+                        .ok()
+                        .and_then(|visual| visual.skin.as_ref().map(|skin| skin.row_height))
+                        .unwrap_or(px(64, state.dpi.get()))
+                        as u32;
+                    return LRESULT(1);
+                }
+            }
+            WM_DRAWITEM if state.kind == ViewKind::Search && lparam.0 != 0 => {
+                let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
+                match super::paint::item(state, item) {
+                    Ok(true) => return LRESULT(1),
+                    Ok(false) => {}
+                    Err(error) => {
+                        state.paint_result(Err(error));
+                        return LRESULT(1);
+                    }
+                }
+            }
+            WM_PAINT if state.kind == ViewKind::Search => {
+                state.paint_result(super::paint::window(hwnd, state));
+                return LRESULT(0);
             }
             WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
                 let dc = HDC(wparam.0 as _);
-                SetTextColor(dc, state.foreground.get());
+                let id = GetDlgCtrlID(HWND(lparam.0 as _)) as usize;
+                SetTextColor(
+                    dc,
+                    if matches!(id, LABEL_ID | RESULTS_ID | STATUS_ID | HELP_ID) {
+                        state.muted.get()
+                    } else {
+                        state.foreground.get()
+                    },
+                );
                 SetBkColor(dc, state.background.get());
                 return LRESULT(state.brush.get().0 as isize);
             }
+            WM_ERASEBKGND if state.kind == ViewKind::Search => return LRESULT(1),
             WM_ERASEBKGND if !state.brush.get().is_invalid() => {
                 let mut rect = RECT::default();
                 if GetClientRect(hwnd, &mut rect).is_ok() {
@@ -127,93 +254,4 @@ pub(super) unsafe extern "system" fn window_proc(
         }
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
-}
-
-pub(super) unsafe extern "system" fn control_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    id: usize,
-    data: usize,
-) -> LRESULT {
-    let state = &*(data as *const ViewState);
-    if msg == WM_NCDESTROY {
-        let _ = RemoveWindowSubclass(hwnd, Some(control_proc), id);
-        return DefSubclassProc(hwnd, msg, wparam, lparam);
-    }
-    if hwnd == state.edit.get() {
-        match msg {
-            WM_IME_STARTCOMPOSITION => {
-                state.composing.set(true);
-                state.changed();
-            }
-            WM_IME_ENDCOMPOSITION => {
-                state.composing.set(false);
-                state
-                    .suppress_enter
-                    .set(GetKeyState(VK_RETURN.0 as i32) < 0);
-                state.changed();
-            }
-            WM_KEYUP if wparam.0 == VK_RETURN.0 as usize => state.suppress_enter.set(false),
-            _ => {}
-        }
-    }
-    if state.visible.get() && !state.composing.get() {
-        if msg == WM_KEYDOWN || (msg == WM_SYSKEYDOWN && state.kind == ViewKind::Details) {
-            match wparam.0 {
-                0x41 if hwnd == state.edit.get() && GetKeyState(0x11) < 0 => {
-                    SendMessageW(
-                        hwnd,
-                        windows::Win32::UI::Controls::EM_SETSEL,
-                        Some(WPARAM(0)),
-                        Some(LPARAM(-1)),
-                    );
-                    return LRESULT(0);
-                }
-                0x0d if !state.suppress_enter.get() => {
-                    if hwnd == state.back.get() {
-                        state.signal(BACK);
-                    } else {
-                        state.accept();
-                    }
-                    return LRESULT(0);
-                }
-                0x1b => {
-                    state.signal(if state.kind == ViewKind::Details {
-                        BACK
-                    } else {
-                        CANCEL
-                    });
-                    return LRESULT(0);
-                }
-                0x09 => {
-                    let target = if state.kind == ViewKind::Details {
-                        if hwnd == state.back.get() {
-                            state.focus_target()
-                        } else {
-                            state.back.get()
-                        }
-                    } else if hwnd == state.edit.get() && !state.busy.get() {
-                        state.list.get()
-                    } else {
-                        state.edit.get()
-                    };
-                    let _ = SetFocus(Some(target));
-                    return LRESULT(0);
-                }
-                0x21 | 0x22 | 0x26 | 0x28 if hwnd == state.edit.get() && !state.busy.get() => {
-                    SendMessageW(state.list.get(), msg, Some(wparam), Some(lparam));
-                    return LRESULT(0);
-                }
-                _ => {}
-            }
-        }
-        // TranslateMessage runs before WM_KEYDOWN is dispatched. Consume its
-        // corresponding control character too; printable/IME text stays native.
-        if matches!(msg, WM_CHAR | WM_SYSCHAR) && matches!(wparam.0, 0x01 | 0x09 | 0x0d | 0x1b) {
-            return LRESULT(0);
-        }
-    }
-    DefSubclassProc(hwnd, msg, wparam, lparam)
 }

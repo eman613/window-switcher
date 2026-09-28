@@ -67,6 +67,8 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ("search", "match", "contains", "regex"),
         ("search", "fields", "exe", "app,unknown"),
         ("search", "max_results", "200", "201"),
+        ("search", "width", "960", "479"),
+        ("search", "visible_rows", "9", "13"),
         ("details", "enable", "yes", "maybe"),
         ("details", "hotkey", "ctrl+f9", "shift+enter"),
         ("preview", "enable", "yes", "maybe"),
@@ -116,6 +118,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ("performance", "icon_cache_limit", "16", "15"),
         ("performance", "icon_cache_mb", "4", "257"),
         ("performance", "icon_failure_ttl_ms", "100", "99"),
+        ("performance", "icon_refresh_interval_s", "600", "29"),
         ("performance", "metadata_cache_limit", "16", "15"),
         ("performance", "metadata_ttl_ms", "100", "99"),
         ("performance", "icon_query_timeout_ms", "10", "9"),
@@ -128,6 +131,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
     for section in ["switch-windows", "switch-apps"] {
         cases.extend([
             (section, "include_topmost", "yes", "maybe"),
+            (section, "include_hidden_minimized", "yes", "maybe"),
             (section, "include_tool_windows", "yes", "maybe"),
             (section, "include_untitled", "yes", "maybe"),
             (section, "min_width", "0", "4097"),
@@ -137,7 +141,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ]);
     }
     let template = document::parse_ini(DEFAULT_CONFIG).unwrap();
-    assert_eq!(SETTINGS.len(), 115);
+    assert_eq!(SETTINGS.len(), 120);
     assert_eq!(cases.len(), SETTINGS.len());
     assert_eq!(
         template

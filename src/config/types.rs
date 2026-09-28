@@ -6,6 +6,11 @@ macro_rules! choices {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum $name { $($variant),+ }
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(match self { $(Self::$variant => $value,)+ })
+            }
+        }
         impl FromStr for $name {
             type Err = anyhow::Error;
             fn from_str(value: &str) -> Result<Self> {

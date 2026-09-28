@@ -4,7 +4,9 @@ use anyhow::{ensure, Result};
 impl App {
     pub(super) fn toggle_pause(&mut self) -> Result<()> {
         ensure!(
-            self.lifecycle.can_change_settings(),
+            self.lifecycle.can_change_settings()
+                && !self.quick_settings.busy()
+                && !self.startup.busy(),
             "应用正在交接或退出；暂停状态未修改"
         );
         if self.pause.busy() {
@@ -30,6 +32,7 @@ impl App {
                     self.input.acknowledge(event.session);
                 }
                 self.config.input_paused = paused;
+                self.quick_settings.pause_applied(paused);
                 info!("pause stage=applied paused={paused} persisted=true");
             }
             Some(Err(message)) => {

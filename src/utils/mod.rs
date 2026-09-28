@@ -10,7 +10,7 @@ mod handle_wrapper;
 mod regedit;
 pub(crate) mod scheduled_task;
 mod single_instance;
-mod token;
+pub(crate) mod token;
 mod window;
 pub(crate) mod window_identity;
 mod windows_theme;

@@ -1,12 +1,11 @@
 use crate::{
-    app::{IDM_CONFIGURE, IDM_EXIT, IDM_PAUSE, IDM_STARTUP, NAME, WM_USER_TRAYICON},
+    app::{NAME, WM_USER_TRAYICON},
+    config::Config,
     localization::Text,
     startup::StartupState,
-    utils::to_wstring,
 };
 
 use anyhow::{bail, Context, Result};
-use windows::core::PCWSTR;
 use windows::Win32::{
     Foundation::{GetLastError, SetLastError, ERROR_SUCCESS, HWND, LPARAM, POINT, WPARAM},
     UI::{
@@ -15,15 +14,29 @@ use windows::Win32::{
             NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
         },
         WindowsAndMessaging::{
-            AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, DestroyIcon, DestroyMenu,
-            GetCursorPos, LookupIconIdFromDirectoryEx, PostMessageW, SetForegroundWindow,
-            TrackPopupMenu, HMENU, LR_DEFAULTCOLOR, MF_CHECKED, MF_GRAYED, MF_STRING, MF_UNCHECKED,
-            TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, WM_NULL,
+            CreateIconFromResourceEx, DestroyIcon, DestroyMenu, GetCursorPos,
+            LookupIconIdFromDirectoryEx, PostMessageW, SetForegroundWindow, TrackPopupMenu, HMENU,
+            LR_DEFAULTCOLOR, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, WM_NULL,
         },
     },
 };
 
+pub(crate) mod quick_settings;
+
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.ico");
+
+#[derive(Clone, Copy)]
+pub(crate) struct TrayMenuState<'a> {
+    pub(crate) startup: StartupState,
+    pub(crate) startup_busy: bool,
+    pub(crate) paused: bool,
+    pub(crate) pause_busy: bool,
+    pub(crate) elevated: bool,
+    pub(crate) restarting: bool,
+    pub(crate) settings_busy: bool,
+    pub(crate) pending_settings: bool,
+    pub(crate) configuration: &'a Config,
+}
 
 pub(crate) struct TrayIcon {
     data: NOTIFYICONDATAW,
@@ -83,21 +96,14 @@ impl TrayIcon {
             .context("trayicon stage=notification")
     }
 
-    pub(crate) fn show(
-        &mut self,
-        startup: StartupState,
-        busy: bool,
-        paused: bool,
-        pause_busy: bool,
-        text: Text,
-    ) -> Result<Option<u32>> {
+    pub(crate) fn show(&mut self, state: TrayMenuState<'_>, text: Text) -> Result<Option<u32>> {
         let hwnd = self.data.hWnd;
         let mut cursor = POINT::default();
         unsafe { SetForegroundWindow(hwnd) }
             .ok()
             .context("trayicon stage=foreground")?;
         unsafe { GetCursorPos(&mut cursor) }?;
-        let menu = self.create_menu(startup, busy, paused, pause_busy, text)?;
+        let menu = self.create_menu(state, text)?;
         unsafe { SetLastError(ERROR_SUCCESS) };
         let command = unsafe {
             TrackPopupMenu(
@@ -119,56 +125,8 @@ impl TrayIcon {
         Ok((command != 0).then_some(command))
     }
 
-    fn create_menu(
-        &self,
-        startup: StartupState,
-        busy: bool,
-        paused: bool,
-        pause_busy: bool,
-        text: Text,
-    ) -> Result<Menu> {
-        let menu = Menu(unsafe { CreatePopupMenu() }?);
-        let configure = to_wstring(text.configure());
-        let startup_text = to_wstring(text.startup(startup, busy));
-        let exit = to_wstring(text.exit());
-        let pause_text = to_wstring(text.pause(paused, pause_busy));
-        let mut pause_flags = if paused { MF_CHECKED } else { MF_UNCHECKED };
-        if pause_busy {
-            pause_flags |= MF_GRAYED;
-        }
-        let mut flags = if matches!(
-            startup,
-            StartupState::Ready(true) | StartupState::Saved(true)
-        ) {
-            MF_CHECKED
-        } else {
-            MF_UNCHECKED
-        };
-        if !matches!(startup, StartupState::Ready(_)) || busy {
-            flags |= MF_GRAYED;
-        }
-        unsafe {
-            AppendMenuW(
-                menu.0,
-                MF_STRING,
-                IDM_CONFIGURE as usize,
-                PCWSTR(configure.as_ptr()),
-            )?;
-            AppendMenuW(
-                menu.0,
-                MF_STRING | flags,
-                IDM_STARTUP as usize,
-                PCWSTR(startup_text.as_ptr()),
-            )?;
-            AppendMenuW(
-                menu.0,
-                MF_STRING | pause_flags,
-                IDM_PAUSE as usize,
-                PCWSTR(pause_text.as_ptr()),
-            )?;
-            AppendMenuW(menu.0, MF_STRING, IDM_EXIT as usize, PCWSTR(exit.as_ptr()))?;
-        }
-        Ok(menu)
+    fn create_menu(&self, state: TrayMenuState<'_>, text: Text) -> Result<Menu> {
+        quick_settings::build(state, text)
     }
 }
 

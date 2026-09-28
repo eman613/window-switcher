@@ -1,10 +1,9 @@
 use crate::{
     config::Config,
-    icon_cache::{CachedIcon, IconCache, IconKey, SourceStamp, ICON_PIXELS},
+    icon_cache::{CachedIcon, IconKey, SourceStamp},
     utils::{
         appx,
         browser::{pwa_shortcut, BrowserPaths},
-        com::ComApartment,
     },
     window_snapshot::lifetimes::WindowLifetimes,
     window_target::WindowTarget,
@@ -21,6 +20,7 @@ use windows::Win32::Foundation::HWND;
 
 pub(crate) mod file;
 pub(crate) mod native;
+mod service;
 pub(crate) const WM_ICON: u32 = 6011;
 
 pub(crate) struct IconLoader {
@@ -159,6 +159,7 @@ pub(crate) struct IconResult {
     pub(crate) image: Option<Arc<CachedIcon>>,
     pub(crate) image_requested: bool,
     pub(crate) display_name: Arc<str>,
+    pub(crate) complete: bool,
 }
 pub(crate) struct IconRequest {
     pub(crate) key: IconKey,
@@ -180,46 +181,10 @@ impl IconService {
         let shared = mailbox.clone();
         let configuration = config.clone();
         let ini_dir = ini_dir.to_owned();
-        let thread = thread::Builder::new().name("icon-loader".into()).spawn(move || {
-            let _com = match ComApartment::sta() { Ok(com) => com, Err(error) => { error!("icon stage=com error={error:#}"); shared.close(); target.try_post(WM_ICON); return; } };
-            let loader = IconLoader::new(&configuration, &ini_dir);
-            let mut cache = IconCache::new(&configuration);
-            let mut names = crate::app_name::NameCache::new(&configuration);
-            while !shared.closed() && target.is_live() {
-                let Some((generation, keys)) = shared.receive(Duration::from_secs(1)) else { continue; };
-                let started = crate::diagnostics::sample_start(configuration.metrics_enabled);
-                let mut published_names = 0usize;
-                for IconRequest { key, image: image_requested } in keys {
-                    let allowed = || shared.current(generation) && target.is_live();
-                    if !allowed() { break; }
-                    if !key.identity.is_current(&lifetimes) { continue; }
-                    let image = if !image_requested { None } else if let Some(image) = cache.get(&key) { image } else if let Some(lease) = cache.reserve() {
-                        let (icon, sources) = loader.native(&key.group, key.identity.hwnd(), || allowed() && key.identity.is_current(&lifetimes));
-                        if !allowed() { break; }
-                        if key.identity.is_current(&lifetimes) {
-                            let source_succeeded = icon.is_some();
-                            let icon = icon.or_else(native::fallback);
-                            let image = icon.and_then(|icon| match native::rasterize(icon.0, ICON_PIXELS) {
-                                Ok(image) => Some((image, lease)),
-                                Err(error) => { debug!("icon stage=rasterize error={error:#}"); None }
-                            });
-                            cache.insert(key.clone(), image, sources, source_succeeded)
-                        } else { None }
-                    } else {
-                        debug!("icon stage=budget pinned-by-consumer");
-                        cache.insert(key.clone(), None, Vec::new(), false)
-                    };
-                    if !allowed() { break; }
-                    let display_name = names.resolve(&key.group);
-                    if !allowed() || !key.identity.is_current(&lifetimes) { continue; }
-                    if !shared.publish(generation, IconResult { key, image, image_requested, display_name }) { break; }
-                    published_names += 1;
-                    target.try_post(WM_ICON);
-                }
-                crate::diagnostics::stage_elapsed("icons", started);
-                if configuration.metrics_enabled { info!("metrics event=icon_cache entries={} bytes={} hits={} misses={} failures={} fallbacks={} names={published_names} workers=1", cache.len(), cache.bytes(), cache.hits, cache.misses, cache.failures, cache.fallbacks); }
-            }
-        }).context("icon stage=thread-create")?;
+        let thread = thread::Builder::new()
+            .name("icon-loader".into())
+            .spawn(move || service::run(configuration, ini_dir, lifetimes, shared, target))
+            .context("icon stage=thread-create")?;
         Ok(Self {
             mailbox,
             thread: Some(thread),
