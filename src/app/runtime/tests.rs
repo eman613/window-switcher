@@ -188,6 +188,52 @@ fn invalid_window_initialization_does_not_register_or_retire_a_live_owner() {
 }
 
 #[test]
+fn native_initialization_failures_release_created_resources_and_notification_references() {
+    use std::time::{Duration, Instant};
+
+    for after_registration in [false, true] {
+        let mut retained = None;
+        let mut hwnd = HWND::default();
+        let failed = (|| -> Result<()> {
+            let fixture = native_fixture();
+            hwnd = fixture.window.0;
+            retained = Some(fixture.window.target());
+            let invalid = HWND(1usize as _);
+            assert!(!unsafe { IsWindow(Some(invalid)) }.as_bool());
+            let _registration = AppRegistration::new(
+                if after_registration { hwnd } else { invalid },
+                &fixture.owner,
+            )?;
+            let _timer = InputPollTimer::new(invalid)?;
+            anyhow::bail!("invalid native initialization unexpectedly succeeded");
+        })();
+        let error = failed.unwrap_err().to_string();
+        assert!(error.contains(if after_registration {
+            "input stage=terminal-timer failed"
+        } else {
+            "ui stage=register-owner"
+        }));
+        assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
+        let retained = retained.unwrap();
+        assert!(!retained.is_live());
+        assert!(!retained.try_post(WM_INPUT_READY));
+        // Idle workers can finish asynchronously, but must not retain the endpoint.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&retained) != 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            Arc::strong_count(&retained),
+            1,
+            "retained initialization resources"
+        );
+        let weak = Arc::downgrade(&retained);
+        drop(retained);
+        assert!(weak.upgrade().is_none());
+    }
+}
+
+#[test]
 fn native_destroy_during_borrow_detaches_owner_without_reentrant_mutation() {
     let fixture = native_fixture();
     let registration = AppRegistration::new(fixture.window.0, &fixture.owner).unwrap();
