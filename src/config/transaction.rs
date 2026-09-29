@@ -9,7 +9,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use windows::Win32::{
     Foundation::{GENERIC_READ, GENERIC_WRITE},
-    Storage::FileSystem::{DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ},
+    Storage::FileSystem::{DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, WRITE_OWNER},
 };
 
 use super::{
@@ -142,7 +142,7 @@ impl TemporaryConfig {
                 path.with_file_name(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
             match OpenOptions::new()
                 .write(true)
-                .access_mode(GENERIC_READ.0 | GENERIC_WRITE.0 | DELETE.0)
+                .access_mode(GENERIC_READ.0 | GENERIC_WRITE.0 | DELETE.0 | WRITE_OWNER.0)
                 .share_mode(FILE_SHARE_READ.0)
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
                 .create_new(true)

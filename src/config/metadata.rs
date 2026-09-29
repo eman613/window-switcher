@@ -39,8 +39,14 @@ impl PreservedMetadata {
         require_supported_attributes(basic_information(candidate)?.FileAttributes)?;
         require_single_stream(original)?;
         let security = security_information(original)?;
-        if security != security_information(candidate)? {
-            bail!("INI 与候选文件的所有者、权限或完整性标签不一致；不降低文件权限，原文件未修改");
+        let candidate_security = security_information(candidate)?;
+        if security != candidate_security {
+            super::metadata_owner::preserve_owner(candidate, &security, &candidate_security)?;
+            if security != security_information(candidate)? {
+                bail!(
+                    "INI 与候选文件的所有者、权限或完整性标签不一致；不降低文件权限，原文件未修改"
+                );
+            }
         }
         Ok(Self { basic, security })
     }
@@ -243,6 +249,57 @@ mod tests {
     use windows::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_ENCRYPTED,
     };
+
+    #[test]
+    fn user_owned_configuration_keeps_its_full_descriptor_after_replacement() {
+        use crate::{
+            config::test_support::TestDirectory,
+            utils::{token::TokenSid, HandleWrapper},
+        };
+        use std::{fs::OpenOptions, io::Write, os::windows::fs::OpenOptionsExt};
+        use windows::Win32::{
+            Foundation::{GENERIC_READ, GENERIC_WRITE},
+            Security::{
+                Authorization::{SetSecurityInfo, SE_FILE_OBJECT},
+                TOKEN_QUERY,
+            },
+            Storage::FileSystem::WRITE_OWNER,
+            System::Threading::{GetCurrentProcess, OpenProcessToken},
+        };
+
+        let directory = TestDirectory::new();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .access_mode(GENERIC_READ.0 | GENERIC_WRITE.0 | WRITE_OWNER.0)
+            .create_new(true)
+            .open(directory.ini())
+            .unwrap();
+        file.write_all(b"before").unwrap();
+        let mut token = HandleWrapper::default();
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, token.get_handle_mut()) }
+            .unwrap();
+        let user = TokenSid::user(token.get_handle()).unwrap();
+        unsafe {
+            SetSecurityInfo(
+                handle(&file),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(user.sid()),
+                None,
+                None,
+                None,
+            )
+        }
+        .ok()
+        .unwrap();
+        let before = security_information(&file).unwrap();
+        drop(file);
+        super::super::transaction::write_preserving(&directory.ini(), Some(b"before"), b"after")
+            .unwrap();
+        let file = File::open(directory.ini()).unwrap();
+        assert_eq!(security_information(&file).unwrap(), before);
+        assert_eq!(std::fs::read(directory.ini()).unwrap(), b"after");
+    }
 
     #[test]
     fn unsupported_attributes_are_rejected_without_downgrading_them() {

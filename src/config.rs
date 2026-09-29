@@ -13,6 +13,7 @@ mod file_identity;
 mod hotkey;
 mod logging;
 mod metadata;
+mod metadata_owner;
 mod notifications;
 mod parsers;
 pub(crate) mod quick;
