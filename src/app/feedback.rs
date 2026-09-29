@@ -24,20 +24,19 @@ impl App {
     pub(super) fn set_trayicon(&mut self) {
         self.feedback.retry_at = None;
         if let Some(trayicon) = self.trayicon.as_mut() {
-            match trayicon.register(self.hwnd) {
-                Ok(()) => {
-                    self.feedback.retry_count = 0;
-                    info!("trayicon stage=registered");
-                }
-                Err(_) if !trayicon.exist() && self.feedback.retry_count < 5 => {
-                    self.feedback.retry_count += 1;
-                    self.feedback.retry_at = Some(Instant::now() + Duration::from_secs(3));
-                    warn!(
-                        "trayicon stage=register retry={}",
-                        self.feedback.retry_count
-                    );
-                }
-                Err(_) => warn!("trayicon stage=register unavailable"),
+            let added = trayicon.register(self.hwnd).is_ok();
+            if added || trayicon.exist() {
+                self.feedback.retry_count = 0;
+                info!("trayicon stage=registered reused={}", !added);
+            } else if self.feedback.retry_count < 5 {
+                self.feedback.retry_count += 1;
+                self.feedback.retry_at = Some(Instant::now() + Duration::from_secs(3));
+                warn!(
+                    "trayicon stage=register retry={}",
+                    self.feedback.retry_count
+                );
+            } else {
+                warn!("trayicon stage=register unavailable");
             }
         }
     }

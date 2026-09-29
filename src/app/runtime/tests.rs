@@ -240,6 +240,14 @@ fn lost_tray_registration_recovers_after_a_deferred_taskbar_created_message() {
         .register(fixture.window.0)
         .unwrap();
     assert!(held.trayicon.as_mut().unwrap().exist());
+    held.feedback.retry_count = 5;
+    held.feedback.retry_at = Some(std::time::Instant::now());
+    held.set_trayicon();
+    assert_eq!(
+        held.feedback.retry_count, 0,
+        "an existing verified tray registration must restore the retry budget"
+    );
+    assert!(held.feedback.retry_at.is_none());
     let removed = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: fixture.window.0,
