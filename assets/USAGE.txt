@@ -9,6 +9,11 @@ Window Switcher
 4. 更新前从托盘“退出”。保留已有 window-switcher.ini，只替换 EXE。
 5. 从托盘“编辑配置”修改同目录 INI。保存后按 auto_restart 设置生效。
 
+配置安全元数据
+带 SACL（审计规则或完整性标签）的 INI 不支持自动补全或托盘保存。
+遇到此类文件时程序拒绝写回并保留原文件，包括纯继承 SACL 的情况。
+普通 INI 的保存方式不变。
+
 源码仓库中的安装脚本（PowerShell 7）
   pwsh -NoProfile -NonInteractive -File .\install.ps1
 默认选择个人维护仓库最近发布的公开预发布。可使用 -Channel stable 选择稳定版，
