@@ -12,8 +12,7 @@ use windows::Win32::{
     Security::{
         GetKernelObjectSecurity, GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION,
         GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, SE_SACL_AUTO_INHERITED, SE_SACL_AUTO_INHERIT_REQ, SE_SACL_DEFAULTED,
-        SE_SACL_PRESENT, SE_SACL_PROTECTED,
+        PSECURITY_DESCRIPTOR, SE_SACL_PRESENT,
     },
     Storage::FileSystem::{
         FileBasicInfo, FileStreamInfo, GetFileInformationByHandleEx, SetFileInformationByHandle,
@@ -178,12 +177,9 @@ fn require_supported_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> Result<()> 
     let mut revision = 0;
     unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }
         .context("无法核验 INI 安全描述符控制位；原文件未修改")?;
-    let sacl = SE_SACL_PRESENT
-        | SE_SACL_DEFAULTED
-        | SE_SACL_AUTO_INHERIT_REQ
-        | SE_SACL_AUTO_INHERITED
-        | SE_SACL_PROTECTED;
-    if control & sacl.0 != 0 {
+    // Windows may retain AUTO_INHERITED even when no SACL exists. Only PRESENT
+    // identifies a SACL whose hidden audit entries cannot be compared safely.
+    if control & SE_SACL_PRESENT.0 != 0 {
         warn!("config stage=metadata unsupported-sacl");
         bail!("INI 含 SACL 审计或完整性安全元数据（control=0x{control:04x}）；当前自动保存无法保证完整保留，原文件未修改");
     }
@@ -265,8 +261,11 @@ mod tests {
             core::HSTRING,
             Win32::{
                 Foundation::{LocalFree, HLOCAL},
-                Security::Authorization::{
-                    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                Security::{
+                    Authorization::{
+                        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                    },
+                    SetSecurityDescriptorControl, SE_SACL_AUTO_INHERITED,
                 },
             },
         };
@@ -290,8 +289,18 @@ mod tests {
             }
             .unwrap();
             let result = require_supported_descriptor(descriptor);
+            unsafe {
+                SetSecurityDescriptorControl(
+                    descriptor,
+                    SE_SACL_AUTO_INHERITED,
+                    SE_SACL_AUTO_INHERITED,
+                )
+            }
+            .unwrap();
+            let inherited = require_supported_descriptor(descriptor);
             unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
             assert_eq!(result.is_ok(), supported, "{sddl}");
+            assert_eq!(inherited.is_ok(), supported, "AUTO_INHERITED: {sddl}");
         }
     }
 }
