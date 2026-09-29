@@ -18,6 +18,14 @@ const PEER_DIRECTORY: &str = "WINDOW_SWITCHER_LIFECYCLE_TEST_DIRECTORY";
 const PEER_TEST: &str = "foreground::native_tests::lifecycle_window_peer";
 const DEADLINE: Duration = Duration::from_secs(10);
 
+mod cross_integrity;
+
+trait LifecyclePeer {
+    fn signal(&mut self, command: &str);
+    fn finish(&mut self);
+    fn exited(&mut self) -> bool;
+}
+
 struct HiddenWindow(HWND);
 impl HiddenWindow {
     fn create() -> Self {
@@ -53,9 +61,20 @@ impl Drop for HiddenWindow {
 }
 
 struct Peer(Child);
-impl Peer {
+impl LifecyclePeer for Peer {
     fn signal(&mut self, command: &str) {
         writeln!(self.0.stdin.as_mut().unwrap(), "{command}").unwrap();
+    }
+
+    fn finish(&mut self) {
+        drop(self.0.stdin.take());
+    }
+
+    fn exited(&mut self) -> bool {
+        self.0
+            .try_wait()
+            .unwrap()
+            .is_some_and(|status| status.success())
     }
 }
 impl Drop for Peer {
@@ -140,8 +159,24 @@ fn real_cross_process_events_retire_window_identities_and_stop_after_unhook() {
             .spawn()
             .unwrap(),
     );
-    let first = await_window(&directory.0, "first", &lifetimes, None);
+    verify_lifecycle(&directory.0, lifetimes, watcher, &mut peer, None);
+}
+
+fn verify_lifecycle(
+    directory: &Path,
+    lifetimes: Arc<WindowLifetimes>,
+    watcher: ForegroundWatcher,
+    peer: &mut impl LifecyclePeer,
+    expected_peer_elevated: Option<bool>,
+) {
+    let first = await_window(directory, "first", &lifetimes, None);
     let old = WindowIdentity::capture(first, &lifetimes).unwrap();
+    if let Some(expected) = expected_peer_elevated {
+        assert_eq!(
+            crate::utils::is_process_elevated(old.process.pid),
+            Some(expected)
+        );
+    }
     assert!(old.is_current(&lifetimes));
     peer.signal("destroy");
     await_condition(|| !old.has_current_lifetime(&lifetimes), "destroy event");
@@ -150,7 +185,7 @@ fn real_cross_process_events_retire_window_identities_and_stop_after_unhook() {
     let destroyed_stamp = lifetimes.stamp(old.window).unwrap();
     peer.signal("recreate");
     let second = await_window(
-        &directory.0,
+        directory,
         "second",
         &lifetimes,
         Some((old.window, destroyed_stamp)),
@@ -162,16 +197,8 @@ fn real_cross_process_events_retire_window_identities_and_stop_after_unhook() {
     assert!(current.is_current(&lifetimes));
     drop(watcher);
     let revision = lifetimes.revision();
-    drop(peer.0.stdin.take());
-    await_condition(
-        || {
-            peer.0
-                .try_wait()
-                .unwrap()
-                .is_some_and(|status| status.success())
-        },
-        "peer exit",
-    );
+    peer.finish();
+    await_condition(|| peer.exited(), "peer exit");
     pump();
     assert_eq!(lifetimes.revision(), revision);
     assert!(!current.is_current(&lifetimes));
