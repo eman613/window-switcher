@@ -252,6 +252,9 @@ unsafe extern "system" fn win_event_proc(
 }
 
 #[cfg(test)]
+mod native_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
