@@ -1,4 +1,6 @@
 use super::*;
+
+mod menu;
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
 #[test]
