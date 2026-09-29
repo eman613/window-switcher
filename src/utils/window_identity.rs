@@ -87,27 +87,44 @@ mod tests {
         },
     };
 
+    struct TestWindow(HWND);
+
+    impl TestWindow {
+        fn new() -> Self {
+            Self(
+                unsafe {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE(0),
+                        w!("STATIC"),
+                        w!("isolated identity fixture"),
+                        WINDOW_STYLE(0),
+                        0,
+                        0,
+                        320,
+                        200,
+                        None,
+                        None,
+                        Some(GetModuleHandleW(None).unwrap().into()),
+                        None,
+                    )
+                }
+                .unwrap(),
+            )
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            unsafe { DestroyWindow(self.0) }.unwrap();
+        }
+    }
+
     #[test]
     fn destroyed_window_and_unknown_identity_are_rejected() {
         let lifetimes = WindowLifetimes::default();
         assert!(WindowIdentity::capture(HWND::default(), &lifetimes).is_none());
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                w!("STATIC"),
-                w!("isolated identity fixture"),
-                WINDOW_STYLE(0),
-                0,
-                0,
-                320,
-                200,
-                None,
-                None,
-                Some(GetModuleHandleW(None).unwrap().into()),
-                None,
-            )
-        }
-        .unwrap();
+        let window = TestWindow::new();
+        let hwnd = window.0;
         let identity = WindowIdentity::capture(hwnd, &lifetimes).unwrap();
         assert!(identity.is_current(&lifetimes));
         let mut stale = identity;
@@ -115,9 +132,32 @@ mod tests {
         assert!(!stale.is_current(&lifetimes));
         lifetimes.event(hwnd.0 as usize, true);
         assert!(!identity.is_current(&lifetimes));
+        let current = WindowIdentity::capture(hwnd, &lifetimes).unwrap();
+        assert!(current.is_current(&lifetimes));
         assert_eq!(super::super::get_window_size(hwnd).unwrap(), (320, 200));
-        unsafe { DestroyWindow(hwnd) }.unwrap();
-        assert!(!identity.is_current(&lifetimes));
+        drop(window);
+        assert!(!current.is_current(&lifetimes));
+        assert!(WindowIdentity::capture(hwnd, &lifetimes).is_none());
         assert!(super::super::get_window_size(hwnd).is_err());
+    }
+
+    #[test]
+    fn native_window_recreation_accepts_only_the_new_lifetime() {
+        let lifetimes = WindowLifetimes::default();
+        let window = TestWindow::new();
+        let old = WindowIdentity::capture(window.0, &lifetimes).unwrap();
+        drop(window);
+        assert!(!old.is_current(&lifetimes));
+        // Explicit registry delivery also protects against native HWND reuse.
+        // This test does not assume that Windows reuses the numeric handle.
+        lifetimes.event(old.window, true);
+        let replacement = TestWindow::new();
+        lifetimes.event(replacement.0 .0 as usize, true);
+        let current = WindowIdentity::capture(replacement.0, &lifetimes).unwrap();
+        assert_eq!(old.process, current.process);
+        assert_eq!(old.thread, current.thread);
+        assert_ne!(old, current);
+        assert!(!old.is_current(&lifetimes));
+        assert!(current.is_current(&lifetimes));
     }
 }
