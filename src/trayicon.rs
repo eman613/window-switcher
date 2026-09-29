@@ -40,6 +40,8 @@ pub(crate) struct TrayMenuState<'a> {
 
 pub(crate) struct TrayIcon {
     data: NOTIFYICONDATAW,
+    #[cfg(test)]
+    reject_registration: bool,
 }
 
 impl TrayIcon {
@@ -62,6 +64,8 @@ impl TrayIcon {
         }
         .context("trayicon stage=icon-create")?;
         Ok(Self {
+            #[cfg(test)]
+            reject_registration: false,
             data: NOTIFYICONDATAW {
                 cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
                 uID: WM_USER_TRAYICON,
@@ -74,14 +78,29 @@ impl TrayIcon {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn failing_registration_for_test() -> Result<Self> {
+        let mut icon = Self::create()?;
+        icon.reject_registration = true;
+        Ok(icon)
+    }
+
     pub(crate) fn register(&mut self, hwnd: HWND) -> Result<()> {
         self.data.hWnd = hwnd;
+        #[cfg(test)]
+        if self.reject_registration {
+            bail!("test-only tray registration failure");
+        }
         unsafe { Shell_NotifyIconW(NIM_ADD, &self.data) }
             .ok()
             .context("trayicon stage=register")
     }
 
     pub(crate) fn exist(&mut self) -> bool {
+        #[cfg(test)]
+        if self.reject_registration {
+            return false;
+        }
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &self.data) }.as_bool()
     }
 

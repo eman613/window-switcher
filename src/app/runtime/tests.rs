@@ -300,6 +300,41 @@ fn deferred_overflow_closes_delivery_and_keeps_the_queue_bounded() {
 
 #[test]
 #[ignore = "requires an interactive Explorer shell; run as an isolated native regression"]
+fn injected_tray_registration_failures_exhaust_the_budget_and_recover() {
+    use std::time::Instant;
+
+    let fixture = native_fixture();
+    let mut app = fixture.owner.app.borrow_mut();
+    app.trayicon = Some(TrayIcon::failing_registration_for_test().unwrap());
+    app.set_trayicon();
+    assert_eq!(
+        app.feedback.retry_count, 1,
+        "the injected registration failure must schedule the first retry"
+    );
+    for expected in 2..=5 {
+        assert!(app.feedback.retry_at.is_some());
+        app.feedback.retry_at = Some(Instant::now());
+        app.poll_feedback();
+        assert_eq!(app.feedback.retry_count, expected);
+    }
+    app.feedback.retry_at = Some(Instant::now());
+    app.poll_feedback();
+    assert_eq!(app.feedback.retry_count, 5);
+    assert!(app.feedback.retry_at.is_none());
+    app.poll_feedback();
+    assert_eq!(app.feedback.retry_count, 5);
+    assert!(app.feedback.retry_at.is_none());
+    assert!(fixture.owner.target.is_live());
+
+    app.trayicon = Some(TrayIcon::create().unwrap());
+    app.set_trayicon();
+    assert_eq!(app.feedback.retry_count, 0);
+    assert!(app.feedback.retry_at.is_none());
+    assert!(app.trayicon.as_mut().unwrap().exist());
+}
+
+#[test]
+#[ignore = "requires an interactive Explorer shell; run as an isolated native regression"]
 fn lost_tray_registration_recovers_after_a_deferred_taskbar_created_message() {
     use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIM_DELETE, NOTIFYICONDATAW};
 
