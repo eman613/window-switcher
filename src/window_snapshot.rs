@@ -110,51 +110,54 @@ impl SnapshotService {
                     } = request;
                     crate::diagnostics::stage_elapsed("snapshot-queue", submitted);
                     let started = crate::diagnostics::sample_start(configuration.metrics_enabled);
-                    let result = (|| {
-                        let mut scan = scan::Scan::begin(
-                            filter::WindowFilter::from_config(&configuration, kind)
-                                .with_scope(scope),
-                            is_admin,
-                            registry.revision(),
-                            target.window_id(),
-                        )?;
-                        crate::diagnostics::stage_elapsed("snapshot-setup", started);
-                        while shared.current(generation) && target.is_live() {
-                            if scan.step(
-                                &mut metadata,
-                                &registry,
-                                Duration::from_millis(configuration.snapshot_budget_ms.into()),
-                                |metadata| {
-                                    mru.observe_foreground(
-                                        foreground
-                                            .resolve_pending(metadata, &mut foreground_version),
-                                        &registry,
+                    let result = crate::diagnostics::thread_work::measure(
+                        log::log_enabled!(log::Level::Debug),
+                        || {
+                            let mut scan = scan::Scan::begin(
+                                filter::WindowFilter::from_config(&configuration, kind)
+                                    .with_scope(scope),
+                                is_admin,
+                                registry.revision(),
+                                target.window_id(),
+                            )?;
+                            crate::diagnostics::stage_elapsed("snapshot-setup", started);
+                            while shared.current(generation) && target.is_live() {
+                                if scan.step(
+                                    &mut metadata,
+                                    &registry,
+                                    Duration::from_millis(configuration.snapshot_budget_ms.into()),
+                                    |metadata| {
+                                        mru.observe_foreground(
+                                            foreground
+                                                .resolve_pending(metadata, &mut foreground_version),
+                                            &registry,
+                                        );
+                                        !shared.current(generation) || !target.is_live()
+                                    },
+                                ) {
+                                    let snapshot = scan.finish()?;
+                                    let grouping_started = crate::diagnostics::sample_start(
+                                        log::log_enabled!(log::Level::Debug),
                                     );
-                                    !shared.current(generation) || !target.is_live()
-                                },
-                            ) {
-                                let snapshot = scan.finish()?;
-                                let grouping_started = crate::diagnostics::sample_start(
-                                    log::log_enabled!(log::Level::Debug),
-                                );
-                                let Some(mut snapshot) =
-                                    grouping.regroup(snapshot, kind, || {
-                                        shared.current(generation) && target.is_live()
-                                    })?
-                                else {
-                                    return Ok(None);
-                                };
-                                mru.order(&mut snapshot, kind, &configuration);
-                                crate::diagnostics::stage_elapsed(
-                                    "snapshot-grouping",
-                                    grouping_started,
-                                );
-                                return Ok(Some(snapshot));
+                                    let Some(mut snapshot) =
+                                        grouping.regroup(snapshot, kind, || {
+                                            shared.current(generation) && target.is_live()
+                                        })?
+                                    else {
+                                        return Ok(None);
+                                    };
+                                    mru.order(&mut snapshot, kind, &configuration);
+                                    crate::diagnostics::stage_elapsed(
+                                        "snapshot-grouping",
+                                        grouping_started,
+                                    );
+                                    return Ok(Some(snapshot));
+                                }
+                                thread::yield_now();
                             }
-                            thread::yield_now();
-                        }
-                        Ok(None)
-                    })();
+                            Ok(None)
+                        },
+                    );
                     crate::diagnostics::stage_elapsed("enumeration", started);
                     if configuration.metrics_enabled {
                         info!(
