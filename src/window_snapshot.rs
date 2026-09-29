@@ -23,6 +23,7 @@ use windows::Win32::Foundation::HWND;
 mod enumeration;
 pub(crate) mod filter;
 pub(crate) mod lifetimes;
+mod owners;
 mod scan;
 #[cfg(test)]
 mod tests;

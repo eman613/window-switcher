@@ -2,6 +2,7 @@ use super::{
     enumeration,
     filter::{FilterRejection, WindowFilter, FILTER_REJECTION_COUNT},
     lifetimes::WindowLifetimes,
+    owners::OwnerIndex,
     timings::{QueryStage, QueryTimings},
     WindowRecord, WindowSnapshot,
 };
@@ -12,7 +13,6 @@ use crate::{
 use anyhow::{ensure, Result};
 use indexmap::IndexMap;
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -22,7 +22,7 @@ const TEXT_LIMIT: usize = 16 * 1024 * 1024;
 
 pub(super) struct Scan {
     windows: Vec<usize>,
-    owners: HashMap<usize, usize>,
+    owners: OwnerIndex,
     excluded_process: u32,
     next: usize,
     groups: IndexMap<Arc<str>, Vec<WindowRecord>>,
@@ -50,17 +50,7 @@ impl Scan {
         let (windows, excluded_process) = enumeration::collect(excluded)?;
         crate::diagnostics::stage_elapsed("snapshot-collect", started);
         let started = crate::diagnostics::sample_start(log::log_enabled!(log::Level::Debug));
-        let mut owners = HashMap::new();
-        for &window in &windows {
-            let owner = utils::get_owner_window(HWND(window as _)).0 as usize;
-            if owner != 0
-                && !owners.contains_key(&owner)
-                && (excluded_process == 0
-                    || utils::get_window_pid(HWND(window as _)) != excluded_process)
-            {
-                owners.entry(owner).or_insert(window);
-            }
-        }
+        let owners = OwnerIndex::collect(&windows);
         crate::diagnostics::stage_elapsed("snapshot-owners", started);
         Ok(Self {
             windows,
@@ -156,8 +146,8 @@ impl Scan {
         {
             let Some(child) = self.timings.measure(QueryStage::OwnerMetadata, || {
                 self.owners
-                    .get(&window)
-                    .and_then(|child| metadata.lookup(utils::get_window_pid(HWND(*child as _))))
+                    .first_external(window, self.excluded_process)
+                    .and_then(|child| metadata.lookup(utils::get_window_pid(HWND(child as _))))
             }) else {
                 self.reject(FilterRejection::Metadata);
                 return;
@@ -207,6 +197,7 @@ impl Scan {
 
     pub(super) fn finish(self) -> Result<WindowSnapshot> {
         self.timings.report();
+        self.owners.report();
         ensure!(
             self.text_bytes <= TEXT_LIMIT,
             "snapshot stage=text-budget exceeded"
@@ -252,13 +243,17 @@ mod tests {
         }
         let config = crate::config::Config::default();
         let filter = WindowFilter::from_config(&config, crate::keyboard::state::SwitchKind::Apps);
-        let scan = Scan::begin(filter.clone(), true, 0, 0).unwrap();
+        let mut scan = Scan::begin(filter.clone(), true, 0, 0).unwrap();
         assert_eq!(
-            scan.owners.get(&(owner.0 .0 as usize)),
-            Some(&(second.0 .0 as usize))
+            scan.owners.first_external(owner.0 .0 as usize, 0),
+            Some(second.0 .0 as usize)
         );
-        let scan = Scan::begin(filter, true, 0, first.0 .0 as usize).unwrap();
-        assert!(!scan.owners.contains_key(&(owner.0 .0 as usize)));
+        let mut scan = Scan::begin(filter, true, 0, first.0 .0 as usize).unwrap();
+        assert_eq!(
+            scan.owners
+                .first_external(owner.0 .0 as usize, scan.excluded_process),
+            None
+        );
     }
 
     #[test]
