@@ -197,3 +197,45 @@ fn deferred_overflow_closes_delivery_and_keeps_the_queue_bounded() {
     drop(registration);
     assert_eq!(get_window_user_data(fixture.window.0), 0);
 }
+
+#[test]
+#[ignore = "requires an interactive Explorer shell; run as an isolated native regression"]
+fn lost_tray_registration_recovers_after_a_deferred_taskbar_created_message() {
+    use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIM_DELETE, NOTIFYICONDATAW};
+
+    let mut fixture = native_fixture();
+    let message = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+    assert_ne!(message, 0);
+    fixture.owner.taskbar_message = message;
+    let registration = AppRegistration::new(fixture.window.0, &fixture.owner).unwrap();
+    let mut held = fixture.owner.app.borrow_mut();
+    held.trayicon = Some(TrayIcon::create().unwrap());
+    held.trayicon
+        .as_mut()
+        .unwrap()
+        .register(fixture.window.0)
+        .unwrap();
+    assert!(held.trayicon.as_mut().unwrap().exist());
+    let removed = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: fixture.window.0,
+        uID: WM_USER_TRAYICON,
+        ..Default::default()
+    };
+    assert!(unsafe { Shell_NotifyIconW(NIM_DELETE, &removed) }.as_bool());
+    assert!(!held.trayicon.as_mut().unwrap().exist());
+    held.feedback.retry_count = 5;
+    unsafe { SendMessageW(fixture.window.0, message, None, None) };
+    assert_eq!(fixture.owner.pending.borrow().len(), 1);
+    assert_eq!(held.feedback.retry_count, 5);
+    assert!(!held.trayicon.as_mut().unwrap().exist());
+    drop(held);
+    unsafe { SendMessageW(fixture.window.0, WM_MOUSEMOVE, None, None) };
+    let mut held = fixture.owner.app.borrow_mut();
+    assert_eq!(held.feedback.retry_count, 0);
+    assert!(held.trayicon.as_mut().unwrap().exist());
+    assert!(fixture.owner.pending.borrow().is_empty());
+    assert!(fixture.owner.target.is_live());
+    drop(held);
+    drop(registration);
+}
