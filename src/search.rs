@@ -31,10 +31,15 @@ pub(crate) struct SearchEntry {
 
 impl SearchEntry {
     fn row(&self, text: Text) -> PickerRow {
+        let title = crate::picker::label(&self.title);
         PickerRow {
             key: self.key.clone(),
-            primary: crate::picker::label(&self.app),
-            secondary: crate::picker::label(&self.title),
+            primary: if title.trim().is_empty() {
+                crate::picker::label(&self.app)
+            } else {
+                title
+            },
+            secondary: crate::picker::label(&self.app),
             meta: text
                 .search_window_meta(self.elevated, self.minimized)
                 .into(),

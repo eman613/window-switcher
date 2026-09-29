@@ -144,7 +144,7 @@ fn draw_row(
     } else {
         p(170).min((bounds.right - left - p(170)).max(0))
     };
-    let right = bounds.right - p(14) - meta_width;
+    let right = bounds.right - p(14);
     let title_height = skin.title_height + p(5);
     let subtitle_height = skin.secondary_height + p(5);
     let top = bounds.top + (height - title_height - subtitle_height - p(3)) / 2;
@@ -168,7 +168,7 @@ fn draw_row(
         RECT {
             left,
             top: top + title_height + p(3),
-            right,
+            right: right - meta_width,
             bottom: top + title_height + p(3) + subtitle_height,
         },
         secondary,
@@ -180,10 +180,10 @@ fn draw_row(
             &skin.normal,
             &row.meta,
             RECT {
-                left: right + p(8),
-                top: bounds.top,
-                right: bounds.right - p(14),
-                bottom: bounds.bottom,
+                left: right - meta_width + p(8),
+                top: top + title_height + p(3),
+                right,
+                bottom: top + title_height + p(3) + subtitle_height,
             },
             secondary,
             DT_RIGHT,
@@ -252,6 +252,11 @@ pub(super) fn item(state: &ViewState, item: &DRAWITEMSTRUCT) -> Result<bool> {
         } else {
             skin.palette.muted
         };
+        // Owner-drawn buttons must also erase the pixels outside their rounded face.
+        ensure!(
+            unsafe { FillRect(item.hDC, &item.rcItem, skin.background_brush()) } != 0,
+            "picker stage=button-background failed"
+        );
         rounded(
             item.hDC,
             item.rcItem,

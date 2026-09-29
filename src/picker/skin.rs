@@ -132,12 +132,12 @@ impl SearchSkin {
         Ok(Self {
             palette,
             title: make_font(title_height, 500)?,
-            input: make_font(base * 20 / 14, 400)?,
+            input: make_font(base * 18 / 14, 400)?,
             normal,
             brush,
             secondary_height: base,
             title_height,
-            row_height: px(64, dpi).max(title_height + base + px(24, dpi)),
+            row_height: px(56, dpi).max(title_height + base + px(20, dpi)),
             shortcut: hotkey_label(&config.search_hotkey),
             dpi,
         })
