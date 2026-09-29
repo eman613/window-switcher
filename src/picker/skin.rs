@@ -2,7 +2,10 @@ use std::mem::size_of;
 
 use anyhow::{ensure, Result};
 use windows::Win32::{
-    Graphics::Gdi::{CreateFontIndirectW, CreateSolidBrush, GetObjectW, HBRUSH, HGDIOBJ, LOGFONTW},
+    Graphics::Gdi::{
+        CreateFontIndirectW, CreateSolidBrush, GetObjectW, CLEARTYPE_QUALITY, HBRUSH, HGDIOBJ,
+        LOGFONTW,
+    },
     UI::Input::KeyboardAndMouse::GetKeyNameTextW,
 };
 
@@ -70,10 +73,10 @@ impl SearchPalette {
             }
         } else {
             Self {
-                surface: 0x20252d,
+                surface: 0x171c24,
                 text: 0xedf1f7,
                 muted: 0xb3c0d0,
-                selected: 0x303e50,
+                selected: 0x2d3b4d,
                 selected_text: 0xedf1f7,
                 accent: 0x9cbddf,
                 border: 0x728399,
@@ -93,7 +96,6 @@ pub(super) struct SearchSkin {
     pub input: OwnedGdiObject,
     pub brush: OwnedGdiObject,
     pub secondary_height: i32,
-    pub title_height: i32,
     pub row_height: i32,
     pub shortcut: String,
     pub dpi: u32,
@@ -114,6 +116,18 @@ impl SearchSkin {
             "picker stage=font metrics unavailable"
         );
         let base = font.lfHeight.saturating_abs();
+        let palette = SearchPalette::capture(config);
+        if !palette.high_contrast {
+            font.lfFaceName = [0; 32];
+            for (slot, unit) in font
+                .lfFaceName
+                .iter_mut()
+                .zip("Microsoft YaHei UI".encode_utf16())
+            {
+                *slot = unit;
+            }
+            font.lfQuality = CLEARTYPE_QUALITY;
+        }
         let make_font = |height: i32, weight: i32| -> Result<OwnedGdiObject> {
             let mut value = font;
             value.lfHeight = -height;
@@ -124,7 +138,6 @@ impl SearchSkin {
             )
         };
         let title_height = (base * 15 / 14).max(base);
-        let palette = SearchPalette::capture(config);
         let brush = OwnedGdiObject::new(
             HGDIOBJ(unsafe { CreateSolidBrush(crate::text_raster::colorref(palette.surface)) }.0),
             "picker-background",
@@ -133,11 +146,10 @@ impl SearchSkin {
             palette,
             title: make_font(title_height, 500)?,
             input: make_font(base * 18 / 14, 400)?,
-            normal,
+            normal: make_font(base, 400)?,
             brush,
             secondary_height: base,
-            title_height,
-            row_height: px(56, dpi).max(title_height + base + px(20, dpi)),
+            row_height: px(42, dpi).max(title_height + px(18, dpi)),
             shortcut: hotkey_label(&config.search_hotkey),
             dpi,
         })

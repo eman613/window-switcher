@@ -142,7 +142,7 @@ impl SearchSession {
     pub(crate) fn snapshot(&mut self, source: WindowSnapshot) -> Result<()> {
         self.remember_selection();
         self.source = Some(Arc::new(source));
-        self.request()
+        self.request(false)
     }
     fn remember_selection(&mut self) {
         if !self.pending {
@@ -153,10 +153,12 @@ impl SearchSession {
                 .map(|entry| entry.identity);
         }
     }
-    fn request(&mut self) -> Result<()> {
+    fn request(&mut self, query_changed: bool) -> Result<()> {
         self.pending = true;
         self.failure_shown = false;
-        self.window.pending()?;
+        if query_changed || self.results.is_empty() {
+            self.window.pending()?;
+        }
         if let Some(source) = &self.source {
             self.generation = self.service.request(source.clone(), self.query.clone());
         }
@@ -192,7 +194,8 @@ impl SearchSession {
         }
         if events.flags & messages::CHANGED != 0 {
             self.query = self.window.query()?;
-            self.request()?;
+            self.selected = None;
+            self.request(true)?;
         }
         if self.window.composing() {
             // The native EDIT owns composition; do not enable results while an

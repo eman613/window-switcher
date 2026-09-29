@@ -106,10 +106,10 @@ impl PickerLayout {
         let dismiss_left = width - p(18) - dismiss_width;
         let clear_width = p(36).max(button_height);
         let clear_left = dismiss_left - p(10) - clear_width;
-        let input_top = p(12) + text_height;
+        let input_top = (query_bottom - input_height) / 2;
         let button_top = input_top + (input_height - button_height) / 2;
         Ok(Self {
-            label: rect(p(54), p(6), clear_left - p(68), text_height + p(4)),
+            label: RECT::default(),
             edit: rect(p(54), input_top, clear_left - p(68), input_height),
             results_label: rect(
                 p(22),
@@ -117,7 +117,7 @@ impl PickerLayout {
                 status_left - p(36),
                 text_height + p(8),
             ),
-            list: rect(p(8), list_top, width - p(16), footer_top - list_top - p(8)),
+            list: rect(p(12), list_top, width - p(32), footer_top - list_top - p(8)),
             status: rect(
                 status_left,
                 query_bottom + p(8),
@@ -148,7 +148,7 @@ impl PickerLayout {
 
 fn chrome(dpi: u32, text_height: i32) -> (i32, i32, i32, i32) {
     let input_height = text_height * 18 / 14 + px(8, dpi);
-    let query = (text_height + input_height + px(24, dpi)).max(px(64, dpi));
+    let query = (input_height + px(32, dpi)).max(px(68, dpi));
     (
         query,
         text_height + px(22, dpi),

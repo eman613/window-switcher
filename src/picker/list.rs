@@ -53,18 +53,25 @@ impl PickerWindow {
             self.failure()?;
             return Err(error);
         }
+        self.finish_rows(epoch, labels.is_empty())
+    }
+
+    pub(super) fn finish_rows(&self, epoch: u64, empty: bool) -> Result<()> {
+        let list = self.controls().list;
+        self.state().reset_scroll.set(false);
         self.state().epoch.set(epoch);
         self.state().accept.set(None);
         self.state().failed.set(false);
         self.state().busy.set(false);
         unsafe {
             let focused_list = GetFocus() == list;
-            let _ = EnableWindow(list, !labels.is_empty());
-            if labels.is_empty() && focused_list && GetForegroundWindow() == self.hwnd {
+            let _ = EnableWindow(list, !empty);
+            if empty && focused_list && GetForegroundWindow() == self.hwnd {
                 let _ = SetFocus(Some(self.state().focus_target()));
                 debug!("picker stage=empty-focus moved-to-recovery");
             }
         }
+        super::scrollbar::invalidate(self.state());
         self.controls().refresh_notice(self.state())
     }
 }

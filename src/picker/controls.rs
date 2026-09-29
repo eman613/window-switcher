@@ -115,7 +115,7 @@ impl Controls {
             parent,
             w!("LISTBOX"),
             "",
-            WS_VSCROLL
+            (if search { WINDOW_STYLE(0) } else { WS_VSCROLL })
                 | WS_TABSTOP
                 | list_style
                 | WINDOW_STYLE((LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32),

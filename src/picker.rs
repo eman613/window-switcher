@@ -7,6 +7,7 @@ mod list;
 pub(crate) mod messages;
 mod paint;
 mod rows;
+mod scrollbar;
 mod skin;
 #[cfg(test)]
 mod tests;
@@ -127,6 +128,8 @@ impl PickerWindow {
             pressed: Cell::new(None),
             hot_control: Cell::new(HWND::default()),
             paint_error: Cell::new(false),
+            reset_scroll: Cell::new(true),
+            scroll_drag: Cell::new(None),
         });
         let hwnd = unsafe {
             CreateWindowExW(
@@ -238,6 +241,9 @@ impl PickerWindow {
     }
 
     pub(crate) fn hide(&self) {
+        scrollbar::cancel(self.hwnd, self.state());
+        self.state().reset_scroll.set(true);
+        self.state().scroll_drag.set(None);
         self.state().visible.set(false);
         self.state().accept.set(None);
         self.state().flags.set(0);

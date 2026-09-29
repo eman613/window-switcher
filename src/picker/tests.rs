@@ -84,3 +84,171 @@ fn search_retains_native_strings_and_stable_layout_while_details_keeps_caption()
     search.hide();
     assert!(search.state().visual.borrow().rows.is_empty());
 }
+
+#[test]
+fn unchanged_results_keep_the_scrolled_viewport_away_from_selection() {
+    let mut search = PickerWindow::create(
+        HWND::default(),
+        Arc::new(WindowTarget::new(HWND::default())),
+        Text::new(Language::English),
+        ViewKind::Search,
+    )
+    .unwrap();
+    let area = PixelRect {
+        left: -10000,
+        top: -10000,
+        right: -9200,
+        bottom: -9200,
+    };
+    search
+        .position(
+            &Config::default(),
+            MonitorSnapshot {
+                identity: 1,
+                screen: area,
+                available: area,
+                dpi: 96,
+            },
+        )
+        .unwrap();
+    let rows = || {
+        (0..40)
+            .map(|index| row(index, &format!("Window {index}")))
+            .collect()
+    };
+    search.replace_rows(rows(), 0, 1).unwrap();
+    let list = search.controls().list;
+    unsafe {
+        SendMessageW(list, LB_SETTOPINDEX, Some(WPARAM(30)), None);
+    }
+    let top = unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0;
+    assert!(top >= 30);
+    search.replace_rows(rows(), 0, 2).unwrap();
+    assert_eq!(
+        unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0,
+        top
+    );
+    assert_eq!(search.selected(), Some(0));
+}
+
+#[test]
+#[ignore = "requires an isolated interactive desktop and moves the real mouse"]
+fn custom_scrollbar_drag_survives_refresh_and_reaches_last_row() {
+    use std::time::{Duration, Instant};
+    use windows::Win32::{
+        Foundation::POINT,
+        UI::Input::KeyboardAndMouse::{
+            GetCapture, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN,
+            MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+        },
+    };
+    fn mouse(down: bool) {
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dwFlags: if down {
+                        MOUSEEVENTF_LEFTDOWN
+                    } else {
+                        MOUSEEVENTF_LEFTUP
+                    },
+                    ..Default::default()
+                },
+            },
+        };
+        assert_eq!(
+            unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) },
+            1
+        );
+    }
+    fn pump() {
+        let until = Instant::now() + Duration::from_millis(150);
+        while Instant::now() < until {
+            let mut message = MSG::default();
+            while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+                unsafe {
+                    DispatchMessageW(&message);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    struct MouseRestore(POINT);
+    impl Drop for MouseRestore {
+        fn drop(&mut self) {
+            mouse(false);
+            let _ = unsafe { SetCursorPos(self.0.x, self.0.y) };
+        }
+    }
+    let mut cursor = POINT::default();
+    unsafe { GetCursorPos(&mut cursor) }.unwrap();
+    let _mouse_restore = MouseRestore(cursor);
+    let mut search = PickerWindow::create(
+        HWND::default(),
+        Arc::new(WindowTarget::new(HWND::default())),
+        Text::new(Language::English),
+        ViewKind::Search,
+    )
+    .unwrap();
+    let area = PixelRect {
+        left: 100,
+        top: 100,
+        right: 900,
+        bottom: 800,
+    };
+    search
+        .show(
+            &Config::default(),
+            MonitorSnapshot {
+                identity: 1,
+                screen: area,
+                available: area,
+                dpi: 96,
+            },
+        )
+        .unwrap();
+    let rows = || {
+        (0..40)
+            .map(|index| row(index, &format!("Window {index}")))
+            .collect()
+    };
+    search.replace_rows(rows(), 0, 1).unwrap();
+    pump();
+    let mut window = windows::Win32::Foundation::RECT::default();
+    unsafe { GetWindowRect(search.hwnd, &mut window) }.unwrap();
+    let (row_height, text_height) = search.controls().metrics(search.state(), 96);
+    let layout = layout::PickerLayout::calculate(
+        window.right - window.left,
+        window.bottom - window.top,
+        96,
+        ViewKind::Search,
+        row_height,
+        text_height,
+    )
+    .unwrap();
+    let x = window.right - 12;
+    unsafe { SetCursorPos(x, window.top + layout.list.top + 10) }.unwrap();
+    mouse(true);
+    pump();
+    assert_eq!(unsafe { GetCapture() }, search.hwnd);
+    unsafe { SetCursorPos(x, window.top + layout.list.bottom + 30) }.unwrap();
+    pump();
+    let list = search.controls().list;
+    let top = unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0;
+    assert!(top >= 30, "drag did not reach bottom: {top}");
+    search.replace_rows(rows(), 0, 2).unwrap();
+    pump();
+    assert_eq!(unsafe { GetCapture() }, search.hwnd);
+    assert_eq!(
+        unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0,
+        top
+    );
+    mouse(false);
+    pump();
+    assert_ne!(unsafe { GetCapture() }, search.hwnd);
+    assert_eq!(
+        unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0,
+        top
+    );
+    search.hide();
+}

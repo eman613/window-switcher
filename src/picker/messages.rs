@@ -64,6 +64,8 @@ pub(super) struct ViewState {
     pub pressed: Cell<Option<(u64, usize)>>,
     pub hot_control: Cell<HWND>,
     pub paint_error: Cell<bool>,
+    pub reset_scroll: Cell<bool>,
+    pub scroll_drag: Cell<Option<i32>>,
 }
 
 impl ViewState {
@@ -81,12 +83,14 @@ impl ViewState {
 
     pub(super) fn signal(&self, flags: u32) {
         if self.visible.get() {
+            super::scrollbar::invalidate(self);
             self.flags.set(self.flags.get() | flags);
             self.target.try_post(WM_INPUT_READY);
         }
     }
 
     pub(super) fn changed(&self) {
+        self.reset_scroll.set(true);
         self.busy.set(true);
         self.failed.set(false);
         self.accept.set(None);
@@ -148,6 +152,9 @@ pub(super) unsafe extern "system" fn window_proc(
     let pointer = get_window_user_data(hwnd);
     if pointer != 0 {
         let state = &*(pointer as *const ViewState);
+        if let Some(result) = super::scrollbar::handle(hwnd, state, msg, lparam) {
+            return result;
+        }
         match msg {
             WM_CLOSE => {
                 state.signal(CANCEL);

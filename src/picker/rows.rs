@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use windows::Win32::{
     Foundation::{LPARAM, RECT, WPARAM},
     Graphics::Gdi::InvalidateRect,
-    UI::WindowsAndMessaging::{GetClientRect, SendMessageW, LB_GETITEMRECT, LB_GETTOPINDEX},
+    UI::WindowsAndMessaging::{
+        GetClientRect, SendMessageW, LB_GETITEMRECT, LB_GETTOPINDEX, LB_SETTOPINDEX,
+    },
 };
 
 use super::{skin::SearchSkin, PickerWindow};
@@ -54,12 +56,27 @@ impl PickerWindow {
             .iter()
             .map(PickerRow::accessible_label)
             .collect::<Vec<_>>();
+        let top = unsafe { SendMessageW(self.controls().list, LB_GETTOPINDEX, None, None) }
+            .0
+            .max(0) as usize;
+        let mut restore_top = None;
+        let mut unchanged = false;
         {
             let mut visual = self
                 .state()
                 .visual
                 .try_borrow_mut()
                 .context("picker stage=rows reentrant update")?;
+            if !self.state().reset_scroll.get() {
+                unchanged = visual.rows.len() == rows.len()
+                    && visual.rows.iter().zip(&rows).all(|(old, new)| {
+                        old.key == new.key && old.accessible_label() == new.accessible_label()
+                    });
+                restore_top = visual
+                    .rows
+                    .get(top)
+                    .and_then(|anchor| rows.iter().position(|row| row.key == anchor.key));
+            }
             let old: HashMap<_, _> = visual
                 .rows
                 .iter()
@@ -73,7 +90,23 @@ impl PickerWindow {
             }
             visual.rows = rows;
         }
-        self.replace(&labels, selected, epoch)
+        if unchanged {
+            debug!("search stage=refresh retained-viewport top={top}");
+            return self.finish_rows(epoch, labels.is_empty());
+        }
+        self.replace(&labels, selected, epoch)?;
+        if let Some(top) = restore_top {
+            unsafe {
+                SendMessageW(
+                    self.controls().list,
+                    LB_SETTOPINDEX,
+                    Some(WPARAM(top)),
+                    None,
+                );
+            }
+            super::scrollbar::invalidate(self.state());
+        }
+        Ok(())
     }
 
     pub(crate) fn visible_icon_keys(&self) -> Vec<IconKey> {

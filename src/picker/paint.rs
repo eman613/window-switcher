@@ -127,8 +127,8 @@ fn draw_row(
             None,
         )?;
     }
-    let icon_size = p(32).max(1);
-    let icon_left = bounds.left + p(14);
+    let icon_size = p(24).max(1);
+    let icon_left = bounds.left + p(12);
     draw_icon(
         dc,
         row,
@@ -138,57 +138,38 @@ fn draw_row(
         background,
         secondary,
     )?;
-    let left = icon_left + icon_size + p(14);
-    let meta_width = if row.meta.is_empty() {
-        0
-    } else {
-        p(170).min((bounds.right - left - p(170)).max(0))
-    };
-    let right = bounds.right - p(14);
-    let title_height = skin.title_height + p(5);
-    let subtitle_height = skin.secondary_height + p(5);
-    let top = bounds.top + (height - title_height - subtitle_height - p(3)) / 2;
+    let left = icon_left + icon_size + p(12);
+    let right = bounds.right - p(12);
+    let app_width = ((right - left) / 3).min(p(190));
     text(
         dc,
         &skin.title,
         &row.primary,
         RECT {
             left,
-            top,
-            right,
-            bottom: top + title_height,
+            right: right - app_width - p(16),
+            ..bounds
         },
         foreground,
         DT_LEFT,
     )?;
+    let app = if row.meta.is_empty() {
+        row.secondary.clone()
+    } else {
+        format!("{} · {}", row.secondary, row.meta)
+    };
     text(
         dc,
         &skin.normal,
-        &row.secondary,
+        &app,
         RECT {
-            left,
-            top: top + title_height + p(3),
-            right: right - meta_width,
-            bottom: top + title_height + p(3) + subtitle_height,
+            left: right - app_width,
+            right,
+            ..bounds
         },
         secondary,
-        DT_LEFT,
+        DT_RIGHT,
     )?;
-    if meta_width > 0 {
-        text(
-            dc,
-            &skin.normal,
-            &row.meta,
-            RECT {
-                left: right - meta_width + p(8),
-                top: top + title_height + p(3),
-                right,
-                bottom: top + title_height + p(3) + subtitle_height,
-            },
-            secondary,
-            DT_RIGHT,
-        )?;
-    }
     if state.focused {
         let rect = RECT {
             left: bounds.left + p(4),
@@ -327,13 +308,17 @@ pub(super) fn window(hwnd: HWND, state: &ViewState) -> Result<()> {
             skin.palette.surface,
             Some(skin.palette.border),
         )?;
-        line(
+        rounded(
             dc,
-            1,
-            layout.query_bottom,
-            bounds.right - 1,
-            layout.query_bottom,
-            skin.palette.divider,
+            RECT {
+                left: p(12),
+                top: p(10),
+                right: layout.clear.right + p(6),
+                bottom: layout.query_bottom - p(10),
+            },
+            p(8),
+            skin.palette.surface,
+            Some(skin.palette.border),
         )?;
         line(
             dc,
@@ -397,6 +382,7 @@ pub(super) fn window(hwnd: HWND, state: &ViewState) -> Result<()> {
                 DT_RIGHT,
             )?;
         }
+        super::scrollbar::paint(hwnd, state, dc)?;
         Ok(())
     })();
     let ended = unsafe { EndPaint(hwnd, &paint) }.as_bool();
