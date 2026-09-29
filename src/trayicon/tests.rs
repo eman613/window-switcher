@@ -108,6 +108,16 @@ fn pending_configuration_and_real_privilege_are_separate_menu_states() {
         assert_ne!(flags(menu.0, 102) & MF_CHECKED.0, 0);
         assert_eq!(flags(menu.0, IDM_ELEVATE) & MF_GRAYED.0 != 0, elevated);
         assert_eq!(flags(menu.0, 132) & MF_GRAYED.0 != 0, !elevated);
+        assert_eq!(label(menu.0, 132), "以管理员身份开机启动");
+        let startup_menu = containing_menu(menu.0, 132).unwrap();
+        if !elevated {
+            let mut hint = [0; 256];
+            let length = unsafe { GetMenuStringW(startup_menu, 2, Some(&mut hint), MF_BYPOSITION) };
+            assert_eq!(
+                String::from_utf16(&hint[..length as usize]).unwrap(),
+                text.startup_elevation_hint()
+            );
+        }
         let mut caption = [0; 256];
         let length = unsafe { GetMenuStringW(menu.0, 1, Some(&mut caption), MF_BYPOSITION) };
         assert_eq!(

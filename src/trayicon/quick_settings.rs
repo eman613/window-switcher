@@ -133,6 +133,9 @@ fn group_menu(group: Group, state: TrayMenuState<'_>, text: Text, busy: bool) ->
             ),
         )?;
         menu.item(0, text.startup_effective(state.startup), false, true)?;
+        if !state.elevated {
+            menu.item(0, text.startup_elevation_hint(), false, true)?;
+        }
     }
     for &(id, item_group, setting) in ITEMS {
         if item_group != group {

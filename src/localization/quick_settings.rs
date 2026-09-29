@@ -66,15 +66,21 @@ impl Text {
             QuickSetting::StartupLevel(RunLevel::Standard) => {
                 self.choose("开机启动使用普通权限", "Standard startup permissions")
             }
-            QuickSetting::StartupLevel(RunLevel::Highest) => self.choose(
-                "开机启动使用最高可用权限",
-                "Highest available startup permissions",
-            ),
+            QuickSetting::StartupLevel(RunLevel::Highest) => {
+                self.choose("以管理员身份开机启动", "Start at sign-in as administrator")
+            }
         }
     }
 
     pub(crate) fn apply_settings(self) -> &'static str {
         self.choose("应用已保存设置", "Apply saved settings")
+    }
+
+    pub(crate) fn startup_elevation_hint(self) -> &'static str {
+        self.choose(
+            "设置管理员启动前，请先在主菜单以管理员身份重新启动",
+            "To configure administrator startup, first restart as administrator from the main menu",
+        )
     }
 
     pub(crate) fn startup_effective(self, state: crate::startup::StartupState) -> &'static str {
