@@ -31,6 +31,7 @@ fn geometry(hwnd: HWND, state: &ViewState) -> Option<Geometry> {
         ViewKind::Search,
         skin.row_height,
         skin.secondary_height,
+        state.help_open.get(),
     )
     .ok()?;
     let count = unsafe { SendMessageW(state.list.get(), LB_GETCOUNT, None, None) }

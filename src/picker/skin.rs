@@ -1,18 +1,14 @@
 use std::mem::size_of;
 
 use anyhow::{ensure, Result};
-use windows::Win32::{
-    Graphics::Gdi::{
-        CreateFontIndirectW, CreateSolidBrush, GetObjectW, CLEARTYPE_QUALITY, HBRUSH, HGDIOBJ,
-        LOGFONTW,
-    },
-    UI::Input::KeyboardAndMouse::GetKeyNameTextW,
+use windows::Win32::Graphics::Gdi::{
+    CreateFontIndirectW, CreateSolidBrush, GetObjectW, CLEARTYPE_QUALITY, HBRUSH, HGDIOBJ, LOGFONTW,
 };
 
 use crate::{
     appearance::Appearance,
-    config::{Config, Hotkey, Theme},
-    utils::gdi::{message_font, OwnedGdiObject},
+    config::{Config, Theme},
+    utils::gdi::{message_font_with_floor, OwnedGdiObject},
 };
 
 #[derive(Clone, Copy)]
@@ -59,16 +55,16 @@ impl SearchPalette {
     fn theme(light: bool) -> Self {
         if light {
             Self {
-                surface: 0xfcfdfe,
-                text: 0x202a36,
-                muted: 0x526173,
-                selected: 0xe1eaf5,
-                selected_text: 0x202a36,
-                accent: 0x35608b,
-                border: 0x9aa9bb,
-                divider: 0xccd5df,
-                hover: 0xeaf0f6,
-                pressed: 0xd4e0ed,
+                surface: 0xffffff,
+                text: 0x000000,
+                muted: 0x808080,
+                selected: 0xf0f0f0,
+                selected_text: 0x000000,
+                accent: 0x569de5,
+                border: 0xa9a9a9,
+                divider: 0xd9d9d9,
+                hover: 0xf5f5f5,
+                pressed: 0xe6e6e6,
                 high_contrast: false,
             }
         } else {
@@ -97,13 +93,16 @@ pub(super) struct SearchSkin {
     pub brush: OwnedGdiObject,
     pub secondary_height: i32,
     pub row_height: i32,
-    pub shortcut: String,
+    pub bold: OwnedGdiObject,
+    pub help_font: OwnedGdiObject,
+    pub question_font: OwnedGdiObject,
+    pub match_mode: crate::config::SearchMatch,
     pub dpi: u32,
 }
 
 impl SearchSkin {
     pub fn new(config: &Config, dpi: u32) -> Result<Self> {
-        let normal = message_font(dpi)?;
+        let normal = message_font_with_floor(dpi, 0)?;
         let mut font = LOGFONTW::default();
         ensure!(
             unsafe {
@@ -117,17 +116,7 @@ impl SearchSkin {
         );
         let base = font.lfHeight.saturating_abs();
         let palette = SearchPalette::capture(config);
-        if !palette.high_contrast {
-            font.lfFaceName = [0; 32];
-            for (slot, unit) in font
-                .lfFaceName
-                .iter_mut()
-                .zip("Microsoft YaHei UI".encode_utf16())
-            {
-                *slot = unit;
-            }
-            font.lfQuality = CLEARTYPE_QUALITY;
-        }
+        font.lfQuality = CLEARTYPE_QUALITY;
         let make_font = |height: i32, weight: i32| -> Result<OwnedGdiObject> {
             let mut value = font;
             value.lfHeight = -height;
@@ -137,20 +126,23 @@ impl SearchSkin {
                 "picker-font",
             )
         };
-        let title_height = (base * 15 / 14).max(base);
+        let title_height = base;
         let brush = OwnedGdiObject::new(
             HGDIOBJ(unsafe { CreateSolidBrush(crate::text_raster::colorref(palette.surface)) }.0),
             "picker-background",
         )?;
         Ok(Self {
             palette,
-            title: make_font(title_height, 500)?,
-            input: make_font(base * 18 / 14, 400)?,
+            title: make_font(title_height, 400)?,
+            input: make_font(base * 15 / 12, 400)?,
             normal: make_font(base, 400)?,
             brush,
             secondary_height: base,
-            row_height: px(42, dpi).max(title_height + px(18, dpi)),
-            shortcut: hotkey_label(&config.search_hotkey),
+            row_height: px(31, dpi).max(title_height * 127 / 100 + px(12, dpi)),
+            bold: make_font(base, 700)?,
+            help_font: make_font(base * 10 / 12, 400)?,
+            question_font: make_font(base * 18 / 12, 700)?,
+            match_mode: config.search_match,
             dpi,
         })
     }
@@ -162,23 +154,4 @@ impl SearchSkin {
 
 pub(super) fn px(dip: i32, dpi: u32) -> i32 {
     (i64::from(dip) * i64::from(dpi) / 96) as i32
-}
-
-fn hotkey_label(hotkey: &Hotkey) -> String {
-    let modifier = match hotkey.get_modifier() {
-        0x1d => "Ctrl",
-        0x38 => "Alt",
-        0x5b => "Win",
-        _ => return String::new(),
-    };
-    let mut name = [0u16; 64];
-    let scan = ((hotkey.code & 0xff) << 16) | if hotkey.code > 0xff { 1 << 24 } else { 0 };
-    let length = unsafe { GetKeyNameTextW(scan as i32, &mut name) };
-    if length <= 0 {
-        return String::new();
-    }
-    format!(
-        "{modifier} + {}",
-        String::from_utf16_lossy(&name[..length as usize])
-    )
 }

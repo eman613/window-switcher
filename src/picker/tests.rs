@@ -132,6 +132,63 @@ fn unchanged_results_keep_the_scrolled_viewport_away_from_selection() {
 }
 
 #[test]
+fn minimal_search_chrome_and_content_height_preserve_the_configured_row_limit() {
+    let mut search = PickerWindow::create(
+        HWND::default(),
+        Arc::new(WindowTarget::new(HWND::default())),
+        Text::new(Language::English),
+        ViewKind::Search,
+    )
+    .unwrap();
+    let area = PixelRect {
+        left: -10000,
+        top: -10000,
+        right: -9200,
+        bottom: -9200,
+    };
+    search
+        .position(
+            &Config::default(),
+            MonitorSnapshot {
+                identity: 1,
+                screen: area,
+                available: area,
+                dpi: 96,
+            },
+        )
+        .unwrap();
+    assert!(search.state().clear.get().is_invalid());
+    assert_eq!(
+        unsafe { GetWindowLongW(search.controls().status, GWL_STYLE) } as u32 & WS_VISIBLE.0,
+        0
+    );
+    let heading = unsafe { GetDlgItem(Some(search.hwnd), 103) }.unwrap();
+    assert_eq!(
+        unsafe { GetWindowLongW(heading, GWL_STYLE) } as u32 & WS_VISIBLE.0,
+        0
+    );
+    fn height(hwnd: HWND) -> i32 {
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut rect) }.unwrap();
+        rect.bottom - rect.top
+    }
+    search.fit_results(2).unwrap();
+    let short = height(search.hwnd);
+    search.fit_results(6).unwrap();
+    let tall = height(search.hwnd);
+    assert!(tall > short);
+    search.fit_results(100).unwrap();
+    let capped = height(search.hwnd);
+    assert!(capped > tall);
+    search.fit_results(1000).unwrap();
+    assert_eq!(height(search.hwnd), capped);
+    search.state().help_open.set(true);
+    search.layout().unwrap();
+    search.fit_results(1000).unwrap();
+    assert!(height(search.hwnd) > capped);
+}
+
+#[test]
 #[ignore = "requires an isolated interactive desktop and moves the real mouse"]
 fn custom_scrollbar_drag_survives_refresh_and_reaches_last_row() {
     use std::time::{Duration, Instant};
@@ -224,6 +281,7 @@ fn custom_scrollbar_drag_survives_refresh_and_reaches_last_row() {
         ViewKind::Search,
         row_height,
         text_height,
+        false,
     )
     .unwrap();
     let x = window.right - 12;

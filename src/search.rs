@@ -17,6 +17,7 @@ use std::sync::Arc;
 use windows::Win32::Foundation::HWND;
 
 pub(crate) use crate::picker::MAX_QUERY_UNITS;
+pub(crate) use matcher::highlight_ranges;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SearchEntry {
@@ -39,7 +40,10 @@ impl SearchEntry {
             } else {
                 title
             },
-            secondary: crate::picker::label(&self.app),
+            secondary: std::path::Path::new(self.executable.as_ref())
+                .file_stem()
+                .map(|name| crate::picker::label(&name.to_string_lossy()))
+                .unwrap_or_else(|| crate::picker::label(&self.app)),
             meta: text
                 .search_window_meta(self.elevated, self.minimized)
                 .into(),
@@ -191,9 +195,11 @@ impl SearchSession {
         self.remember_selection();
         if events.flags & messages::RELAYOUT != 0 {
             self.window.layout()?;
+            self.window.fit_results(self.results.len())?;
         }
         if events.flags & messages::CHANGED != 0 {
             self.query = self.window.query()?;
+            self.window.highlight_query(&self.query);
             self.selected = None;
             self.request(true)?;
         }
@@ -237,6 +243,7 @@ impl SearchSession {
             self.window
                 .status(&self.text.search_count(result.entries.len(), result.total))?;
             self.results = result.entries;
+            self.window.fit_results(self.results.len())?;
             self.pending = false;
             debug!(
                 "search stage=results count={} total={}",

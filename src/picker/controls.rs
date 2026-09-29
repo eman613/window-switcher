@@ -1,8 +1,8 @@
 use super::{
     layout::PickerLayout,
     messages::{
-        self, ViewState, BACK_ID, CLEAR_ID, DISMISS_ID, EDIT_ID, HELP_ID, LABEL_ID, LIST_ID,
-        NOTICE_ID, RESULTS_ID, STATUS_ID,
+        self, ViewState, BACK_ID, DISMISS_ID, EDIT_ID, HELP_ID, LABEL_ID, LIST_ID, NOTICE_ID,
+        RESULTS_ID, STATUS_ID,
     },
     skin::{px, SearchSkin},
     ViewKind,
@@ -19,10 +19,7 @@ use windows::{
     core::{w, HSTRING, PCWSTR},
     Win32::{
         Foundation::{HWND, LPARAM, RECT, WPARAM},
-        Graphics::Gdi::{
-            CreateRoundRectRgn, CreateSolidBrush, DeleteObject, InvalidateRect, SetWindowRgn,
-            HBRUSH, HGDIOBJ,
-        },
+        Graphics::Gdi::{CreateSolidBrush, InvalidateRect, SetWindowRgn, HBRUSH, HGDIOBJ},
         System::{
             LibraryLoader::GetModuleHandleW,
             SystemServices::{SS_CENTER, SS_NOPREFIX, SS_RIGHT},
@@ -141,22 +138,12 @@ impl Controls {
             WINDOW_STYLE(SS_NOPREFIX.0 | if search { SS_RIGHT.0 } else { 0 }),
             STATUS_ID,
         )?;
-        let clear = if search {
-            child(
-                parent,
-                w!("BUTTON"),
-                text.search_clear(),
-                WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
-                CLEAR_ID,
-            )?
-        } else {
-            HWND::default()
-        };
+        let clear = HWND::default();
         let dismiss = if search {
             child(
                 parent,
                 w!("BUTTON"),
-                text.search_close(),
+                text.search_help_toggle(),
                 WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
                 DISMISS_ID,
             )?
@@ -276,6 +263,7 @@ impl Controls {
                 Self::set_font(hwnd, &skin.normal);
             }
             Self::set_font(self.edit, &skin.input);
+            Self::set_font(self.help, &skin.help_font);
             Self::set_font(self.notice, &skin.title);
             state
                 .visual
@@ -323,6 +311,7 @@ impl Controls {
     pub(super) fn layout(&self, parent: HWND, state: &ViewState, dpi: u32) -> Result<()> {
         let mut bounds = RECT::default();
         unsafe { GetClientRect(parent, &mut bounds) }.context("search stage=client-bounds")?;
+        let top = unsafe { SendMessageW(self.list, LB_GETTOPINDEX, None, None) };
         let (row_height, text_height) = self.metrics(state, dpi);
         let layout = PickerLayout::calculate(
             bounds.right,
@@ -331,6 +320,7 @@ impl Controls {
             state.kind,
             row_height,
             text_height,
+            state.help_open.get(),
         )?;
         state.query_bottom.set(layout.query_bottom);
         for (hwnd, rect) in [
@@ -360,6 +350,16 @@ impl Controls {
             }
             .context("search stage=control-layout")?;
         }
+        if state.kind == ViewKind::Search {
+            unsafe {
+                for control in [self.results_label, self.status, self.clear] {
+                    if !control.is_invalid() {
+                        let _ = ShowWindow(control, SW_HIDE);
+                    }
+                }
+                let _ = ShowWindow(self.label, SW_HIDE);
+            }
+        }
         let result = unsafe {
             SendMessageW(
                 self.list,
@@ -370,35 +370,28 @@ impl Controls {
         }
         .0;
         ensure!(result != LB_ERR as isize, "search stage=row-height failed");
+        if unsafe { SendMessageW(self.list, LB_GETCOUNT, None, None) }.0 > 0 {
+            unsafe {
+                SendMessageW(
+                    self.list,
+                    LB_SETTOPINDEX,
+                    Some(WPARAM(top.0.max(0) as usize)),
+                    None,
+                );
+            }
+        }
         if state.kind == ViewKind::Search {
-            let rounded = state
-                .visual
-                .try_borrow()
-                .ok()
-                .and_then(|visual| visual.skin.as_ref().map(|skin| !skin.palette.high_contrast))
-                .unwrap_or(false);
+            let rounded = false;
             let signature = (bounds.right, bounds.bottom, dpi, rounded);
             if self.region.get() == Some(signature) {
                 return self.refresh_notice(state);
             }
             // SetWindowRgn can send WM_SIZE. Record only a successful assignment,
             // so that its following layout does not assign the same region again.
-            if rounded {
-                let radius = px(24, dpi);
-                let region = unsafe {
-                    CreateRoundRectRgn(0, 0, bounds.right + 1, bounds.bottom + 1, radius, radius)
-                };
-                ensure!(!region.is_invalid(), "picker stage=window-region failed");
-                if unsafe { SetWindowRgn(parent, Some(region), true) } == 0 {
-                    let _ = unsafe { DeleteObject(region.into()) };
-                    anyhow::bail!("picker stage=window-region assignment failed");
-                }
-            } else {
-                ensure!(
-                    unsafe { SetWindowRgn(parent, None, true) } != 0,
-                    "picker stage=window-region reset failed"
-                );
-            }
+            ensure!(
+                unsafe { SetWindowRgn(parent, None, true) } != 0,
+                "picker stage=window-region reset failed"
+            );
             self.region.set(Some(signature));
         }
         self.refresh_notice(state)
@@ -411,18 +404,25 @@ impl Controls {
         let count = unsafe { SendMessageW(self.list, LB_GETCOUNT, None, None) }.0;
         let show = count <= 0 || state.failed.get();
         let text = state.text;
-        let (title, help) = if state.failed.get() {
-            (text.search_failed_title(), text.search_failure())
+        let title = if state.failed.get() {
+            text.search_failed_title()
         } else if state.busy.get() {
-            (text.search_loading(), text.search_cancel_hint())
+            text.search_loading()
         } else {
-            (text.search_empty_title(), text.search_empty_hint())
+            text.search_empty_title()
         };
         unsafe {
             SetWindowTextW(self.notice, &HSTRING::from(title))?;
-            SetWindowTextW(self.help, &HSTRING::from(help))?;
+            SetWindowTextW(self.help, &HSTRING::from(text.search_keyboard_help()))?;
             let _ = ShowWindow(self.notice, if show { SW_SHOWNA } else { SW_HIDE });
-            let _ = ShowWindow(self.help, if show { SW_SHOWNA } else { SW_HIDE });
+            let _ = ShowWindow(
+                self.help,
+                if state.help_open.get() {
+                    SW_SHOWNA
+                } else {
+                    SW_HIDE
+                },
+            );
             let _ = ShowWindow(self.list, if show { SW_HIDE } else { SW_SHOWNA });
         }
         Ok(())

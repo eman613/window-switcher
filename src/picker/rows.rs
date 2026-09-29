@@ -43,9 +43,15 @@ impl PickerRow {
 pub(super) struct PickerVisual {
     pub skin: Option<SearchSkin>,
     pub rows: Vec<PickerRow>,
+    pub query: String,
 }
 
 impl PickerWindow {
+    pub(crate) fn highlight_query(&self, query: &str) {
+        if let Ok(mut visual) = self.state().visual.try_borrow_mut() {
+            visual.query = query.to_owned();
+        }
+    }
     pub(crate) fn replace_rows(
         &self,
         mut rows: Vec<PickerRow>,

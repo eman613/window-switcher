@@ -114,11 +114,6 @@ pub(super) unsafe extern "system" fn control_proc(
                     .set(GetKeyState(VK_RETURN.0 as i32) < 0);
                 state.changed();
             }
-            WM_PAINT if state.kind == ViewKind::Search => {
-                let result = DefSubclassProc(hwnd, msg, wparam, lparam);
-                state.paint_result(super::paint::edit_hint(hwnd, state));
-                return result;
-            }
             _ => {}
         }
     }
@@ -215,6 +210,19 @@ pub(super) unsafe extern "system" fn control_proc(
                     return LRESULT(0);
                 }
                 0x09 => {
+                    if state.kind == ViewKind::Search
+                        && hwnd == state.edit.get()
+                        && !state.busy.get()
+                    {
+                        SendMessageW(
+                            state.list.get(),
+                            WM_KEYDOWN,
+                            Some(WPARAM(if GetKeyState(0x10) < 0 { 0x26 } else { 0x28 })),
+                            None,
+                        );
+                        state.signal(0);
+                        return LRESULT(0);
+                    }
                     tab(state, hwnd);
                     return LRESULT(0);
                 }

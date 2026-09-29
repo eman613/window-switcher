@@ -28,6 +28,10 @@ impl Drop for OwnedGdiObject {
 
 /// Native surfaces share the system message font and a readable 14 DIP floor.
 pub(crate) fn message_font(dpi: u32) -> Result<OwnedGdiObject> {
+    message_font_with_floor(dpi, 14)
+}
+
+pub(crate) fn message_font_with_floor(dpi: u32, minimum_dip: u32) -> Result<OwnedGdiObject> {
     let mut metrics = NONCLIENTMETRICSW {
         cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
         ..Default::default()
@@ -46,7 +50,7 @@ pub(crate) fn message_font(dpi: u32) -> Result<OwnedGdiObject> {
         .lfMessageFont
         .lfHeight
         .abs()
-        .max((14 * dpi / 96) as i32);
+        .max((minimum_dip * dpi / 96) as i32);
     OwnedGdiObject::new(
         HGDIOBJ(unsafe { CreateFontIndirectW(&metrics.lfMessageFont) }.0),
         "system-message-font",

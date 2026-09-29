@@ -1,6 +1,7 @@
 //! Shared native list surface; search and details retain their own session models.
 mod controls;
 mod drawing;
+mod highlight;
 mod input;
 mod layout;
 mod list;
@@ -61,6 +62,7 @@ pub(crate) struct PickerWindow {
     state: Option<Box<ViewState>>,
     controls: Option<Controls>,
     configuration: Option<Config>,
+    monitor: Option<MonitorSnapshot>,
     text: Text,
 }
 
@@ -130,6 +132,7 @@ impl PickerWindow {
             paint_error: Cell::new(false),
             reset_scroll: Cell::new(true),
             scroll_drag: Cell::new(None),
+            help_open: Cell::new(false),
         });
         let hwnd = unsafe {
             CreateWindowExW(
@@ -160,6 +163,7 @@ impl PickerWindow {
             state: Some(state),
             controls: None,
             configuration: None,
+            monitor: None,
             text,
         };
         check_error(|| set_window_user_data(hwnd, window.state() as *const ViewState as isize))?;
@@ -188,6 +192,7 @@ impl PickerWindow {
             monitor.dpi,
         )?;
         self.configuration = Some(config.clone());
+        self.monitor = Some(monitor);
         let area = monitor.available;
         let (row_height, text_height) = self.controls().metrics(self.state(), monitor.dpi);
         let (width, height) = layout::PickerLayout::target(
@@ -196,6 +201,7 @@ impl PickerWindow {
             self.state().kind,
             row_height,
             text_height,
+            self.state().help_open.get(),
         );
         unsafe {
             SetWindowPos(
@@ -213,6 +219,7 @@ impl PickerWindow {
     }
 
     pub(crate) fn show(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
+        self.state().help_open.set(false);
         self.position(config, monitor)?;
         if self.state().kind == ViewKind::Search {
             unsafe { SetWindowTextW(self.controls().edit, w!("")) }?;
@@ -256,6 +263,7 @@ impl PickerWindow {
         self.state().hot_control.set(HWND::default());
         if let Ok(mut visual) = self.state().visual.try_borrow_mut() {
             visual.rows.clear();
+            visual.query.clear();
         }
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -285,6 +293,30 @@ impl PickerWindow {
             )?;
         }
         self.controls().layout(self.hwnd, self.state(), dpi)
+    }
+
+    pub(crate) fn fit_results(&mut self, count: usize) -> Result<()> {
+        let (Some(mut config), Some(monitor)) = (self.configuration.clone(), self.monitor) else {
+            return Ok(());
+        };
+        let configured = config.clone();
+        config.search_visible_rows = (count.max(1) as u32).min(config.search_visible_rows);
+        let (row, text) = self.controls().metrics(self.state(), monitor.dpi);
+        let desired = layout::PickerLayout::target(
+            &config,
+            monitor,
+            ViewKind::Search,
+            row,
+            text,
+            self.state().help_open.get(),
+        );
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        unsafe { GetWindowRect(self.hwnd, &mut rect) }?;
+        if (rect.right - rect.left, rect.bottom - rect.top) != desired {
+            self.position(&config, monitor)?;
+            self.configuration = Some(configured);
+        }
+        Ok(())
     }
     pub(crate) fn query(&self) -> Result<String> {
         let length = unsafe { GetWindowTextLengthW(self.controls().edit) } as usize;

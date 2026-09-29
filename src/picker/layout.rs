@@ -15,7 +15,6 @@ pub(super) struct PickerLayout {
     pub dismiss: RECT,
     pub notice: RECT,
     pub help: RECT,
-    pub footer_top: i32,
     pub query_bottom: i32,
     pub row_height: i32,
 }
@@ -36,16 +35,13 @@ impl PickerLayout {
         kind: ViewKind,
         row_height: i32,
         text_height: i32,
+        help_open: bool,
     ) -> (i32, i32) {
         let (width, height) = if kind == ViewKind::Search {
-            let (query, heading, footer, _) = chrome(monitor.dpi, text_height);
+            let (query, heading, footer, _) = chrome(monitor.dpi, text_height, help_open);
             (
                 px(config.search_width as i32, monitor.dpi),
-                query
-                    + heading
-                    + footer
-                    + px(8, monitor.dpi)
-                    + row_height * config.search_visible_rows as i32,
+                query + heading + footer + row_height * config.search_visible_rows as i32,
             )
         } else {
             (px(640, monitor.dpi), px(440, monitor.dpi))
@@ -63,9 +59,11 @@ impl PickerLayout {
         kind: ViewKind,
         row_height: i32,
         text_height: i32,
+        help_open: bool,
     ) -> Result<Self> {
         ensure!(
-            width >= px(240, dpi) && height >= px(180, dpi),
+            width >= px(240, dpi)
+                && height >= px(if kind == ViewKind::Search { 60 } else { 180 }, dpi),
             "picker stage=layout insufficient-work-area"
         );
         let p = |value| px(value, dpi);
@@ -87,76 +85,61 @@ impl PickerLayout {
                 dismiss: RECT::default(),
                 notice: RECT::default(),
                 help: RECT::default(),
-                footer_top: height - p(52),
                 query_bottom: p(40),
                 row_height: p(30),
             });
         }
-        let (query_bottom, heading_height, footer_height, input_height) = chrome(dpi, text_height);
+        let (query_bottom, heading_height, footer_height, input_height) =
+            chrome(dpi, text_height, help_open);
         let list_top = query_bottom + heading_height;
         let footer_top = height - footer_height;
         ensure!(
             footer_top > list_top,
             "picker stage=layout insufficient-text-area"
         );
-        let notice_top = list_top + ((footer_top - list_top) / 2 - p(38)).max(0);
-        let status_left = (width - p(270)).max(width / 2);
-        let button_height = p(32).max(text_height + p(12));
-        let dismiss_width = p(36).max(text_height * 3);
-        let dismiss_left = width - p(18) - dismiss_width;
-        let clear_width = p(36).max(button_height);
-        let clear_left = dismiss_left - p(10) - clear_width;
-        let input_top = (query_bottom - input_height) / 2;
-        let button_top = input_top + (input_height - button_height) / 2;
+        let help_height = if help_open {
+            p(17).max(text_height + p(5))
+        } else {
+            0
+        };
+        let button_height = (text_height * 18 / 12).max(p(18));
+        let button_top = help_height + p(4) + (input_height + p(12) - button_height) / 2;
         Ok(Self {
             label: RECT::default(),
-            edit: rect(p(54), input_top, clear_left - p(68), input_height),
-            results_label: rect(
-                p(22),
-                query_bottom + p(8),
-                status_left - p(36),
-                text_height + p(8),
-            ),
-            list: rect(p(12), list_top, width - p(32), footer_top - list_top - p(8)),
-            status: rect(
-                status_left,
-                query_bottom + p(8),
-                width - status_left - p(22),
-                text_height + p(8),
-            ),
-            clear: rect(clear_left, button_top, clear_width, button_height),
-            dismiss: rect(dismiss_left, button_top, dismiss_width, button_height),
+            edit: rect(p(10), help_height + p(10), width - p(48), input_height),
+            results_label: RECT::default(),
+            list: rect(p(4), list_top, width - p(22), footer_top - list_top),
+            status: RECT::default(),
+            clear: RECT::default(),
+            dismiss: rect(width - p(29), button_top, p(15), button_height),
             back: RECT::default(),
             notice: rect(
                 p(24),
-                notice_top,
+                list_top,
                 width - p(48),
                 (text_height * 15 / 14 + p(8)).max(p(34)),
             ),
-            help: rect(
-                p(24),
-                notice_top + (text_height + p(26)).max(p(40)),
-                width - p(48),
-                text_height * 2 + p(30),
-            ),
-            footer_top,
+            help: rect(p(8), p(4), width - p(16), help_height),
             query_bottom,
             row_height,
         })
     }
 }
 
-fn chrome(dpi: u32, text_height: i32) -> (i32, i32, i32, i32) {
-    let input_height = text_height * 18 / 14 + px(8, dpi);
-    let query = (input_height + px(32, dpi)).max(px(68, dpi));
+fn chrome(dpi: u32, text_height: i32, help_open: bool) -> (i32, i32, i32, i32) {
+    let input_height = text_height * 15 * 127 / 1200;
+    let help = if help_open {
+        px(17, dpi).max(text_height + px(5, dpi))
+    } else {
+        0
+    };
     (
-        query,
-        text_height + px(22, dpi),
-        text_height + px(24, dpi),
+        input_height + px(16, dpi) + help,
+        px(3, dpi),
+        px(4, dpi),
         input_height,
     )
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,8 +165,14 @@ mod tests {
                 available: area,
                 dpi,
             };
-            let (width, height) =
-                PickerLayout::target(&config, monitor, ViewKind::Search, px(64, dpi), px(14, dpi));
+            let (width, height) = PickerLayout::target(
+                &config,
+                monitor,
+                ViewKind::Search,
+                px(64, dpi),
+                px(14, dpi),
+                false,
+            );
             assert_eq!(width, px(960, dpi).min(1600));
             assert!(height <= 1000);
             let layout = PickerLayout::calculate(
@@ -193,14 +182,15 @@ mod tests {
                 ViewKind::Search,
                 px(64, dpi),
                 px(14, dpi),
+                false,
             )
             .unwrap();
-            assert!(layout.list.bottom <= layout.footer_top);
-            assert!(layout.edit.right < layout.clear.left);
+            assert!(layout.list.bottom <= height);
+            assert!(layout.edit.right < layout.dismiss.left);
             assert!(layout.dismiss.right <= width);
             assert!(layout.list.bottom > layout.list.top);
         }
-        assert!(PickerLayout::calculate(180, 120, 96, ViewKind::Search, 64, 14).is_err());
+        assert!(PickerLayout::calculate(180, 120, 96, ViewKind::Search, 64, 14, false).is_err());
     }
 
     #[test]
@@ -215,13 +205,14 @@ mod tests {
                     ViewKind::Search,
                     px(100, dpi),
                     text,
+                    false,
                 )
                 .unwrap();
-                assert!(layout.edit.right < layout.clear.left);
-                assert!(layout.clear.right < layout.dismiss.left);
+                assert!(layout.edit.right < layout.dismiss.left);
+                assert_eq!(layout.clear.right, 0);
                 assert!(layout.dismiss.bottom < layout.query_bottom);
                 assert!(layout.dismiss.bottom - layout.dismiss.top > text);
-                assert!(layout.dismiss.right - layout.dismiss.left >= text * 3);
+                assert!(layout.dismiss.right <= px(480, dpi));
             }
         }
     }

@@ -28,7 +28,7 @@ pub(super) const RESULTS_ID: usize = 103;
 pub(super) const STATUS_ID: usize = 104;
 pub(super) const BACK_ID: usize = 105;
 pub(super) const CLEAR_ID: usize = 106;
-pub(super) const DISMISS_ID: usize = 107;
+pub(super) const DISMISS_ID: usize = 110;
 pub(super) const NOTICE_ID: usize = 108;
 pub(super) const HELP_ID: usize = 109;
 pub(crate) const CHANGED: u32 = 1;
@@ -66,6 +66,7 @@ pub(super) struct ViewState {
     pub paint_error: Cell<bool>,
     pub reset_scroll: Cell<bool>,
     pub scroll_drag: Cell<Option<i32>>,
+    pub help_open: Cell<bool>,
 }
 
 impl ViewState {
@@ -123,7 +124,12 @@ impl ViewState {
     pub(super) fn command(&self, id: usize) {
         match id {
             BACK_ID => self.signal(BACK),
-            DISMISS_ID => self.signal(CANCEL),
+            DISMISS_ID => {
+                self.help_open.set(!self.help_open.get());
+                debug!("search stage=help expanded={}", self.help_open.get());
+                let _ = unsafe { SetFocus(Some(self.edit.get())) };
+                self.signal(RELAYOUT);
+            }
             CLEAR_ID => unsafe {
                 if let Err(error) = SetWindowTextW(self.edit.get(), windows::core::w!("")) {
                     warn!("picker stage=clear-query code={:#x}", error.code().0);
