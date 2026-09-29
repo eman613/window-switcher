@@ -63,6 +63,7 @@ impl TaskDefinition {
                     if stack.len() > 32 {
                         bail!("计划任务 XML 嵌套过深");
                     }
+                    values.entry(stack.join("/")).or_default();
                 }
                 XmlEvent::Characters(value) | XmlEvent::CData(value) => {
                     values.entry(stack.join("/")).or_default().push_str(&value);
@@ -83,9 +84,17 @@ impl TaskDefinition {
                 .with_context(|| format!("计划任务缺少 {path}"))
         };
         let flag = |name: &str| -> Result<bool> {
-            match get(&format!("Task/Settings/{name}"))?.as_str() {
-                "true" | "1" => Ok(true),
-                "false" | "0" => Ok(false),
+            // Task Scheduler omits these xs:boolean defaults on XML readback.
+            match values
+                .get(&format!("Task/Settings/{name}"))
+                .map(|v| v.trim())
+            {
+                None => {
+                    debug!("startup stage=xml-default field={name}");
+                    Ok(true)
+                }
+                Some("true" | "1") => Ok(true),
+                Some("false" | "0") => Ok(false),
                 _ => bail!("计划任务布尔设置无效"),
             }
         };
@@ -95,9 +104,12 @@ impl TaskDefinition {
         {
             bail!("计划任务带有额外启动参数，不能覆盖该入口");
         }
-        let highest = match get("Task/Principals/Principal/RunLevel")?.as_str() {
-            "HighestAvailable" => true,
-            "LeastPrivilege" => false,
+        let highest = match values
+            .get("Task/Principals/Principal/RunLevel")
+            .map(|v| v.trim())
+        {
+            Some("HighestAvailable") => true,
+            None | Some("LeastPrivilege") => false,
             _ => bail!("计划任务运行级别无效"),
         };
         Ok(Self {
@@ -215,14 +227,59 @@ fn replace_leaf(xml: &mut String, parents: &[&str], name: &str, value: &str) -> 
         let inner = element(&xml[range.clone()], parent)?;
         range = range.start + inner.start..range.start + inner.end;
     }
-    let inner = element(&xml[range.clone()], name)?;
-    xml.replace_range(range.start + inner.start..range.start + inner.end, value);
+    let contents = &xml[range.clone()];
+    match element(contents, name) {
+        Ok(inner) => xml.replace_range(range.start + inner.start..range.start + inner.end, value),
+        Err(error) => {
+            // Only insert a genuinely absent leaf. Preserve rejection of
+            // duplicate, empty or prefixed fields instead of hiding ambiguity.
+            for event in EventReader::from_str(&format!("<root>{contents}</root>")) {
+                if let XmlEvent::StartElement { name: found, .. } = event? {
+                    if found.local_name == name {
+                        return Err(error);
+                    }
+                }
+            }
+            xml.insert_str(range.end, &format!("<{name}>{value}</{name}>"));
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scheduler_omitted_defaults_can_be_read_and_changed() {
+        let policy = TaskPolicy {
+            highest: false,
+            allow_battery: false,
+            stop_on_battery: true,
+            enabled: true,
+        };
+        let mut xml = TaskDefinition::create("D:\\fixture.exe", "S-1-5-21-123", policy);
+        for element in [
+            "<RunLevel>LeastPrivilege</RunLevel>",
+            "<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>",
+            "<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>",
+            "<Enabled>true</Enabled>",
+        ] {
+            xml = xml.replace(element, "");
+        }
+        let parsed = TaskDefinition::parse(&xml).unwrap();
+        assert_eq!(parsed.policy, policy);
+        let changed = TaskPolicy {
+            highest: true,
+            allow_battery: true,
+            stop_on_battery: false,
+            enabled: false,
+        };
+        let updated = parsed.with_policy(changed).unwrap();
+        assert_eq!(TaskDefinition::parse(&updated).unwrap().policy, changed);
+        assert!(updated.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(TaskDefinition::parse(&xml.replace("<Settings>", "<Settings><Enabled/>")).is_err());
+    }
+
     #[test]
     fn xml_round_trip_escapes_special_characters_and_preserves_other_settings() {
         let policy = TaskPolicy {

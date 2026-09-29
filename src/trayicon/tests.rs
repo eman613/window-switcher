@@ -1,4 +1,5 @@
 use super::*;
+mod quick;
 use crate::{
     app::{IDM_APPLY_SETTINGS, IDM_CONFIGURE, IDM_ELEVATE, IDM_EXIT, IDM_PAUSE, IDM_STARTUP},
     config::{Language, Theme},
