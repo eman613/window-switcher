@@ -185,7 +185,7 @@ fn require_supported_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> Result<()> 
         | SE_SACL_PROTECTED;
     if control & sacl.0 != 0 {
         warn!("config stage=metadata unsupported-sacl");
-        bail!("INI 含 SACL 审计或完整性安全元数据；当前自动保存无法保证完整保留，原文件未修改");
+        bail!("INI 含 SACL 审计或完整性安全元数据（control=0x{control:04x}）；当前自动保存无法保证完整保留，原文件未修改");
     }
     Ok(())
 }
