@@ -202,6 +202,36 @@ fn native_destroy_during_borrow_detaches_owner_without_reentrant_mutation() {
 }
 
 #[test]
+fn native_close_with_pending_messages_retires_delivery_before_normal_quit() {
+    use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, PM_REMOVE, WM_CLOSE, WM_QUIT};
+
+    let mut quit = MSG::default();
+    // The serial test runner may reuse a thread from an earlier window fixture.
+    while unsafe { PeekMessageW(&mut quit, None, WM_QUIT, WM_QUIT, PM_REMOVE) }.as_bool() {}
+    let fixture = native_fixture();
+    let registration = AppRegistration::new(fixture.window.0, &fixture.owner).unwrap();
+    let held = fixture.owner.app.borrow_mut();
+    for _ in 0..2 {
+        unsafe { SendMessageW(fixture.window.0, WM_LBUTTONUP, None, None) };
+    }
+    assert_eq!(fixture.owner.pending.borrow().len(), 2);
+    unsafe { SendMessageW(fixture.window.0, WM_CLOSE, None, None) };
+    assert!(!unsafe { IsWindow(Some(fixture.window.0)) }.as_bool());
+    assert!(!fixture.owner.target.is_live());
+    assert!(!fixture.owner.target.try_post(WM_INPUT_READY));
+    fixture.owner.dispatch(OwnedMessage {
+        msg: WM_LBUTTONUP,
+        wparam: WPARAM(0),
+        lparam: LPARAM(0),
+    });
+    assert_eq!(fixture.owner.pending.borrow().len(), 2);
+    assert!(unsafe { PeekMessageW(&mut quit, None, WM_QUIT, WM_QUIT, PM_REMOVE) }.as_bool());
+    assert_eq!(quit.wParam.0, 0);
+    drop(held);
+    drop(registration);
+}
+
+#[test]
 fn deferred_overflow_closes_delivery_and_keeps_the_queue_bounded() {
     let fixture = native_fixture();
     let registration = AppRegistration::new(fixture.window.0, &fixture.owner).unwrap();
