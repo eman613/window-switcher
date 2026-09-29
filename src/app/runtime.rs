@@ -1,32 +1,28 @@
 use std::{cell::RefCell, collections::VecDeque, sync::Arc};
 
 use anyhow::{bail, Context, Result};
-use once_cell::sync::OnceCell;
 use windows::{
     core::w,
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        System::Threading::GetCurrentThreadId,
         UI::{
             Controls::WM_MOUSELEAVE,
-            Input::Ime::{ImmAssociateContextEx, ImmDisableIME, HIMC},
+            Input::Ime::ImmDisableIME,
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-                GetWindowLongPtrW, IsWindow, KillTimer, LoadCursorW, PostQuitMessage,
-                RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowLongPtrW,
-                TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWL_STYLE, HTCLIENT,
-                IDC_ARROW, MSG, WINDOW_STYLE, WM_CANCELMODE, WM_CAPTURECHANGED, WM_COMMAND,
-                WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETOBJECT,
-                WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY,
-                WM_NCHITTEST, WM_SETFOCUS, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
-                WS_CAPTION, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostQuitMessage,
+                RegisterWindowMessageW, SetTimer, TranslateMessage, HTCLIENT, MSG, WM_CANCELMODE,
+                WM_CAPTURECHANGED, WM_COMMAND, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+                WM_ERASEBKGND, WM_GETOBJECT, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WM_NCDESTROY, WM_NCHITTEST, WM_SETFOCUS, WM_SETTINGCHANGE,
+                WM_THEMECHANGED, WM_TIMER,
             },
         },
     },
 };
 
 use super::{
-    App, SwitchWindowsState, NAME, WM_SCENE_INVALIDATED, WM_USER_CONFIG_CHANGED,
+    App, SwitchWindowsState, WM_SCENE_INVALIDATED, WM_USER_CONFIG_CHANGED,
     WM_USER_REGISTER_TRAYICON, WM_USER_TRAYICON,
 };
 use crate::{
@@ -53,7 +49,8 @@ use crate::{
 
 const INPUT_POLL_TIMER: usize = 0xa101;
 const MAX_DEFERRED_MESSAGES: usize = 64;
-static WINDOW_CLASS: OnceCell<u16> = OnceCell::new();
+mod window;
+use window::ApplicationWindow;
 
 pub(super) fn run(
     loaded: &LoadedConfig,
@@ -78,7 +75,7 @@ pub(super) fn run(
     if taskbar_message == 0 {
         return Err(windows::core::Error::from_win32()).context("ui stage=taskbar-message");
     }
-    let target = Arc::new(WindowTarget::new(hwnd));
+    let target = window.target();
     let text = crate::localization::Text::new(loaded.config.language);
     let accessibility = Accessibility::new(target.clone(), text).context("uia stage=initialize")?;
     let accessible_root = accessibility.root.clone();
@@ -351,67 +348,6 @@ impl InputPollTimer {
 impl Drop for InputPollTimer {
     fn drop(&mut self) {
         let _ = unsafe { KillTimer(Some(self.0), INPUT_POLL_TIMER) };
-    }
-}
-
-struct ApplicationWindow(HWND);
-impl ApplicationWindow {
-    fn create() -> Result<Self> {
-        let module = unsafe { GetModuleHandleW(None) }.context("ui stage=module")?;
-        WINDOW_CLASS.get_or_try_init(|| -> Result<u16> {
-            let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }?;
-            let class = WNDCLASSW {
-                hCursor: cursor,
-                hInstance: HINSTANCE(module.0),
-                lpszClassName: NAME,
-                style: CS_HREDRAW | CS_VREDRAW,
-                lpfnWndProc: Some(window_proc),
-                ..Default::default()
-            };
-            let atom = unsafe { RegisterClassW(&class) };
-            if atom == 0 {
-                return Err(windows::core::Error::from_win32()).context("ui stage=register-class");
-            }
-            Ok(atom)
-        })?;
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                NAME,
-                NAME,
-                WINDOW_STYLE(0),
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                None,
-                None,
-                Some(module.into()),
-                None,
-            )
-        }
-        .context("ui stage=create-window")?;
-        let window = Self(hwnd);
-        // This surface never edits text. Keep its modifier/navigation messages
-        // out of IME composition. Text-capable UI threads retain their input
-        // services and Search owns a separate native EDIT context.
-        if !unsafe { ImmAssociateContextEx(hwnd, HIMC::default(), 0) }.as_bool() {
-            debug!("ui stage=panel-ime-detach unavailable; retaining system association");
-        }
-        let style = check_error(|| unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) })? as u32;
-        check_error(|| unsafe {
-            SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_CAPTION.0) as isize)
-        })?;
-        Ok(window)
-    }
-}
-impl Drop for ApplicationWindow {
-    fn drop(&mut self) {
-        if unsafe { IsWindow(Some(self.0)) }.as_bool() {
-            if let Err(err) = unsafe { DestroyWindow(self.0) } {
-                warn!("ui stage=destroy-window code={:#x}", err.code().0);
-            }
-        }
     }
 }
 

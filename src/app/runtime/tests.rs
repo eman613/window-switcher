@@ -1,14 +1,36 @@
 use super::*;
 
 mod menu;
-use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, IsWindow, SendMessageW,
+};
+
+#[test]
+fn initialization_failure_retires_the_target_before_releasing_the_window() {
+    let mut retained = None;
+    let mut hwnd = HWND::default();
+    let failed = (|| -> Result<()> {
+        let window = ApplicationWindow::create()?;
+        hwnd = window.0;
+        retained = Some(window.target());
+        anyhow::bail!("simulated initialization failure before owner registration");
+    })();
+    assert!(failed.is_err());
+    assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
+    let retained = retained.unwrap();
+    assert!(
+        !retained.is_live(),
+        "initialization failure left the notification target live after HWND destruction"
+    );
+    assert!(!retained.try_post(WM_INPUT_READY));
+}
 
 #[test]
 fn non_text_panel_detaches_ime_without_disabling_a_text_window_on_the_same_thread() {
     use windows::Win32::UI::Input::Ime::{
         ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetContext, ImmReleaseContext,
     };
-    let text = ApplicationWindow(unsafe {
+    let text = ApplicationWindow::from_handle(unsafe {
         CreateWindowExW(
             Default::default(),
             w!("EDIT"),
@@ -57,7 +79,7 @@ struct NativeRuntimeFixture {
 
 fn native_fixture() -> NativeRuntimeFixture {
     let window = ApplicationWindow::create().unwrap();
-    let target = Arc::new(WindowTarget::new(window.0));
+    let target = window.target();
     let input = Arc::new(InputDispatch::new(target.clone()));
     let config = crate::config::Config::default();
     let lifetimes = Arc::new(crate::window_snapshot::lifetimes::WindowLifetimes::default());
