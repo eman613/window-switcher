@@ -60,7 +60,7 @@ impl LayoutOptions {
             max_height: config.max_height,
             max_columns: config.max_columns,
             name_height: if config.app_name_mode == crate::config::AppNameMode::Selected {
-                config.app_name_font_size * 3 / 2 + 6
+                config.name_font_size() * 3 / 2 + 6
             } else {
                 0
             },

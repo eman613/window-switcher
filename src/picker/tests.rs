@@ -187,7 +187,11 @@ fn minimal_search_chrome_and_content_height_preserve_the_configured_row_limit() 
     search.state().help_open.set(true);
     search.layout().unwrap();
     search.fit_results(1000).unwrap();
-    assert!(height(search.hwnd) > capped);
+    assert_eq!(
+        height(search.hwnd),
+        capped,
+        "help must not resize or recenter the search surface"
+    );
 }
 
 #[test]
@@ -374,5 +378,39 @@ fn custom_scrollbar_drag_survives_refresh_and_reaches_last_row() {
             top
         );
     }
+    for _ in 0..10 {
+        pump();
+    }
+    assert!(
+        !scroll_visibility::visible(search.state()),
+        "idle indicator did not auto-hide"
+    );
+    search
+        .state()
+        .scroll_mode
+        .set(crate::config::ScrollBarMode::Hidden);
+    mouse_input(MOUSEEVENTF_WHEEL, 120);
+    pump();
+    assert!(unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0 < top);
+    assert!(!scroll_visibility::visible(search.state()));
+    unsafe {
+        SetCursorPos(
+            window.left + layout.dismiss.left + 7,
+            window.top + layout.dismiss.top + 7,
+        )
+    }
+    .unwrap();
+    mouse(true);
+    mouse(false);
+    pump();
+    assert!(search.state().help_open.get());
+    search.layout().unwrap();
+    mouse(true);
+    mouse(false);
+    pump();
+    assert!(
+        !search.state().help_open.get(),
+        "the second rapid help click was lost"
+    );
     search.hide();
 }

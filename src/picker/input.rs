@@ -118,12 +118,19 @@ pub(super) unsafe extern "system" fn control_proc(
         }
     }
     if state.kind == ViewKind::Search && state.visible.get() {
+        if hwnd == state.dismiss.get() && msg == WM_LBUTTONDBLCLK {
+            // An owner-drawn BUTTON otherwise sends BN_DOUBLECLICKED and drops
+            // the second release. Help is a toggle with ordinary button presses.
+            debug!("search stage=help double-click-as-press");
+            return DefSubclassProc(hwnd, WM_LBUTTONDOWN, wparam, lparam);
+        }
         if msg == WM_MOUSEWHEEL && super::scrollbar::wheel(state, wparam) {
             return LRESULT(0);
         }
         if hwnd == state.list.get() {
             match msg {
                 WM_MOUSEMOVE => {
+                    super::scroll_visibility::reveal(state);
                     let hover = item_at(hwnd, lparam);
                     if state.hover.replace(hover) != hover {
                         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -243,6 +250,7 @@ pub(super) unsafe extern "system" fn control_proc(
     }
     let result = DefSubclassProc(hwnd, msg, wparam, lparam);
     if hwnd == state.list.get() && msg == WM_KEYDOWN {
+        super::scroll_visibility::reveal(state);
         state.signal(0);
     }
     result

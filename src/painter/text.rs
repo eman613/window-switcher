@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use windows::{
-    core::w,
+    core::HSTRING,
     Win32::{
         Foundation::RECT,
         Graphics::Gdi::{
@@ -47,7 +47,11 @@ pub(super) fn name(
             CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY,
             DEFAULT_PITCH.0 as u32,
-            w!("Segoe UI"),
+            &HSTRING::from(if config.name_font_family() == "auto" {
+                "Segoe UI"
+            } else {
+                config.name_font_family()
+            }),
         )
     };
     let font = OwnedGdiObject::new(font.into(), "name-font-fallback")?;
@@ -95,6 +99,6 @@ pub(super) fn name_height(config: &Config, fonts: Option<&FontResources>) -> u32
         return 0;
     }
     fonts.map_or(base, |fonts| {
-        base.max(fonts.line_height(FontRole::Name, config.app_name_font_size) + 6)
+        base.max(fonts.line_height(FontRole::Name, config.name_font_size()) + 6)
     })
 }

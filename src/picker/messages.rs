@@ -67,7 +67,10 @@ pub(super) struct ViewState {
     pub reset_scroll: Cell<bool>,
     pub scroll_drag: Cell<Option<i32>>,
     pub wheel_remainder: Cell<i32>,
+    pub scroll_mode: Cell<crate::config::ScrollBarMode>,
+    pub scroll_hint: Cell<bool>,
     pub help_open: Cell<bool>,
+    pub style_dirty: Cell<bool>,
 }
 
 impl ViewState {
@@ -164,6 +167,10 @@ pub(super) unsafe extern "system" fn window_proc(
             return result;
         }
         match msg {
+            WM_TIMER if wparam.0 == super::scroll_visibility::TIMER => {
+                super::scroll_visibility::tick(hwnd, state);
+                return LRESULT(0);
+            }
             WM_MOUSEWHEEL if super::scrollbar::wheel(state, wparam) => return LRESULT(0),
             WM_CLOSE => {
                 state.signal(CANCEL);
@@ -190,7 +197,11 @@ pub(super) unsafe extern "system" fn window_proc(
                 }
                 state.signal(RELAYOUT);
             }
-            WM_SIZE | WM_THEMECHANGED | WM_SETTINGCHANGE => state.signal(RELAYOUT),
+            WM_SIZE => state.signal(RELAYOUT),
+            WM_THEMECHANGED | WM_SETTINGCHANGE | WM_FONTCHANGE => {
+                state.style_dirty.set(true);
+                state.signal(RELAYOUT);
+            }
             WM_NCHITTEST if state.kind == ViewKind::Search => {
                 let mut point = POINT {
                     x: (lparam.0 as u16 as i16) as i32,

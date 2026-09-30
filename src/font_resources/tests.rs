@@ -239,3 +239,21 @@ fn private_font_reload_and_raster_resources_remain_bounded() {
     eprintln!("font_resource_cycles=100 initial_gdi={initial} final_gdi={final_count}");
     assert!(final_count <= initial + 2);
 }
+
+#[test]
+fn unified_content_font_resolves_both_roles_without_loading_old_private_overrides() {
+    let _com = crate::utils::com::ComApartment::sta().unwrap();
+    let config = Config {
+        unified_font: true,
+        ui_font_family: "Arial".into(),
+        ui_font_size: 20,
+        app_name_font_file: Some("missing-name.ttf".into()),
+        badge_font_file: Some("missing-badge.otf".into()),
+        ..Default::default()
+    };
+    let fonts = FontResources::load(&config, std::path::Path::new(".")).unwrap();
+    for role in [FontRole::Name, FontRole::Badge] {
+        assert_eq!(fonts.fonts[role.index()].family.to_string(), "Arial");
+        assert!(!fonts.fonts[role.index()].private);
+    }
+}

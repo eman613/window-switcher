@@ -36,6 +36,7 @@ choices!(Theme { Auto => "auto", Light => "light", Dark => "dark" });
 choices!(AppNameMode { Off => "off", Selected => "selected" });
 choices!(BadgeShape { Circle => "circle", Square => "square" });
 choices!(SearchMatch { Fuzzy => "fuzzy", Contains => "contains", Prefix => "prefix" });
+choices!(ScrollBarMode { Auto => "auto", Always => "always", Hidden => "hidden" });
 choices!(SwitchOrder { Existing => "existing", Mru => "mru" });
 choices!(Grouping { AppId => "app-id", Process => "process", Profile => "profile" });
 choices!(MonitorFilter { All => "all", Panel => "panel", Foreground => "foreground" });

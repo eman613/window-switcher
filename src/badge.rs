@@ -24,7 +24,7 @@ impl BadgeStyle {
         Self {
             background: config.switch_apps_badge_color,
             foreground: config.switch_apps_badge_text_color,
-            font_size: config.switch_apps_badge_font_size,
+            font_size: config.badge_font_size(),
             shape: config.switch_apps_badge_shape,
             size: config.switch_apps_badge_size,
         }

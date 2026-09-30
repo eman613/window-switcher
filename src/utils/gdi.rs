@@ -26,9 +26,60 @@ impl Drop for OwnedGdiObject {
     }
 }
 
-/// Native surfaces share the system message font and a readable 14 DIP floor.
-pub(crate) fn message_font(dpi: u32) -> Result<OwnedGdiObject> {
-    message_font_with_floor(dpi, 14)
+/// The global content font is local to this application, never a system setting.
+pub(crate) fn content_font(
+    config: &crate::config::Config,
+    dpi: u32,
+    minimum_dip: u32,
+) -> Result<OwnedGdiObject> {
+    use windows::Win32::Graphics::Gdi::{CreateCompatibleDC, GetObjectW, GetTextFaceW, LOGFONTW};
+    if !config.unified_font {
+        return message_font_with_floor(dpi, minimum_dip);
+    }
+    let system = message_font_with_floor(dpi, config.ui_font_size)?;
+    let mut value = LOGFONTW::default();
+    anyhow::ensure!(
+        unsafe {
+            GetObjectW(
+                system.0,
+                std::mem::size_of::<LOGFONTW>() as i32,
+                Some((&mut value as *mut LOGFONTW).cast()),
+            )
+        } != 0,
+        "font stage=content-metrics failed"
+    );
+    value.lfHeight = -((config.ui_font_size * dpi / 96).max(1) as i32);
+    if config.ui_font_family != "auto" {
+        let family: Vec<_> = config.ui_font_family.encode_utf16().collect();
+        if family.len() >= value.lfFaceName.len() {
+            warn!("font stage=content-family too-long; using system font, INI unchanged");
+            return Ok(system);
+        }
+        value.lfFaceName.fill(0);
+        value.lfFaceName[..family.len()].copy_from_slice(&family);
+    }
+    let font = OwnedGdiObject::new(
+        HGDIOBJ(unsafe { CreateFontIndirectW(&value) }.0),
+        "content-font",
+    )?;
+    if config.ui_font_family != "auto" {
+        let dc = MemoryDc(unsafe { CreateCompatibleDC(None) });
+        anyhow::ensure!(!dc.0.is_invalid(), "font stage=content-dc failed");
+        let selected = SavedDc::new(dc.0)?;
+        selected.select(font.0)?;
+        let mut name = [0u16; 128];
+        let length = unsafe { GetTextFaceW(dc.0, Some(&mut name)) };
+        anyhow::ensure!(length > 0, "font stage=content-face failed");
+        let end = name
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(name.len());
+        if !String::from_utf16_lossy(&name[..end]).eq_ignore_ascii_case(&config.ui_font_family) {
+            warn!("font stage=content-family unavailable; using system font, INI unchanged");
+            return Ok(system);
+        }
+    }
+    Ok(font)
 }
 
 pub(crate) fn message_font_with_floor(dpi: u32, minimum_dip: u32) -> Result<OwnedGdiObject> {
@@ -55,6 +106,46 @@ pub(crate) fn message_font_with_floor(dpi: u32, minimum_dip: u32) -> Result<Owne
         HGDIOBJ(unsafe { CreateFontIndirectW(&metrics.lfMessageFont) }.0),
         "system-message-font",
     )
+}
+
+#[cfg(test)]
+mod content_font_tests {
+    use super::*;
+    use windows::Win32::Graphics::Gdi::{GetObjectW, LOGFONTW};
+
+    #[test]
+    fn global_content_font_uses_dip_size_on_each_native_dpi() {
+        let config = crate::config::Config {
+            unified_font: true,
+            ui_font_family: "Arial".into(),
+            ui_font_size: 20,
+            ..Default::default()
+        };
+        for dpi in [96, 144, 192] {
+            let font = content_font(&config, dpi, 0).unwrap();
+            let mut metrics = LOGFONTW::default();
+            assert_ne!(
+                unsafe {
+                    GetObjectW(
+                        font.0,
+                        std::mem::size_of::<LOGFONTW>() as i32,
+                        Some((&mut metrics as *mut LOGFONTW).cast()),
+                    )
+                },
+                0
+            );
+            assert_eq!(metrics.lfHeight, -((20 * dpi / 96) as i32));
+            let end = metrics
+                .lfFaceName
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap();
+            assert_eq!(
+                String::from_utf16_lossy(&metrics.lfFaceName[..end]),
+                "Arial"
+            );
+        }
+    }
 }
 
 pub(crate) struct SavedDc(HDC, i32);

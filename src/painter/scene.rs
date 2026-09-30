@@ -164,7 +164,7 @@ impl Scene {
             let name = &state.apps[state.index].display_name;
             if self.name.as_ref() != Some(name) {
                 self.surface.restore(&self.background, footer)?;
-                let pixels = (config.app_name_font_size as f32 * self.layout.monitor.dpi as f32
+                let pixels = (config.name_font_size() as f32 * self.layout.monitor.dpi as f32
                     / 96.0)
                     .round()
                     .max(1.0) as u32;

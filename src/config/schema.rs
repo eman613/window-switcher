@@ -121,6 +121,10 @@ settings! {
     max_height: u32 => ("appearance", "max_height", "0", |v| integer(v, 0, 32768), "LayoutSnapshot::calculate");
     max_columns: u32 => ("appearance", "max_columns", "0", |v| integer(v, 0, 128), "LayoutSnapshot::calculate");
     theme: Theme => ("appearance", "theme", "auto", str::parse::<Theme>, "Appearance::resolve");
+    unified_font: bool => ("appearance", "unified_font", "no", boolean, "Config::name_font_size/FontResources::load");
+    ui_font_family: String => ("appearance", "ui_font_family", "auto", font_family, "FontResources::load/content_font");
+    ui_font_size: u32 => ("appearance", "ui_font_size", "14", |v| integer(v, 12, 48), "Config::name_font_size/content_font");
+    search_scrollbar: ScrollBarMode => ("search", "scrollbar", "auto", str::parse::<ScrollBarMode>, "picker::scrollbar");
     background_color: Option<u32> => ("appearance", "background_color", "auto", automatic_color, "Appearance::resolve");
     background_opacity: u32 => ("appearance", "background_opacity", "100", |v| integer(v, 0, 100), "Appearance::resolve");
     icon_background_color: Option<u32> => ("appearance", "icon_background_color", "auto", automatic_color, "Appearance::resolve");

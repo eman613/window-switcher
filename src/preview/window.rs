@@ -5,7 +5,7 @@ use crate::{
     localization::Text,
     utils::{
         check_error,
-        gdi::{message_font, OwnedGdiObject},
+        gdi::{content_font, OwnedGdiObject},
         set_window_user_data,
     },
     window_target::WindowTarget,
@@ -168,7 +168,7 @@ impl PreviewWindow {
                 ),
                 "preview-border",
             )?;
-            let font = message_font(dpi)?;
+            let font = content_font(config, dpi, 14)?;
             self.state().background.set(HBRUSH(background.0 .0));
             self.state().border.set(HBRUSH(border.0 .0));
             self.state().font.set(font.0);

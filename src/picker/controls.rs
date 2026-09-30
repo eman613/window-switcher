@@ -11,7 +11,7 @@ use crate::{
     appearance::Appearance,
     config::Config,
     localization::Text,
-    utils::gdi::{message_font, OwnedGdiObject},
+    utils::gdi::{content_font, OwnedGdiObject},
 };
 use anyhow::{ensure, Context, Result};
 use std::cell::Cell;
@@ -19,10 +19,10 @@ use windows::{
     core::{w, HSTRING, PCWSTR},
     Win32::{
         Foundation::{HWND, LPARAM, RECT, WPARAM},
-        Graphics::Gdi::{CreateSolidBrush, InvalidateRect, SetWindowRgn, HBRUSH, HGDIOBJ},
+        Graphics::Gdi::{CreateSolidBrush, GetObjectW, InvalidateRect, HBRUSH, HGDIOBJ, LOGFONTW},
         System::{
             LibraryLoader::GetModuleHandleW,
-            SystemServices::{SS_CENTER, SS_NOPREFIX, SS_RIGHT},
+            SystemServices::{SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_RIGHT},
         },
         UI::{
             Input::KeyboardAndMouse::EnableWindow, Shell::SetWindowSubclass, WindowsAndMessaging::*,
@@ -43,7 +43,9 @@ pub(super) struct Controls {
     help: HWND,
     font: Option<OwnedGdiObject>,
     background: Option<OwnedGdiObject>,
-    region: Cell<Option<(i32, i32, u32, bool)>>,
+    region: Cell<Option<(i32, i32, u32, i32)>>,
+    text_height: Cell<i32>,
+    styled: Option<(Config, u32)>,
 }
 
 fn child(parent: HWND, class: PCWSTR, name: &str, style: WINDOW_STYLE, id: usize) -> Result<HWND> {
@@ -168,7 +170,7 @@ impl Controls {
                 parent,
                 w!("STATIC"),
                 "",
-                WINDOW_STYLE(SS_CENTER.0 | SS_NOPREFIX.0),
+                WINDOW_STYLE(SS_RIGHT.0 | SS_CENTERIMAGE.0 | SS_ENDELLIPSIS.0 | SS_NOPREFIX.0),
                 HELP_ID,
             )?
         } else {
@@ -214,6 +216,8 @@ impl Controls {
             font: None,
             background: None,
             region: Cell::new(None),
+            text_height: Cell::new(14),
+            styled: None,
         })
     }
 
@@ -238,9 +242,31 @@ impl Controls {
         dpi: u32,
     ) -> Result<()> {
         state.dpi.set(dpi);
+        let mut signature = config.clone();
+        signature.search_width = 0;
+        signature.search_visible_rows = 0;
+        if !state.style_dirty.get()
+            && self
+                .styled
+                .as_ref()
+                .is_some_and(|(previous, previous_dpi)| {
+                    previous == &signature && *previous_dpi == dpi
+                })
+        {
+            return Ok(());
+        }
         state.paint_error.set(false);
         if state.kind == ViewKind::Search {
             let skin = SearchSkin::new(config, dpi)?;
+            state.scroll_mode.set(
+                if skin.palette.high_contrast
+                    && config.search_scrollbar == crate::config::ScrollBarMode::Auto
+                {
+                    crate::config::ScrollBarMode::Always
+                } else {
+                    config.search_scrollbar
+                },
+            );
             state
                 .background
                 .set(crate::text_raster::colorref(skin.palette.surface));
@@ -283,13 +309,27 @@ impl Controls {
                 .set(crate::text_raster::colorref(appearance.text));
             state.muted.set(state.foreground.get());
             state.brush.set(HBRUSH(brush.0 .0));
-            let font = message_font(dpi)?;
+            let font = content_font(config, dpi, 14)?;
+            let mut metrics = LOGFONTW::default();
+            ensure!(
+                unsafe {
+                    GetObjectW(
+                        font.0,
+                        std::mem::size_of::<LOGFONTW>() as i32,
+                        Some((&mut metrics as *mut LOGFONTW).cast()),
+                    )
+                } != 0,
+                "picker stage=content-font-metrics failed"
+            );
+            self.text_height.set(metrics.lfHeight.abs());
             for hwnd in [self.label, self.list, self.status, self.back] {
                 Self::set_font(hwnd, &font);
             }
             self.font = Some(font);
             self.background = Some(brush);
         }
+        self.styled = Some((signature, dpi));
+        state.style_dirty.set(false);
         let _ = unsafe { InvalidateRect(Some(parent), None, true) };
         Ok(())
     }
@@ -305,7 +345,10 @@ impl Controls {
                     .as_ref()
                     .map(|skin| (skin.row_height, skin.secondary_height))
             })
-            .unwrap_or((px(30, dpi), px(14, dpi)))
+            .unwrap_or((
+                (self.text_height.get() * 127 / 100 + px(12, dpi)).max(px(30, dpi)),
+                self.text_height.get(),
+            ))
     }
 
     pub(super) fn layout(&self, parent: HWND, state: &ViewState, dpi: u32) -> Result<()> {
@@ -338,17 +381,7 @@ impl Controls {
         .into_iter()
         .filter(|(hwnd, _)| !hwnd.is_invalid())
         {
-            unsafe {
-                MoveWindow(
-                    hwnd,
-                    rect.left,
-                    rect.top,
-                    rect.right - rect.left,
-                    rect.bottom - rect.top,
-                    true,
-                )
-            }
-            .context("search stage=control-layout")?;
+            super::placement::move_child(parent, hwnd, rect)?;
         }
         if state.kind == ViewKind::Search {
             unsafe {
@@ -360,17 +393,23 @@ impl Controls {
                 let _ = ShowWindow(self.label, SW_HIDE);
             }
         }
-        let result = unsafe {
-            SendMessageW(
-                self.list,
-                LB_SETITEMHEIGHT,
-                Some(WPARAM(0)),
-                Some(LPARAM(layout.row_height as isize)),
-            )
+        if unsafe { SendMessageW(self.list, LB_GETITEMHEIGHT, Some(WPARAM(0)), None) }.0
+            != layout.row_height as isize
+        {
+            let result = unsafe {
+                SendMessageW(
+                    self.list,
+                    LB_SETITEMHEIGHT,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(layout.row_height as isize)),
+                )
+            }
+            .0;
+            ensure!(result != LB_ERR as isize, "search stage=row-height failed");
         }
-        .0;
-        ensure!(result != LB_ERR as isize, "search stage=row-height failed");
-        if unsafe { SendMessageW(self.list, LB_GETCOUNT, None, None) }.0 > 0 {
+        if unsafe { SendMessageW(self.list, LB_GETCOUNT, None, None) }.0 > 0
+            && unsafe { SendMessageW(self.list, LB_GETTOPINDEX, None, None) } != top
+        {
             unsafe {
                 SendMessageW(
                     self.list,
@@ -381,17 +420,21 @@ impl Controls {
             }
         }
         if state.kind == ViewKind::Search {
-            let rounded = false;
-            let signature = (bounds.right, bounds.bottom, dpi, rounded);
+            let radius = state
+                .visual
+                .try_borrow()
+                .context("picker stage=region reentrant state")?
+                .skin
+                .as_ref()
+                .map_or(0, |skin| skin.panel_radius)
+                .min(bounds.right.min(bounds.bottom) / 2);
+            let signature = (bounds.right, bounds.bottom, dpi, radius);
             if self.region.get() == Some(signature) {
                 return self.refresh_notice(state);
             }
             // SetWindowRgn can send WM_SIZE. Record only a successful assignment,
             // so that its following layout does not assign the same region again.
-            ensure!(
-                unsafe { SetWindowRgn(parent, None, true) } != 0,
-                "picker stage=window-region reset failed"
-            );
+            super::placement::region(parent, bounds, radius)?;
             self.region.set(Some(signature));
         }
         self.refresh_notice(state)
@@ -414,17 +457,10 @@ impl Controls {
         unsafe {
             SetWindowTextW(self.notice, &HSTRING::from(title))?;
             SetWindowTextW(self.help, &HSTRING::from(text.search_keyboard_help()))?;
-            let _ = ShowWindow(self.notice, if show { SW_SHOWNA } else { SW_HIDE });
-            let _ = ShowWindow(
-                self.help,
-                if state.help_open.get() {
-                    SW_SHOWNA
-                } else {
-                    SW_HIDE
-                },
-            );
-            let _ = ShowWindow(self.list, if show { SW_HIDE } else { SW_SHOWNA });
         }
+        super::placement::visible(self.notice, show);
+        super::placement::visible(self.help, state.help_open.get());
+        super::placement::visible(self.list, !show);
         Ok(())
     }
 }

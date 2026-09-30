@@ -105,7 +105,7 @@ fn draw_row(
     rounded(
         dc,
         bounds,
-        0,
+        skin.selection_radius.min((bounds.bottom - bounds.top) / 2),
         background,
         state.selected.then_some(palette.divider),
     )?;
@@ -264,7 +264,7 @@ pub(super) fn window(hwnd: HWND, state: &ViewState) -> Result<()> {
         rounded(
             dc,
             bounds,
-            0,
+            skin.panel_radius,
             skin.palette.surface,
             Some(skin.palette.border),
         )?;
@@ -276,7 +276,7 @@ pub(super) fn window(hwnd: HWND, state: &ViewState) -> Result<()> {
                 right: bounds.right - p(4),
                 bottom: layout.query_bottom,
             },
-            0,
+            skin.panel_radius.min(p(8)),
             skin.palette.surface,
             Some(skin.palette.accent),
         )?;

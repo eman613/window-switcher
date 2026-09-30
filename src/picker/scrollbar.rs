@@ -2,8 +2,8 @@
 use super::{drawing::rounded, layout::PickerLayout, messages::ViewState, skin::px, ViewKind};
 use anyhow::{Context, Result};
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
-    Graphics::Gdi::{InvalidateRect, HDC},
+    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Graphics::Gdi::{InvalidateRect, ScreenToClient, HDC},
     UI::{
         Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture},
         WindowsAndMessaging::*,
@@ -99,6 +99,7 @@ pub(super) fn wheel(state: &ViewState, wparam: WPARAM) -> bool {
         state.wheel_remainder.set(0);
         return true;
     };
+    super::scroll_visibility::reveal(state);
     let mut lines = 3u32;
     if let Err(error) = unsafe {
         SystemParametersInfoW(
@@ -163,6 +164,9 @@ pub(super) fn cancel(hwnd: HWND, state: &ViewState) {
 }
 
 pub(super) fn paint(hwnd: HWND, state: &ViewState, dc: HDC) -> Result<()> {
+    if !super::scroll_visibility::visible(state) {
+        return Ok(());
+    }
     let Some(geometry) = geometry(hwnd, state) else {
         return Ok(());
     };
@@ -173,22 +177,36 @@ pub(super) fn paint(hwnd: HWND, state: &ViewState, dc: HDC) -> Result<()> {
     let Some(skin) = &visual.skin else {
         return Ok(());
     };
-    let inset = px(3, skin.dpi);
+    let active = state.scroll_drag.get().is_some() || pointer_on_track(hwnd, state);
+    let width = px(if active { 6 } else { 4 }, skin.dpi).max(2);
+    let center = (geometry.thumb.left + geometry.thumb.right) / 2;
     rounded(
         dc,
         RECT {
-            left: geometry.thumb.left + inset,
-            right: geometry.thumb.right - inset,
+            left: center - width / 2,
+            right: center + (width + 1) / 2,
             ..geometry.thumb
         },
-        px(3, skin.dpi),
-        if state.scroll_drag.get().is_some() {
+        (width + 1) / 2,
+        if active {
             skin.palette.accent
         } else {
             skin.palette.border
         },
         None,
     )
+}
+
+pub(super) fn pointer_on_track(hwnd: HWND, state: &ViewState) -> bool {
+    let Some(g) = geometry(hwnd, state) else {
+        return false;
+    };
+    let mut point = POINT::default();
+    (unsafe { GetCursorPos(&mut point).is_ok() && ScreenToClient(hwnd, &mut point).as_bool() })
+        && point.x >= g.track.left
+        && point.x < g.track.right
+        && point.y >= g.track.top
+        && point.y < g.track.bottom
 }
 
 fn position(y: i32, grab: i32, geometry: &Geometry) -> i32 {
@@ -236,6 +254,12 @@ pub(super) unsafe fn handle(
     let g = geometry(hwnd, state)?;
     let x = point.0 as u16 as i16 as i32;
     let y = (point.0 >> 16) as u16 as i16 as i32;
+    if state.scroll_mode.get() == crate::config::ScrollBarMode::Hidden {
+        return None;
+    }
+    if x >= g.track.left && x < g.track.right && y >= g.track.top && y < g.track.bottom {
+        super::scroll_visibility::reveal(state);
+    }
     if msg == WM_LBUTTONDOWN {
         if state.busy.get()
             || x < g.track.left

@@ -7,8 +7,8 @@ use windows::Win32::Graphics::Gdi::{
 
 use crate::{
     appearance::Appearance,
-    config::{Config, Theme},
-    utils::gdi::{message_font_with_floor, OwnedGdiObject},
+    config::Config,
+    utils::gdi::{content_font, OwnedGdiObject},
 };
 
 #[derive(Clone, Copy)]
@@ -27,8 +27,7 @@ pub(super) struct SearchPalette {
 }
 
 impl SearchPalette {
-    fn capture(config: &Config) -> Self {
-        let appearance = Appearance::capture(config);
+    fn capture(appearance: Appearance) -> Self {
         if appearance.high_contrast {
             return Self {
                 surface: appearance.panel.color,
@@ -44,45 +43,44 @@ impl SearchPalette {
                 high_contrast: true,
             };
         }
-        let light = match config.theme {
-            Theme::Auto => crate::utils::is_light_theme(),
-            Theme::Light => true,
-            Theme::Dark => false,
-        };
-        Self::theme(light)
-    }
-
-    fn theme(light: bool) -> Self {
-        if light {
-            Self {
-                surface: 0xffffff,
-                text: 0x000000,
-                muted: 0x808080,
-                selected: 0xf0f0f0,
-                selected_text: 0x000000,
-                accent: 0x569de5,
-                border: 0xa9a9a9,
-                divider: 0xd9d9d9,
-                hover: 0xf5f5f5,
-                pressed: 0xe6e6e6,
-                high_contrast: false,
-            }
-        } else {
-            Self {
-                surface: 0x171c24,
-                text: 0xedf1f7,
-                muted: 0xb3c0d0,
-                selected: 0x2d3b4d,
-                selected_text: 0xedf1f7,
-                accent: 0x9cbddf,
-                border: 0x728399,
-                divider: 0x455162,
-                hover: 0x2b3543,
-                pressed: 0x3a4b61,
-                high_contrast: false,
-            }
+        let surface = appearance.panel.color;
+        let selected = mix(
+            appearance.selected.color,
+            surface,
+            appearance.selected.opacity,
+        );
+        let mut muted = mix(appearance.text, surface, 190);
+        if crate::appearance::contrast_ratio(muted, surface) < 4.5 {
+            muted = appearance.text;
+        }
+        Self {
+            surface,
+            text: appearance.text,
+            muted,
+            selected,
+            selected_text: appearance.text,
+            accent: appearance.border,
+            border: appearance.border,
+            divider: appearance.border,
+            hover: mix(appearance.text, surface, 18),
+            pressed: mix(appearance.border, selected, 40),
+            high_contrast: false,
         }
     }
+}
+
+fn mix(foreground: u32, background: u32, alpha: u8) -> u32 {
+    let alpha = u32::from(alpha);
+    [0, 8, 16]
+        .into_iter()
+        .map(|shift| {
+            ((((foreground >> shift) & 255) * alpha
+                + ((background >> shift) & 255) * (255 - alpha)
+                + 127)
+                / 255)
+                << shift
+        })
+        .sum()
 }
 
 pub(super) struct SearchSkin {
@@ -98,11 +96,13 @@ pub(super) struct SearchSkin {
     pub question_font: OwnedGdiObject,
     pub match_mode: crate::config::SearchMatch,
     pub dpi: u32,
+    pub panel_radius: i32,
+    pub selection_radius: i32,
 }
 
 impl SearchSkin {
     pub fn new(config: &Config, dpi: u32) -> Result<Self> {
-        let normal = message_font_with_floor(dpi, 0)?;
+        let normal = content_font(config, dpi, 0)?;
         let mut font = LOGFONTW::default();
         ensure!(
             unsafe {
@@ -115,7 +115,9 @@ impl SearchSkin {
             "picker stage=font metrics unavailable"
         );
         let base = font.lfHeight.saturating_abs();
-        let palette = SearchPalette::capture(config);
+        let appearance = Appearance::capture(config);
+        let palette = SearchPalette::capture(appearance);
+        let radii = appearance.radii(config, dpi, px(config.icon_size as i32, dpi));
         font.lfQuality = CLEARTYPE_QUALITY;
         let make_font = |height: i32, weight: i32| -> Result<OwnedGdiObject> {
             let mut value = font;
@@ -144,6 +146,8 @@ impl SearchSkin {
             question_font: make_font(base * 18 / 12, 700)?,
             match_mode: config.search_match,
             dpi,
+            panel_radius: radii[0].round() as i32,
+            selection_radius: radii[2].round() as i32,
         })
     }
 
@@ -154,4 +158,27 @@ impl SearchSkin {
 
 pub(super) fn px(dip: i32, dpi: u32) -> i32 {
     (i64::from(dip) * i64::from(dpi) / 96) as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_uses_the_panel_palette_including_custom_colors_and_contrast() {
+        let config = Config {
+            background_color: Some(0x233141),
+            selection_color: Some(0x40516a),
+            app_name_text_color: Some(0xffffff),
+            ..Default::default()
+        };
+        for contrast in [None, Some([0, 0xffffff, 0x0000ff, 0xffffff])] {
+            let appearance = Appearance::resolve(&config, false, true, contrast);
+            let palette = SearchPalette::capture(appearance);
+            assert_eq!(palette.surface, appearance.panel.color);
+            assert_eq!(palette.selected, appearance.selected.color);
+            assert_eq!(palette.text, appearance.text);
+            assert_eq!(palette.high_contrast, appearance.high_contrast);
+        }
+    }
 }

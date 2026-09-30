@@ -66,7 +66,7 @@ impl FontResources {
         use loader::{resolve, FontChoice, MemoryLoader};
         let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED) }
             .context("font stage=factory")?;
-        let private = config.app_name_font_file.is_some() || config.badge_font_file.is_some();
+        let private = config.name_font_file().is_some() || config.badge_font_file().is_some();
         let loader = if private {
             match MemoryLoader::new(&factory) {
                 Ok(loader) => Some(loader),
@@ -88,8 +88,8 @@ impl FontResources {
             ini_dir,
             FontChoice {
                 role: FontRole::Name,
-                family: &config.app_name_font_family,
-                file: config.app_name_font_file.as_deref(),
+                family: config.name_font_family(),
+                file: config.name_font_file(),
                 weight: config.app_name_font_weight,
                 italic: config.app_name_font_italic,
             },
@@ -101,8 +101,8 @@ impl FontResources {
             ini_dir,
             FontChoice {
                 role: FontRole::Badge,
-                family: &config.badge_font_family,
-                file: config.badge_font_file.as_deref(),
+                family: config.badge_font_family(),
+                file: config.badge_font_file(),
                 weight: 600,
                 italic: false,
             },

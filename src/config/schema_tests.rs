@@ -105,6 +105,10 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ("appearance", "selection_corner_radius", "12", "-1"),
         ("appearance", "app_name_mode", "selected", "all"),
         ("appearance", "app_name_font_family", "Arial", ""),
+        ("appearance", "unified_font", "yes", "maybe"),
+        ("appearance", "ui_font_family", "Arial", ""),
+        ("appearance", "ui_font_size", "20", "49"),
+        ("search", "scrollbar", "hidden", "disabled"),
         (
             "appearance",
             "app_name_font_file",
@@ -141,7 +145,7 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
         ]);
     }
     let template = document::parse_ini(DEFAULT_CONFIG).unwrap();
-    assert_eq!(SETTINGS.len(), 120);
+    assert_eq!(SETTINGS.len(), 124);
     assert_eq!(cases.len(), SETTINGS.len());
     assert_eq!(
         template

@@ -24,6 +24,7 @@ pub(crate) mod settings;
 mod storage;
 mod transaction;
 mod types;
+mod typography;
 mod validation;
 pub(crate) mod watch;
 mod watch_state;
@@ -67,8 +68,8 @@ pub use schema::Config;
 pub use search::{SearchField, SearchFields};
 pub use types::{
     AppNameMode, BadgeShape, BatteryPolicy, ForegroundPolicy, Grouping, InjectedPolicy, Language,
-    MonitorFilter, MonitorPolicy, RenderScale, RunLevel, SearchMatch, StartupEnabled, SwitchOrder,
-    Theme, WatchMode,
+    MonitorFilter, MonitorPolicy, RenderScale, RunLevel, ScrollBarMode, SearchMatch,
+    StartupEnabled, SwitchOrder, Theme, WatchMode,
 };
 
 impl Config {

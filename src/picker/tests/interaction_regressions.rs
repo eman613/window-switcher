@@ -65,6 +65,25 @@ fn dark_help_resize_erases_with_the_current_theme_before_paint() {
 }
 
 #[test]
+fn inline_help_keeps_fonts_and_viewport_until_style_is_invalidated() {
+    let mut search = fixture();
+    let list = search.controls().list;
+    let font = unsafe { SendMessageW(list, WM_GETFONT, None, None) };
+    for _ in 0..4 {
+        search.state().command(messages::DISMISS_ID);
+        search.layout().unwrap();
+        search.fit_results(40).unwrap();
+        assert_eq!(unsafe { SendMessageW(list, WM_GETFONT, None, None) }, font);
+    }
+    unsafe {
+        SendMessageW(search.hwnd, WM_SETTINGCHANGE, None, None);
+    }
+    assert!(search.state().style_dirty.get());
+    search.layout().unwrap();
+    assert!(!search.state().style_dirty.get());
+}
+
+#[test]
 fn wheel_over_search_controls_scrolls_without_changing_selection_or_query() {
     let search = fixture();
     let list = search.controls().list;
@@ -109,4 +128,27 @@ fn wheel_over_search_controls_scrolls_without_changing_selection_or_query() {
             0
         );
     }
+}
+
+#[test]
+fn hidden_scrollbar_keeps_wheel_and_auto_indicator_has_a_bounded_lifetime() {
+    let search = fixture();
+    let state = search.state();
+    state.scroll_mode.set(crate::config::ScrollBarMode::Auto);
+    scroll_visibility::reveal(state);
+    assert!(scroll_visibility::visible(state));
+    scroll_visibility::hide(search.hwnd, state);
+    assert!(!scroll_visibility::visible(state));
+    state.scroll_mode.set(crate::config::ScrollBarMode::Always);
+    assert!(scroll_visibility::visible(state));
+    state.scroll_mode.set(crate::config::ScrollBarMode::Hidden);
+    assert!(!scroll_visibility::visible(state));
+    let list = search.controls().list;
+    unsafe {
+        SendMessageW(list, LB_SETTOPINDEX, Some(WPARAM(10)), None);
+    }
+    scrollbar::wheel(state, WPARAM(120 << 16));
+    assert!(!scroll_visibility::visible(state));
+    assert!(unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0 <= 10);
+    assert_eq!(search.selected(), Some(0));
 }

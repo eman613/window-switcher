@@ -7,7 +7,9 @@ mod layout;
 mod list;
 pub(crate) mod messages;
 mod paint;
+mod placement;
 mod rows;
+mod scroll_visibility;
 mod scrollbar;
 mod skin;
 #[cfg(test)]
@@ -133,7 +135,10 @@ impl PickerWindow {
             reset_scroll: Cell::new(true),
             scroll_drag: Cell::new(None),
             wheel_remainder: Cell::new(0),
+            scroll_mode: Cell::new(crate::config::ScrollBarMode::Auto),
+            scroll_hint: Cell::new(false),
             help_open: Cell::new(false),
+            style_dirty: Cell::new(true),
         });
         let hwnd = unsafe {
             CreateWindowExW(
@@ -252,6 +257,7 @@ impl PickerWindow {
     }
 
     pub(crate) fn hide(&self) {
+        scroll_visibility::hide(self.hwnd, self.state());
         scrollbar::cancel(self.hwnd, self.state());
         self.state().reset_scroll.set(true);
         self.state().scroll_drag.set(None);
