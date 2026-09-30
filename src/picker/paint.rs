@@ -90,15 +90,19 @@ fn draw_row(
         palette.surface
     };
     let selected = state.selected || (state.pressed && palette.high_contrast);
-    let foreground = if selected {
+    let foreground = if state.pressed {
+        palette.pressed_text
+    } else if selected {
         palette.selected_text
     } else if state.disabled {
         palette.muted
     } else {
         palette.text
     };
-    let secondary = if selected && palette.high_contrast {
-        palette.selected_text
+    let secondary = if state.pressed {
+        palette.pressed_muted
+    } else if selected {
+        palette.selected_muted
     } else {
         palette.muted
     };

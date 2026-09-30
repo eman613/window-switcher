@@ -192,11 +192,16 @@ impl Appearance {
     }
 }
 
-fn best_text(background: u32) -> u32 {
-    if contrast_ratio(0x171717, background) >= contrast_ratio(0xffffff, background) {
+pub(crate) fn best_text(background: u32) -> u32 {
+    if contrast_ratio(0x171717, background) >= 4.5
+        && contrast_ratio(0x171717, background) >= contrast_ratio(0xffffff, background)
+    {
         0x171717
-    } else {
+    } else if contrast_ratio(0xffffff, background) >= 4.5 {
         0xffffff
+    } else {
+        // Near mid-gray, neither off-black nor white reaches normal-text AA.
+        0x000000
     }
 }
 
