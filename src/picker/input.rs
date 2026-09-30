@@ -118,6 +118,9 @@ pub(super) unsafe extern "system" fn control_proc(
         }
     }
     if state.kind == ViewKind::Search && state.visible.get() {
+        if msg == WM_MOUSEWHEEL && super::scrollbar::wheel(state, wparam) {
+            return LRESULT(0);
+        }
         if hwnd == state.list.get() {
             match msg {
                 WM_MOUSEMOVE => {
@@ -152,7 +155,7 @@ pub(super) unsafe extern "system" fn control_proc(
                     state.pressed.set(None);
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
-                WM_VSCROLL | WM_MOUSEWHEEL => {
+                WM_VSCROLL => {
                     state.hover.set(None);
                     state.pressed.set(None);
                     let result = DefSubclassProc(hwnd, msg, wparam, lparam);

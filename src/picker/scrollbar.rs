@@ -14,6 +14,8 @@ struct Geometry {
     track: RECT,
     thumb: RECT,
     maximum: i32,
+    page: i32,
+    top: i32,
 }
 
 fn geometry(hwnd: HWND, state: &ViewState) -> Option<Geometry> {
@@ -63,7 +65,84 @@ fn geometry(hwnd: HWND, state: &ViewState) -> Option<Geometry> {
             ..track
         },
         maximum,
+        page,
+        top,
     })
+}
+
+fn wheel_rows(remainder: i32, delta: i32, lines: u32, page: i32) -> (i32, i32) {
+    let delta = remainder + delta;
+    // SPI_GETWHEELSCROLLLINES uses UINT_MAX for one page per wheel notch.
+    let lines = lines.min(page as u32) as i32;
+    (
+        delta / WHEEL_DELTA as i32 * lines,
+        delta % WHEEL_DELTA as i32,
+    )
+}
+
+pub(super) fn wheel(state: &ViewState, wparam: WPARAM) -> bool {
+    if state.kind != ViewKind::Search || !state.visible.get() {
+        return false;
+    }
+    if state.busy.get() || state.scroll_drag.get().is_some() {
+        state.wheel_remainder.set(0);
+        return true;
+    }
+    let parent = match unsafe { GetParent(state.list.get()) } {
+        Ok(parent) => parent,
+        Err(error) => {
+            warn!("search stage=wheel-parent code={:#x}", error.code().0);
+            return true;
+        }
+    };
+    let Some(geometry) = geometry(parent, state) else {
+        state.wheel_remainder.set(0);
+        return true;
+    };
+    let mut lines = 3u32;
+    if let Err(error) = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            Some((&mut lines as *mut u32).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    } {
+        warn!(
+            "search stage=wheel-settings code={:#x}; using 3 lines",
+            error.code().0
+        );
+        lines = 3;
+    }
+    let delta = (wparam.0 >> 16) as u16 as i16 as i32;
+    let (rows, remainder) = wheel_rows(state.wheel_remainder.get(), delta, lines, geometry.page);
+    state
+        .wheel_remainder
+        .set(if lines == 0 { 0 } else { remainder });
+    let top = (geometry.top - rows).clamp(0, geometry.maximum);
+    if top != geometry.top {
+        let result = unsafe {
+            SendMessageW(
+                state.list.get(),
+                LB_SETTOPINDEX,
+                Some(WPARAM(top as usize)),
+                None,
+            )
+        };
+        if result.0 == LB_ERR as isize {
+            warn!("search stage=wheel-position rejected top={top}");
+            return true;
+        }
+        state.hover.set(None);
+        state.pressed.set(None);
+        let _ = unsafe { InvalidateRect(Some(state.list.get()), None, false) };
+        state.signal(0);
+    }
+    debug!(
+        "search stage=wheel delta={delta} lines={lines} from={} top={top}",
+        geometry.top
+    );
+    true
 }
 
 pub(super) fn invalidate(state: &ViewState) {
@@ -210,10 +289,23 @@ mod tests {
                 ..Default::default()
             },
             maximum: 90,
+            page: 10,
+            top: 0,
         };
         assert_eq!(position(-100, 20, &g), 0);
         assert_eq!(position(400, 20, &g), 90);
         assert_eq!(position(1000, 20, &g), 90);
         assert_eq!(position(220, 20, &g), 45);
+    }
+
+    #[test]
+    fn wheel_respects_partial_deltas_system_lines_and_page_mode() {
+        assert_eq!(wheel_rows(0, -30, 3, 10), (0, -30));
+        assert_eq!(wheel_rows(-30, -90, 3, 10), (-3, 0));
+        assert_eq!(wheel_rows(-30, 30, 3, 10), (0, 0));
+        assert_eq!(wheel_rows(0, 240, 3, 10), (6, 0));
+        assert_eq!(wheel_rows(0, -120, u32::MAX, 10), (-10, 0));
+        assert_eq!(wheel_rows(0, 120, 1000, 10), (10, 0));
+        assert_eq!(wheel_rows(0, -120, 0, 10), (0, 0));
     }
 }

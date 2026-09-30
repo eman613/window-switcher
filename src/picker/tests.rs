@@ -5,6 +5,8 @@ use crate::{
 };
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 
+mod interaction_regressions;
+
 fn row(index: usize, title: &str) -> PickerRow {
     PickerRow {
         key: IconKey {
@@ -195,20 +197,17 @@ fn custom_scrollbar_drag_survives_refresh_and_reaches_last_row() {
     use windows::Win32::{
         Foundation::POINT,
         UI::Input::KeyboardAndMouse::{
-            GetCapture, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN,
-            MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+            GetCapture, GetFocus, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN,
+            MOUSEEVENTF_LEFTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS,
         },
     };
-    fn mouse(down: bool) {
+    fn mouse_input(flags: MOUSE_EVENT_FLAGS, data: u32) {
         let input = INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
                 mi: MOUSEINPUT {
-                    dwFlags: if down {
-                        MOUSEEVENTF_LEFTDOWN
-                    } else {
-                        MOUSEEVENTF_LEFTUP
-                    },
+                    dwFlags: flags,
+                    mouseData: data,
                     ..Default::default()
                 },
             },
@@ -216,6 +215,16 @@ fn custom_scrollbar_drag_survives_refresh_and_reaches_last_row() {
         assert_eq!(
             unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) },
             1
+        );
+    }
+    fn mouse(down: bool) {
+        mouse_input(
+            if down {
+                MOUSEEVENTF_LEFTDOWN
+            } else {
+                MOUSEEVENTF_LEFTUP
+            },
+            0,
         );
     }
     fn pump() {
@@ -308,5 +317,62 @@ fn custom_scrollbar_drag_survives_refresh_and_reaches_last_row() {
         unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0,
         top
     );
+    let mut lines = 0u32;
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            Some((&mut lines as *mut u32).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .unwrap();
+    assert_ne!(
+        lines, 0,
+        "interactive wheel verification needs scrolling enabled"
+    );
+    for (name, x, y) in [
+        (
+            "list",
+            window.left + layout.list.left + 50,
+            window.top + layout.list.top + 20,
+        ),
+        (
+            "edit",
+            window.left + layout.edit.left + 40,
+            window.top + layout.edit.top + 5,
+        ),
+        (
+            "track",
+            window.right - 12,
+            window.top + layout.list.top + 20,
+        ),
+        (
+            "help",
+            window.left + layout.dismiss.left + 5,
+            window.top + layout.dismiss.top + 5,
+        ),
+    ] {
+        unsafe { SetCursorPos(x, y) }.unwrap();
+        mouse_input(MOUSEEVENTF_WHEEL, 120);
+        pump();
+        let up = unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0;
+        assert!(up < top, "real wheel over {name} did not scroll up: {up}");
+        mouse_input(MOUSEEVENTF_WHEEL, (-120i32) as u32);
+        pump();
+        assert_eq!(
+            unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0,
+            top,
+            "{name}"
+        );
+        assert_eq!(search.selected(), Some(0));
+        assert_eq!(unsafe { GetFocus() }, search.controls().edit);
+        search.replace_rows(rows(), 0, 3).unwrap();
+        pump();
+        assert_eq!(
+            unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0,
+            top
+        );
+    }
     search.hide();
 }

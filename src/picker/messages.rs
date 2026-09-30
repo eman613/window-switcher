@@ -66,6 +66,7 @@ pub(super) struct ViewState {
     pub paint_error: Cell<bool>,
     pub reset_scroll: Cell<bool>,
     pub scroll_drag: Cell<Option<i32>>,
+    pub wheel_remainder: Cell<i32>,
     pub help_open: Cell<bool>,
 }
 
@@ -92,6 +93,7 @@ impl ViewState {
 
     pub(super) fn changed(&self) {
         self.reset_scroll.set(true);
+        self.wheel_remainder.set(0);
         self.busy.set(true);
         self.failed.set(false);
         self.accept.set(None);
@@ -162,6 +164,7 @@ pub(super) unsafe extern "system" fn window_proc(
             return result;
         }
         match msg {
+            WM_MOUSEWHEEL if super::scrollbar::wheel(state, wparam) => return LRESULT(0),
             WM_CLOSE => {
                 state.signal(CANCEL);
                 return LRESULT(0);
@@ -241,7 +244,9 @@ pub(super) unsafe extern "system" fn window_proc(
                 state.paint_result(super::paint::window(hwnd, state));
                 return LRESULT(0);
             }
-            WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+            WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORBTN
+                if msg != WM_CTLCOLORBTN || state.kind == ViewKind::Search =>
+            {
                 let dc = HDC(wparam.0 as _);
                 let id = GetDlgCtrlID(HWND(lparam.0 as _)) as usize;
                 SetTextColor(
@@ -255,7 +260,6 @@ pub(super) unsafe extern "system" fn window_proc(
                 SetBkColor(dc, state.background.get());
                 return LRESULT(state.brush.get().0 as isize);
             }
-            WM_ERASEBKGND if state.kind == ViewKind::Search => return LRESULT(1),
             WM_ERASEBKGND if !state.brush.get().is_invalid() => {
                 let mut rect = RECT::default();
                 if GetClientRect(hwnd, &mut rect).is_ok() {
