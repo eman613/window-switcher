@@ -37,6 +37,68 @@ fn fixture() -> PickerWindow {
 }
 
 #[test]
+fn row_repaint_removes_previous_selection_edges() {
+    use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED, ODT_LISTBOX};
+
+    let search = fixture();
+    for radius in [0, 8, 16] {
+        search
+            .state()
+            .visual
+            .borrow_mut()
+            .skin
+            .as_mut()
+            .unwrap()
+            .selection_radius = radius;
+        let background = search
+            .state()
+            .visual
+            .borrow()
+            .skin
+            .as_ref()
+            .unwrap()
+            .palette
+            .surface;
+        let mut actual = crate::render_surface::RenderSurface::new(320, 48).unwrap();
+        let mut expected = crate::render_surface::RenderSurface::new(320, 48).unwrap();
+        actual.fill_rgb(background).unwrap();
+        expected.fill_rgb(background).unwrap();
+        let mut item = DRAWITEMSTRUCT {
+            CtlType: ODT_LISTBOX,
+            CtlID: messages::LIST_ID as u32,
+            itemID: 0,
+            hDC: actual.dc(),
+            rcItem: windows::Win32::Foundation::RECT {
+                left: 2,
+                top: 2,
+                right: 318,
+                bottom: 46,
+            },
+            itemState: windows::Win32::UI::Controls::ODS_FLAGS(ODS_SELECTED.0 | ODS_FOCUS.0),
+            ..Default::default()
+        };
+        assert!(paint::item(search.state(), &item).unwrap());
+        item.itemState = Default::default();
+        assert!(paint::item(search.state(), &item).unwrap());
+        item.hDC = expected.dc();
+        assert!(paint::item(search.state(), &item).unwrap());
+        let mismatches = actual
+            .pixels()
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(expected.pixels().unwrap().as_chunks::<4>().0)
+            .filter(|(actual, expected)| actual[..3] != expected[..3])
+            .count();
+        assert_eq!(
+            mismatches, 0,
+            "radius={radius}: stale RGB pixels after deselection"
+        );
+    }
+}
+
+#[test]
 fn dark_help_resize_erases_with_the_current_theme_before_paint() {
     let mut search = fixture();
     let mut surface = crate::render_surface::RenderSurface::new(800, 800).unwrap();

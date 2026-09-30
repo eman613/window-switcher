@@ -102,6 +102,12 @@ fn draw_row(
     } else {
         palette.muted
     };
+    // RoundRect with NULL_PEN does not cover every pixel of a previous border.
+    // Restore the entire row, including the area outside its rounded corners.
+    ensure!(
+        unsafe { FillRect(dc, &bounds, skin.background_brush()) } != 0,
+        "picker stage=row-background failed"
+    );
     rounded(
         dc,
         bounds,
