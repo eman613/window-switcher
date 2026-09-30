@@ -166,16 +166,23 @@ impl IconCache {
                     bytes: ICON_BYTES,
                 });
             }
-            if !self.evict() {
+            if !self.evict(true) {
                 return None;
             }
         }
     }
 
-    fn evict(&mut self) -> bool {
+    fn evict(&mut self, reclaim_pixels: bool) -> bool {
         if let Some(key) = self
             .entries
             .iter()
+            .filter(|(_, entry)| {
+                !reclaim_pixels
+                    || entry
+                        .image
+                        .as_ref()
+                        .is_some_and(|image| Arc::strong_count(image) == 1)
+            })
             .min_by_key(|(_, entry)| entry.used)
             .map(|(key, _)| key.clone())
         {
@@ -240,7 +247,7 @@ impl IconCache {
             })
         };
         while self.entries.len() >= self.limit && !self.entries.contains_key(&key) {
-            if !self.evict() {
+            if !self.evict(false) {
                 break;
             }
         }
@@ -374,7 +381,7 @@ mod tests {
             .unwrap();
         let previous = cache.previous(&key);
         assert!(cache.reserve().is_none());
-        assert!(cache.entries.is_empty());
+        assert!(cache.entries.contains_key(&key));
         let retained = cache
             .insert(key.clone(), previous, None, Vec::new(), false)
             .unwrap();
@@ -384,6 +391,50 @@ mod tests {
             cache.get(&key).flatten().unwrap().revision,
             original.revision
         );
+    }
+
+    #[test]
+    fn budget_pressure_preserves_pinned_and_negative_entries_until_pixels_are_reclaimable() {
+        let config = Config {
+            icon_cache_mb: 4,
+            ..Default::default()
+        };
+        let mut cache = IconCache::new(&config);
+        let key = |index| IconKey {
+            group: format!("budget-{index}").into(),
+            identity: WindowIdentity::fixture(index),
+        };
+        let mut visible = Vec::new();
+        for index in 0..16 {
+            let lease = cache.reserve().unwrap();
+            visible.push(
+                cache
+                    .insert(
+                        key(index),
+                        None,
+                        Some((PixelImage::new(ICON_PIXELS, ICON_PIXELS).unwrap(), lease)),
+                        Vec::new(),
+                        true,
+                    )
+                    .unwrap(),
+            );
+        }
+        cache.insert(key(16), None, None, Vec::new(), false);
+        assert!(cache.reserve().is_none());
+        assert_eq!(cache.len(), 17);
+        assert_eq!(cache.bytes(), 4 * 1024 * 1024);
+        // Release a newer image: the older pinned image must remain indexed.
+        drop(visible.remove(10));
+        let lease = cache.reserve().unwrap();
+        assert_eq!(cache.len(), 16);
+        assert!(cache.entries.contains_key(&key(0)));
+        assert!(!cache.entries.contains_key(&key(10)));
+        assert!(matches!(cache.get(&key(16)), Some(None)));
+        assert_eq!(cache.bytes(), 4 * 1024 * 1024);
+        drop(lease);
+        cache.entries.clear();
+        drop(visible);
+        assert_eq!(cache.bytes(), 0);
     }
 
     #[test]
