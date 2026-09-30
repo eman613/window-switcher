@@ -1,3 +1,5 @@
+mod style;
+
 use super::{
     layout::PickerLayout,
     messages::{
@@ -232,106 +234,6 @@ impl Controls {
                 )
             };
         }
-    }
-
-    pub(super) fn style(
-        &mut self,
-        parent: HWND,
-        state: &ViewState,
-        config: &Config,
-        dpi: u32,
-    ) -> Result<()> {
-        state.dpi.set(dpi);
-        let mut signature = config.clone();
-        signature.search_width = 0;
-        signature.search_visible_rows = 0;
-        if !state.style_dirty.get()
-            && self
-                .styled
-                .as_ref()
-                .is_some_and(|(previous, previous_dpi)| {
-                    previous == &signature && *previous_dpi == dpi
-                })
-        {
-            return Ok(());
-        }
-        state.paint_error.set(false);
-        if state.kind == ViewKind::Search {
-            let skin = SearchSkin::new(config, dpi)?;
-            state.scroll_mode.set(
-                if skin.palette.high_contrast
-                    && config.search_scrollbar == crate::config::ScrollBarMode::Auto
-                {
-                    crate::config::ScrollBarMode::Always
-                } else {
-                    config.search_scrollbar
-                },
-            );
-            state
-                .background
-                .set(crate::text_raster::colorref(skin.palette.surface));
-            state
-                .foreground
-                .set(crate::text_raster::colorref(skin.palette.text));
-            state
-                .muted
-                .set(crate::text_raster::colorref(skin.palette.muted));
-            state.brush.set(skin.background_brush());
-            for hwnd in [
-                self.label,
-                self.results_label,
-                self.list,
-                self.status,
-                self.help,
-                self.clear,
-                self.dismiss,
-            ] {
-                Self::set_font(hwnd, &skin.normal);
-            }
-            Self::set_font(self.edit, &skin.input);
-            Self::set_font(self.help, &skin.help_font);
-            Self::set_font(self.notice, &skin.title);
-            state
-                .visual
-                .try_borrow_mut()
-                .context("picker stage=style reentrant update")?
-                .skin = Some(skin);
-        } else {
-            let appearance = Appearance::capture(config);
-            let color = crate::text_raster::colorref(appearance.panel.color);
-            let brush = OwnedGdiObject::new(
-                HGDIOBJ(unsafe { CreateSolidBrush(color) }.0),
-                "search-background",
-            )?;
-            state.background.set(color);
-            state
-                .foreground
-                .set(crate::text_raster::colorref(appearance.text));
-            state.muted.set(state.foreground.get());
-            state.brush.set(HBRUSH(brush.0 .0));
-            let font = content_font(config, dpi, 14)?;
-            let mut metrics = LOGFONTW::default();
-            ensure!(
-                unsafe {
-                    GetObjectW(
-                        font.0,
-                        std::mem::size_of::<LOGFONTW>() as i32,
-                        Some((&mut metrics as *mut LOGFONTW).cast()),
-                    )
-                } != 0,
-                "picker stage=content-font-metrics failed"
-            );
-            self.text_height.set(metrics.lfHeight.abs());
-            for hwnd in [self.label, self.list, self.status, self.back] {
-                Self::set_font(hwnd, &font);
-            }
-            self.font = Some(font);
-            self.background = Some(brush);
-        }
-        self.styled = Some((signature, dpi));
-        state.style_dirty.set(false);
-        let _ = unsafe { InvalidateRect(Some(parent), None, true) };
-        Ok(())
     }
 
     pub(super) fn metrics(&self, state: &ViewState, dpi: u32) -> (i32, i32) {

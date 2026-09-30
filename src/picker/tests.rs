@@ -6,6 +6,7 @@ use crate::{
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 
 mod interaction_regressions;
+mod lifecycle;
 
 fn row(index: usize, title: &str) -> PickerRow {
     PickerRow {

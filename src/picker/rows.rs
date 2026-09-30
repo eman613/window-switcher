@@ -58,6 +58,7 @@ impl PickerWindow {
         selected: usize,
         epoch: u64,
     ) -> Result<()> {
+        self.require_live()?;
         let labels = rows
             .iter()
             .map(PickerRow::accessible_label)

@@ -1,7 +1,9 @@
 //! Window callbacks own only picker state, never an App borrow or a search job.
 use super::{rows::PickerVisual, skin::px, ViewKind};
 use crate::{
-    keyboard::dispatch::WM_INPUT_READY, localization::Text, utils::get_window_user_data,
+    keyboard::dispatch::WM_INPUT_READY,
+    localization::Text,
+    utils::{get_window_user_data, set_window_user_data},
     window_target::WindowTarget,
 };
 use std::{
@@ -37,6 +39,7 @@ pub(crate) const RELAYOUT: u32 = 4;
 pub(crate) const BACK: u32 = 8;
 
 pub(super) struct ViewState {
+    pub alive: Cell<bool>,
     pub target: Arc<WindowTarget>,
     pub kind: ViewKind,
     pub text: Text,
@@ -167,6 +170,14 @@ pub(super) unsafe extern "system" fn window_proc(
             return result;
         }
         match msg {
+            WM_NCDESTROY => {
+                state.alive.set(false);
+                state.visible.set(false);
+                state.accept.set(None);
+                state.flags.set(0);
+                set_window_user_data(hwnd, 0);
+                debug!("picker stage=native-destroyed");
+            }
             WM_TIMER if wparam.0 == super::scroll_visibility::TIMER => {
                 super::scroll_visibility::tick(hwnd, state);
                 return LRESULT(0);

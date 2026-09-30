@@ -105,6 +105,7 @@ impl PickerWindow {
             Ok(atom)
         })?;
         let state = Box::new(ViewState {
+            alive: Cell::new(true),
             target,
             kind,
             text,
@@ -184,7 +185,7 @@ impl PickerWindow {
         self.controls.as_ref().unwrap()
     }
     pub(crate) fn visible(&self) -> bool {
-        self.state().visible.get()
+        self.state().alive.get() && self.state().visible.get()
     }
     pub(crate) fn composing(&self) -> bool {
         self.state().composing.get()
@@ -194,6 +195,7 @@ impl PickerWindow {
     }
 
     pub(crate) fn position(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
+        self.require_live()?;
         self.controls.as_mut().unwrap().style(
             self.hwnd,
             self.state.as_deref().unwrap(),
@@ -245,6 +247,7 @@ impl PickerWindow {
     }
 
     pub(crate) fn focus(&self) -> Result<()> {
+        self.require_live()?;
         set_foreground_window(self.hwnd, || {
             self.visible() && self.state().target.is_live()
         });
@@ -257,6 +260,9 @@ impl PickerWindow {
     }
 
     pub(crate) fn hide(&self) {
+        if !self.state().alive.get() {
+            return;
+        }
         scroll_visibility::hide(self.hwnd, self.state());
         scrollbar::cancel(self.hwnd, self.state());
         self.state().reset_scroll.set(true);
@@ -294,6 +300,7 @@ impl PickerWindow {
         }
     }
     pub(crate) fn layout(&mut self) -> Result<()> {
+        self.require_live()?;
         let dpi = self.state().dpi.get();
         if let Some(config) = &self.configuration {
             self.controls.as_mut().unwrap().style(
@@ -307,6 +314,7 @@ impl PickerWindow {
     }
 
     pub(crate) fn fit_results(&mut self, count: usize) -> Result<()> {
+        self.require_live()?;
         let (Some(mut config), Some(monitor)) = (self.configuration.clone(), self.monitor) else {
             return Ok(());
         };
@@ -330,6 +338,7 @@ impl PickerWindow {
         Ok(())
     }
     pub(crate) fn query(&self) -> Result<String> {
+        self.require_live()?;
         let length = unsafe { GetWindowTextLengthW(self.controls().edit) } as usize;
         ensure!(
             length <= MAX_QUERY_UNITS,
@@ -341,10 +350,14 @@ impl PickerWindow {
         Ok(String::from_utf16_lossy(&units[..copied]))
     }
     pub(crate) fn selected(&self) -> Option<usize> {
+        if !self.state().alive.get() {
+            return None;
+        }
         let index = unsafe { SendMessageW(self.controls().list, LB_GETCURSEL, None, None) }.0;
         (index >= 0).then_some(index as usize)
     }
     pub(crate) fn status(&self, value: &str) -> Result<()> {
+        self.require_live()?;
         unsafe {
             SetWindowTextW(self.controls().status, &HSTRING::from(value))?;
             windows::Win32::UI::Accessibility::NotifyWinEvent(
@@ -357,6 +370,7 @@ impl PickerWindow {
         Ok(())
     }
     pub(crate) fn pending(&self) -> Result<()> {
+        self.require_live()?;
         self.state().busy.set(true);
         self.state().failed.set(false);
         self.state().accept.set(None);
@@ -376,11 +390,19 @@ impl PickerWindow {
         self.status(self.text.search_failed_title())?;
         self.controls().refresh_notice(self.state())
     }
+
+    fn require_live(&self) -> Result<()> {
+        ensure!(self.state().alive.get(), "picker stage=window retired");
+        Ok(())
+    }
 }
 
 impl Drop for PickerWindow {
     fn drop(&mut self) {
         self.state().visible.set(false);
+        if !self.state().alive.get() {
+            return;
+        }
         if let Err(error) = unsafe { DestroyWindow(self.hwnd) } {
             // A live native callback must never point into freed Rust memory.
             // Retain its bounded owners on an exceptional native destroy failure.
