@@ -265,7 +265,7 @@ impl Controls {
             state.kind,
             row_height,
             text_height,
-            state.help_open.get(),
+            state.help_open.get() || state.truncated.get(),
         )?;
         state.query_bottom.set(layout.query_bottom);
         for (hwnd, rect) in [
@@ -358,10 +358,17 @@ impl Controls {
         };
         unsafe {
             SetWindowTextW(self.notice, &HSTRING::from(title))?;
-            SetWindowTextW(self.help, &HSTRING::from(text.search_keyboard_help()))?;
+            SetWindowTextW(
+                self.help,
+                &HSTRING::from(if state.truncated.get() && !state.help_open.get() {
+                    text.search_truncated_hint()
+                } else {
+                    text.search_keyboard_help()
+                }),
+            )?;
         }
         super::placement::visible(self.notice, show);
-        super::placement::visible(self.help, state.help_open.get());
+        super::placement::visible(self.help, state.help_open.get() || state.truncated.get());
         super::placement::visible(self.list, !show);
         Ok(())
     }

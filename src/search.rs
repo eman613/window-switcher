@@ -262,7 +262,7 @@ impl SearchSession {
                 generation,
             )?;
             self.window
-                .status(&self.text.search_count(result.entries.len(), result.total))?;
+                .result_count(result.entries.len(), result.total)?;
             self.results = result.entries;
             self.displayed_generation = generation;
             self.window.fit_results(self.results.len())?;

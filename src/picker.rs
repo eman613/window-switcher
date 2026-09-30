@@ -142,6 +142,7 @@ impl PickerWindow {
             scroll_mode: Cell::new(crate::config::ScrollBarMode::Auto),
             scroll_hint: Cell::new(false),
             help_open: Cell::new(false),
+            truncated: Cell::new(false),
             style_dirty: Cell::new(true),
         });
         let hwnd = unsafe {
@@ -273,6 +274,7 @@ impl PickerWindow {
         self.state().scroll_drag.set(None);
         self.state().wheel_remainder.set(0);
         self.state().visible.set(false);
+        self.state().truncated.set(false);
         self.state().accept.set(None);
         self.state().flags.set(0);
         self.state().composing.set(false);
@@ -397,6 +399,14 @@ impl PickerWindow {
         }
         Ok(())
     }
+    pub(crate) fn result_count(&self, shown: usize, total: usize) -> Result<()> {
+        self.status(&self.text.search_count(shown, total))?;
+        if self.state().truncated.replace(shown < total) != (shown < total) {
+            self.controls()
+                .layout(self.hwnd, self.state(), self.state().dpi.get())?;
+        }
+        Ok(())
+    }
     pub(crate) fn pending(&self) -> Result<()> {
         self.require_live()?;
         self.state().busy.set(true);
@@ -410,6 +420,10 @@ impl PickerWindow {
             let _ = EnableWindow(self.controls().list, false);
         }
         self.status(self.text.search_loading())?;
+        if self.state().truncated.replace(false) {
+            self.controls()
+                .layout(self.hwnd, self.state(), self.state().dpi.get())?;
+        }
         self.controls().refresh_notice(self.state())
     }
     pub(crate) fn failure(&self) -> Result<()> {

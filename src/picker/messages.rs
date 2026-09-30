@@ -74,6 +74,7 @@ pub(super) struct ViewState {
     pub scroll_mode: Cell<crate::config::ScrollBarMode>,
     pub scroll_hint: Cell<bool>,
     pub help_open: Cell<bool>,
+    pub truncated: Cell<bool>,
     pub style_dirty: Cell<bool>,
 }
 

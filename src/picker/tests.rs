@@ -8,6 +8,7 @@ use windows::Win32::Foundation::{LPARAM, WPARAM};
 mod dpi;
 mod interaction_regressions;
 mod lifecycle;
+mod truncation;
 
 fn row(index: usize, title: &str) -> PickerRow {
     PickerRow {

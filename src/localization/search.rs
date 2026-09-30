@@ -1,6 +1,10 @@
 use super::Text;
 
 impl Text {
+    pub(crate) fn search_truncated_hint(self) -> &'static str {
+        self.choose("结果较多，请缩小查询", "More matches: refine search")
+    }
+
     pub(crate) fn search_results_label(self) -> &'static str {
         self.choose("打开的窗口", "Open windows")
     }
