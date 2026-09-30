@@ -75,9 +75,12 @@ struct NativeRuntimeFixture {
     owner: Box<AppHost>,
     _foreground: ForegroundWatcher,
     window: ApplicationWindow,
+    // Match run(): UIA consumers must be destroyed before their explicit STA.
+    _com: ComApartment,
 }
 
 fn native_fixture() -> NativeRuntimeFixture {
+    let com = ComApartment::sta().unwrap();
     let window = ApplicationWindow::create().unwrap();
     let target = window.target();
     let input = Arc::new(InputDispatch::new(target.clone()));
@@ -142,7 +145,24 @@ fn native_fixture() -> NativeRuntimeFixture {
         owner,
         _foreground: foreground,
         window,
+        _com: com,
     }
+}
+
+#[test]
+fn native_fixture_keeps_an_explicit_sta_for_uia_consumers() {
+    use windows::Win32::System::Com::{
+        CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER, APTTYPEQUALIFIER_NONE, APTTYPE_MAINSTA,
+        APTTYPE_STA,
+    };
+    let fixture = native_fixture();
+    let mut apartment = APTTYPE::default();
+    let mut qualifier = APTTYPEQUALIFIER::default();
+    unsafe { CoGetApartmentType(&mut apartment, &mut qualifier) }.unwrap();
+    assert!(apartment == APTTYPE_STA || apartment == APTTYPE_MAINSTA);
+    assert_eq!(qualifier, APTTYPEQUALIFIER_NONE);
+    // Exercise disconnect while the explicit apartment is still owned by the fixture.
+    drop(fixture);
 }
 
 #[test]

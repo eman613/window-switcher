@@ -56,8 +56,20 @@ jobs:
       - name: Test
         run: |
           $ErrorActionPreference = 'Stop'
-          cargo test --locked --workspace --all-targets --target $env:CARGO_TARGET
-          exit $LASTEXITCODE
+          ./tools/native-tests/test-debugger.ps1 -OutputDirectory "target/native-debugger-probe"
+          ./tools/native-tests/run.ps1 -Target $env:CARGO_TARGET
+
+      - name: Preserve first native test failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-test-failure-${{ matrix.target }}
+          path: |
+            target/native-test-evidence/
+            target/native-debugger-probe/*.json
+            target/native-debugger-probe/*.log
+          retention-days: 3
+          if-no-files-found: ignore
 
       - name: Isolated native resource regressions
         run: |
