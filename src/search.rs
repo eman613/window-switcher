@@ -1,6 +1,8 @@
 //! Search owns a native text surface and one cancellable offline matcher.
 mod matcher;
 mod service;
+#[cfg(test)]
+mod tests;
 
 use crate::{
     config::Config,
@@ -71,6 +73,7 @@ pub(crate) struct SearchSession {
     results: Vec<SearchEntry>,
     selected: Option<WindowIdentity>,
     generation: u64,
+    displayed_generation: u64,
     pending: bool,
     query: String,
     failure_shown: bool,
@@ -91,6 +94,7 @@ impl SearchSession {
             results: Vec::new(),
             selected: None,
             generation: 0,
+            displayed_generation: 0,
             pending: false,
             query: String::new(),
             failure_shown: false,
@@ -138,6 +142,7 @@ impl SearchSession {
         self.service.cancel();
         self.source = None;
         self.results.clear();
+        self.displayed_generation = 0;
         self.selected = None;
         self.query.clear();
         self.pending = false;
@@ -208,6 +213,22 @@ impl SearchSession {
             // earlier committed query is returning during a new composition.
             return Ok(None);
         }
+        // Confirm the identity the user saw, before a background result can
+        // reorder the list. App::poll_search still revalidates it before focus.
+        if events.flags & messages::CHANGED == 0 && self.window.selection_available() {
+            if let Some((_, index)) = events
+                .accept
+                .filter(|(epoch, _)| *epoch == self.displayed_generation)
+            {
+                if let Some(entry) = self.results.get(index) {
+                    debug!(
+                        "search stage=accept displayed-result refresh_pending={}",
+                        self.pending
+                    );
+                    return Ok(Some(SearchAction::Activate(entry.clone())));
+                }
+            }
+        }
         for (generation, result) in self.service.take() {
             if generation != self.generation {
                 continue;
@@ -243,6 +264,7 @@ impl SearchSession {
             self.window
                 .status(&self.text.search_count(result.entries.len(), result.total))?;
             self.results = result.entries;
+            self.displayed_generation = generation;
             self.window.fit_results(self.results.len())?;
             self.pending = false;
             debug!(
@@ -250,13 +272,6 @@ impl SearchSession {
                 self.results.len(),
                 result.total
             );
-        }
-        if events.flags & messages::CHANGED == 0 && !self.pending {
-            if let Some((_, index)) = events.accept.filter(|(epoch, _)| *epoch == self.generation) {
-                if let Some(entry) = self.results.get(index) {
-                    return Ok(Some(SearchAction::Activate(entry.clone())));
-                }
-            }
         }
         Ok(None)
     }

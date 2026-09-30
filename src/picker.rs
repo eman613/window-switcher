@@ -1,6 +1,8 @@
 //! Shared native list surface; search and details retain their own session models.
 mod controls;
 mod drawing;
+#[cfg(test)]
+mod fixtures;
 mod highlight;
 mod input;
 mod layout;
