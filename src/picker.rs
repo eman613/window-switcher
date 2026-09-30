@@ -184,6 +184,9 @@ impl PickerWindow {
     pub(crate) fn composing(&self) -> bool {
         self.state().composing.get()
     }
+    pub(crate) fn selection_available(&self) -> bool {
+        self.visible() && !self.state().busy.get() && !self.composing()
+    }
 
     pub(crate) fn position(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
         self.controls.as_mut().unwrap().style(

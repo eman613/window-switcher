@@ -204,8 +204,10 @@ impl PreviewWindow {
     }
 
     pub(super) fn show(&self) -> Result<()> {
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        if !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            }
         }
         ensure!(
             self.live() && unsafe { IsWindowVisible(self.hwnd) }.as_bool(),

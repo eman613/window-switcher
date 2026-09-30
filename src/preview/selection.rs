@@ -10,7 +10,12 @@ pub(super) struct SelectionDelay {
 
 impl SelectionDelay {
     pub(super) fn select(&mut self, next: Option<PreviewRequest>, now: Instant) -> bool {
-        if self.current == next {
+        let same_source = self.current.map(|value| (value.source, value.surface))
+            == next.map(|value| (value.source, value.surface));
+        if same_source {
+            // Layout updates move an existing thumbnail; only a new source or
+            // switching surface owns a new delay and DWM relationship.
+            self.current = next;
             return false;
         }
         self.current = next;
@@ -53,7 +58,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_surface_and_geometry_changes_restart_the_deadline() {
+    fn identity_and_surface_restart_the_delay_but_geometry_keeps_the_lease() {
         let now = Instant::now();
         let first = super::super::fixture(1);
         let mut delay = SelectionDelay::default();
@@ -63,10 +68,11 @@ mod tests {
         assert!(delay.select(Some(reused), now));
         reused.surface += 1;
         assert!(delay.select(Some(reused), now));
+        let ready = now + Duration::from_millis(250);
         reused.anchor.left += 1;
-        assert!(delay.select(Some(reused), now));
+        assert!(!delay.select(Some(reused), ready));
         reused.monitor.dpi = 144;
-        assert!(delay.select(Some(reused), now));
-        assert_eq!(delay.ready(now, Duration::from_millis(250)), None);
+        assert!(!delay.select(Some(reused), ready));
+        assert_eq!(delay.ready(ready, Duration::from_millis(250)), Some(reused));
     }
 }

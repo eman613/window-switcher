@@ -103,7 +103,7 @@ impl SearchSession {
         self.window.visible()
     }
     pub(crate) fn selected_window(&self) -> Option<WindowIdentity> {
-        if !self.active() || self.pending || self.window.composing() {
+        if !self.window.selection_available() {
             return None;
         }
         self.window
@@ -149,7 +149,7 @@ impl SearchSession {
         self.request(false)
     }
     fn remember_selection(&mut self) {
-        if !self.pending {
+        if self.window.selection_available() {
             self.selected = self
                 .window
                 .selected()
