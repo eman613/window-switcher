@@ -129,6 +129,7 @@ impl PickerWindow {
             muted: Cell::new(COLORREF(0)),
             brush: Cell::new(HBRUSH::default()),
             dpi: Cell::new(96),
+            monitor_dirty: Cell::new(false),
             query_bottom: Cell::new(0),
             visual: RefCell::new(rows::PickerVisual::default()),
             hover: Cell::new(None),
@@ -206,6 +207,7 @@ impl PickerWindow {
         )?;
         self.configuration = Some(config.clone());
         self.monitor = Some(monitor);
+        self.state().monitor_dirty.set(false);
         let area = monitor.available;
         let (row_height, text_height) = self.controls().metrics(self.state(), monitor.dpi);
         let (width, height) = layout::PickerLayout::target(
@@ -305,6 +307,14 @@ impl PickerWindow {
         self.require_live()?;
         let dpi = self.state().dpi.get();
         if let Some(config) = &self.configuration {
+            if self.state().monitor_dirty.get() {
+                let mut monitor = MonitorSnapshot::for_window(config, self.hwnd)?;
+                // WM_DPICHANGED is authoritative for this window's new DPI.
+                monitor.dpi = dpi;
+                self.monitor = Some(monitor);
+                self.state().monitor_dirty.set(false);
+                debug!("picker stage=monitor-refreshed dpi={dpi}");
+            }
             self.controls.as_mut().unwrap().style(
                 self.hwnd,
                 self.state.as_deref().unwrap(),
@@ -320,7 +330,6 @@ impl PickerWindow {
         let (Some(mut config), Some(monitor)) = (self.configuration.clone(), self.monitor) else {
             return Ok(());
         };
-        let configured = config.clone();
         config.search_visible_rows = (count.max(1) as u32).min(config.search_visible_rows);
         let (row, text) = self.controls().metrics(self.state(), monitor.dpi);
         let desired = layout::PickerLayout::target(
@@ -334,8 +343,25 @@ impl PickerWindow {
         let mut rect = windows::Win32::Foundation::RECT::default();
         unsafe { GetWindowRect(self.hwnd, &mut rect) }?;
         if (rect.right - rect.left, rect.bottom - rect.top) != desired {
-            self.position(&config, monitor)?;
-            self.configuration = Some(configured);
+            // Keep the dragged position; only clamp when the new size leaves
+            // the current work area. Position policy applies when opening.
+            let area = monitor.available;
+            let left = rect.left.clamp(area.left, area.right - desired.0);
+            let top = rect.top.clamp(area.top, area.bottom - desired.1);
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    None,
+                    left,
+                    top,
+                    desired.0,
+                    desired.1,
+                    SWP_NOACTIVATE | SWP_NOZORDER,
+                )
+            }
+            .context("search stage=fit-results")?;
+            self.controls()
+                .layout(self.hwnd, self.state(), monitor.dpi)?;
         }
         Ok(())
     }

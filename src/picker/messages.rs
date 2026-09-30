@@ -61,6 +61,7 @@ pub(super) struct ViewState {
     pub muted: Cell<COLORREF>,
     pub brush: Cell<HBRUSH>,
     pub dpi: Cell<u32>,
+    pub monitor_dirty: Cell<bool>,
     pub query_bottom: Cell<i32>,
     pub visual: RefCell<PickerVisual>,
     pub hover: Cell<Option<usize>>,
@@ -194,6 +195,7 @@ pub(super) unsafe extern "system" fn window_proc(
             WM_DPICHANGED => {
                 let dpi = (wparam.0 as u32 & 0xffff).clamp(48, 768);
                 state.dpi.set(dpi);
+                state.monitor_dirty.set(true);
                 if lparam.0 != 0 {
                     let bounds = &*(lparam.0 as *const RECT);
                     let _ = SetWindowPos(
@@ -206,6 +208,10 @@ pub(super) unsafe extern "system" fn window_proc(
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }
+                state.signal(RELAYOUT);
+            }
+            WM_EXITSIZEMOVE => {
+                state.monitor_dirty.set(true);
                 state.signal(RELAYOUT);
             }
             WM_SIZE => state.signal(RELAYOUT),

@@ -23,6 +23,12 @@ pub(crate) struct MonitorSnapshot {
 }
 
 impl MonitorSnapshot {
+    pub(crate) fn for_window(config: &Config, hwnd: HWND) -> Result<Self> {
+        Self::read(config, unsafe {
+            MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        })
+    }
+
     pub(crate) fn capture(config: &Config, foreground: HWND) -> Result<Self> {
         let monitor = unsafe {
             match config.monitor {
