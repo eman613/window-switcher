@@ -128,7 +128,8 @@ fn draw_row(
         secondary,
     )?;
     let left = bounds.left + p(25);
-    let right = bounds.right - p(3);
+    // Keep text clear of the overlay's hit area without shortening the row fill.
+    let right = bounds.right - p(17);
     let app_width = ((right - left) / 3).min(p(106));
     super::highlight::draw(
         dc,
@@ -201,6 +202,8 @@ pub(super) fn item(state: &ViewState, item: &DRAWITEMSTRUCT) -> Result<bool> {
         } else {
             rounded(item.hDC, item.rcItem, 0, skin.palette.surface, None)?;
         }
+        drop(visual);
+        super::scrollbar::paint_row(state, item.hDC, item.rcItem)?;
         return Ok(true);
     }
     if item.CtlType == ODT_BUTTON && item.CtlID as usize == DISMISS_ID {
@@ -286,7 +289,6 @@ pub(super) fn window(hwnd: HWND, state: &ViewState) -> Result<()> {
             skin.palette.surface,
             Some(skin.palette.accent),
         )?;
-        super::scrollbar::paint(hwnd, state, dc)?;
         Ok(())
     })();
     let ended = unsafe { EndPaint(hwnd, &paint) }.as_bool();

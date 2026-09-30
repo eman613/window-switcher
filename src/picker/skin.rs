@@ -61,7 +61,9 @@ impl SearchPalette {
             selected_text: appearance.text,
             accent: appearance.border,
             border: appearance.border,
-            divider: appearance.border,
+            // Selection is carried by the fill; keep its outline quieter than
+            // the input frame, as in Switcheroo's unfocused list selection.
+            divider: mix(appearance.border, selected, 32),
             hover: mix(appearance.text, surface, 18),
             pressed: mix(appearance.border, selected, 40),
             high_contrast: false,

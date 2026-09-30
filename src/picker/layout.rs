@@ -122,7 +122,7 @@ impl PickerLayout {
             label: RECT::default(),
             edit: rect(p(10), p(10), input_right - p(10) - help_width, input_height),
             results_label: RECT::default(),
-            list: rect(p(4), list_top, width - p(22), footer_top - list_top),
+            list: rect(p(4), list_top, width - 2 * p(4), footer_top - list_top),
             status: RECT::default(),
             clear: RECT::default(),
             dismiss: rect(button_left, button_top, button_width, button_height),
@@ -184,6 +184,8 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(closed.list, open.list);
+                assert_eq!(closed.list.left, px(4, dpi));
+                assert_eq!(closed.list.right, px(480, dpi) - px(4, dpi));
                 assert_eq!(closed.dismiss, open.dismiss);
                 assert_eq!(closed.edit.top, open.edit.top);
                 assert_eq!(closed.edit.bottom, open.edit.bottom);

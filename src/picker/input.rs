@@ -128,6 +128,9 @@ pub(super) unsafe extern "system" fn control_proc(
             return LRESULT(0);
         }
         if hwnd == state.list.get() {
+            if let Some(result) = super::scrollbar::handle_list(state, msg, lparam) {
+                return result;
+            }
             match msg {
                 WM_MOUSEMOVE => {
                     super::scroll_visibility::reveal(state);

@@ -99,6 +99,76 @@ fn row_repaint_removes_previous_selection_edges() {
 }
 
 #[test]
+fn hiding_scroll_overlay_restores_the_complete_selected_row() {
+    use crate::config::ScrollBarMode;
+    use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_SELECTED, ODT_LISTBOX};
+
+    let search = fixture();
+    let state = search.state();
+    let mut bounds = windows::Win32::Foundation::RECT::default();
+    assert!(
+        unsafe {
+            SendMessageW(
+                state.list.get(),
+                LB_GETITEMRECT,
+                Some(WPARAM(0)),
+                Some(LPARAM(
+                    (&mut bounds as *mut windows::Win32::Foundation::RECT) as isize,
+                )),
+            )
+            .0
+        } >= 0
+    );
+    let mut surface =
+        crate::render_surface::RenderSurface::new(bounds.right, bounds.bottom).unwrap();
+    surface
+        .fill_rgb(state.visual.borrow().skin.as_ref().unwrap().palette.surface)
+        .unwrap();
+    let item = DRAWITEMSTRUCT {
+        CtlType: ODT_LISTBOX,
+        CtlID: messages::LIST_ID as u32,
+        itemID: 0,
+        hDC: surface.dc(),
+        rcItem: bounds,
+        itemState: ODS_SELECTED,
+        ..Default::default()
+    };
+    state.scroll_mode.set(ScrollBarMode::Hidden);
+    assert!(paint::item(state, &item).unwrap());
+    let clean = surface.pixels().unwrap().to_vec();
+    state.scroll_mode.set(ScrollBarMode::Always);
+    assert!(paint::item(state, &item).unwrap());
+    let changed: Vec<_> = surface
+        .pixels()
+        .unwrap()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(clean.as_chunks::<4>().0)
+        .enumerate()
+        .filter(|(_, (actual, expected))| actual[..3] != expected[..3])
+        .map(|(index, _)| index as i32 % bounds.right)
+        .collect();
+    assert!(!changed.is_empty(), "overlay must actually be drawn");
+    assert!(
+        changed
+            .iter()
+            .all(|x| *x >= bounds.right - 14 && *x < bounds.right - 2),
+        "overlay must stay inside the row and clear of its border"
+    );
+    state.scroll_mode.set(ScrollBarMode::Hidden);
+    assert!(paint::item(state, &item).unwrap());
+    assert!(surface
+        .pixels()
+        .unwrap()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(clean.as_chunks::<4>().0)
+        .all(|(actual, expected)| actual[..3] == expected[..3]));
+}
+
+#[test]
 fn dark_help_resize_erases_with_the_current_theme_before_paint() {
     let mut search = fixture();
     let mut surface = crate::render_surface::RenderSurface::new(800, 800).unwrap();

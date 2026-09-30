@@ -1,9 +1,9 @@
 //! Search viewport chrome. The list remains the source of scroll position.
 use super::{drawing::rounded, layout::PickerLayout, messages::ViewState, skin::px, ViewKind};
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
-    Graphics::Gdi::{InvalidateRect, ScreenToClient, HDC},
+    Graphics::Gdi::{ClientToScreen, IntersectClipRect, InvalidateRect, ScreenToClient, HDC},
     UI::{
         Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture},
         WindowsAndMessaging::*,
@@ -11,6 +11,7 @@ use windows::Win32::{
 };
 
 struct Geometry {
+    viewport: RECT,
     track: RECT,
     thumb: RECT,
     maximum: i32,
@@ -47,8 +48,8 @@ fn geometry(hwnd: HWND, state: &ViewState) -> Option<Geometry> {
     let top = (unsafe { SendMessageW(state.list.get(), LB_GETTOPINDEX, None, None) }.0 as i32)
         .clamp(0, maximum);
     let track = RECT {
-        left: layout.list.right + px(2, skin.dpi),
-        right: bounds.right - px(6, skin.dpi),
+        left: layout.list.right - px(14, skin.dpi),
+        right: layout.list.right - px(2, skin.dpi),
         top: layout.list.top,
         bottom: layout.list.bottom,
     };
@@ -58,6 +59,7 @@ fn geometry(hwnd: HWND, state: &ViewState) -> Option<Geometry> {
         .min(height);
     let offset = (i64::from(height - thumb_height) * i64::from(top) / i64::from(maximum)) as i32;
     Some(Geometry {
+        viewport: layout.list,
         track,
         thumb: RECT {
             top: track.top + offset,
@@ -148,9 +150,7 @@ pub(super) fn wheel(state: &ViewState, wparam: WPARAM) -> bool {
 
 pub(super) fn invalidate(state: &ViewState) {
     if state.kind == ViewKind::Search {
-        if let Ok(parent) = unsafe { GetParent(state.list.get()) } {
-            let _ = unsafe { InvalidateRect(Some(parent), None, false) };
-        }
+        let _ = unsafe { InvalidateRect(Some(state.list.get()), None, false) };
     }
 }
 
@@ -163,10 +163,12 @@ pub(super) fn cancel(hwnd: HWND, state: &ViewState) {
     }
 }
 
-pub(super) fn paint(hwnd: HWND, state: &ViewState, dc: HDC) -> Result<()> {
+pub(super) fn paint_row(state: &ViewState, dc: HDC, row: RECT) -> Result<()> {
     if !super::scroll_visibility::visible(state) {
         return Ok(());
     }
+    let hwnd =
+        unsafe { GetParent(state.list.get()) }.context("search stage=scroll-paint-parent")?;
     let Some(geometry) = geometry(hwnd, state) else {
         return Ok(());
     };
@@ -179,13 +181,19 @@ pub(super) fn paint(hwnd: HWND, state: &ViewState, dc: HDC) -> Result<()> {
     };
     let active = state.scroll_drag.get().is_some() || pointer_on_track(hwnd, state);
     let width = px(if active { 6 } else { 4 }, skin.dpi).max(2);
-    let center = (geometry.thumb.left + geometry.thumb.right) / 2;
+    let center = (geometry.thumb.left + geometry.thumb.right) / 2 - geometry.viewport.left;
+    let _saved = crate::utils::gdi::SavedDc::new(dc)?;
+    ensure!(
+        unsafe { IntersectClipRect(dc, row.left, row.top, row.right, row.bottom) }.0 != 0,
+        "search stage=scroll-clip failed"
+    );
     rounded(
         dc,
         RECT {
             left: center - width / 2,
             right: center + (width + 1) / 2,
-            ..geometry.thumb
+            top: geometry.thumb.top - geometry.viewport.top,
+            bottom: geometry.thumb.bottom - geometry.viewport.top,
         },
         (width + 1) / 2,
         if active {
@@ -194,6 +202,46 @@ pub(super) fn paint(hwnd: HWND, state: &ViewState, dc: HDC) -> Result<()> {
             skin.palette.border
         },
         None,
+    )
+}
+
+/// The overlay belongs to the list visually, while the parent retains capture
+/// so dragging beyond the list still reaches both ends of the scroll range.
+pub(super) unsafe fn handle_list(state: &ViewState, msg: u32, point: LPARAM) -> Option<LRESULT> {
+    if !matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_MOUSEMOVE) {
+        return None;
+    }
+    let parent = match GetParent(state.list.get()) {
+        Ok(parent) => parent,
+        Err(error) => {
+            warn!(
+                "search stage=scroll-input-parent code={:#x}",
+                error.code().0
+            );
+            return None;
+        }
+    };
+    let mut position = POINT {
+        x: point.0 as u16 as i16 as i32,
+        y: (point.0 >> 16) as u16 as i16 as i32,
+    };
+    if !ClientToScreen(state.list.get(), &mut position).as_bool()
+        || !ScreenToClient(parent, &mut position).as_bool()
+    {
+        warn!("search stage=scroll-input-coordinates failed");
+        return None;
+    }
+    let translated =
+        LPARAM(((position.x as u16 as u32) | ((position.y as u16 as u32) << 16)) as isize);
+    handle(
+        parent,
+        state,
+        if msg == WM_LBUTTONDBLCLK {
+            WM_LBUTTONDOWN
+        } else {
+            msg
+        },
+        translated,
     )
 }
 
@@ -302,6 +350,7 @@ mod tests {
     #[test]
     fn dragging_to_both_ends_reaches_the_full_range_without_wrapping() {
         let g = Geometry {
+            viewport: RECT::default(),
             track: RECT {
                 top: 20,
                 bottom: 420,
