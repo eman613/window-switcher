@@ -54,20 +54,23 @@ jobs:
           exit $LASTEXITCODE
 
       - name: Test
+        id: native_tests
         run: |
           $ErrorActionPreference = 'Stop'
-          ./tools/native-tests/test-debugger.ps1 -OutputDirectory "target/native-debugger-probe"
-          ./tools/native-tests/run.ps1 -Target $env:CARGO_TARGET
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP "window-switcher-native-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$env:CARGO_TARGET"
+          "evidence=$evidenceRoot" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding UTF8
+          ./tools/native-tests/test-debugger.ps1 -OutputDirectory (Join-Path $evidenceRoot 'debugger-probe')
+          ./tools/native-tests/run.ps1 -Target $env:CARGO_TARGET -OutputDirectory (Join-Path $evidenceRoot 'tests')
 
       - name: Preserve first native test failure
-        if: failure()
+        if: failure() && steps.native_tests.outputs.evidence != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-test-failure-${{ matrix.target }}
           path: |
-            target/native-test-evidence/
-            target/native-debugger-probe/*.json
-            target/native-debugger-probe/*.log
+            ${{ steps.native_tests.outputs.evidence }}/tests/
+            ${{ steps.native_tests.outputs.evidence }}/debugger-probe/*.json
+            ${{ steps.native_tests.outputs.evidence }}/debugger-probe/*.log
           retention-days: 3
           if-no-files-found: ignore
 
