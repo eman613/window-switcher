@@ -49,10 +49,14 @@ impl<Q, R> Mailbox<Q, R> {
     }
 
     fn advance(&self) -> u64 {
-        match self
+        #[allow(
+            deprecated,
+            reason = "try_update requires Rust 1.95; preserve MSRV 1.88"
+        )]
+        let updated = self
             .generation
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
-        {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1));
+        match updated {
             Ok(previous) => previous + 1,
             Err(_) => {
                 self.closed.store(true, Ordering::Release);

@@ -151,7 +151,11 @@ impl IconCache {
 
     pub(crate) fn reserve(&mut self) -> Option<ByteLease> {
         loop {
-            if self
+            #[allow(
+                deprecated,
+                reason = "try_update requires Rust 1.95; preserve MSRV 1.88"
+            )]
+            let reserved = self
                 .budget
                 .used
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |bytes| {
@@ -159,8 +163,8 @@ impl IconCache {
                         .checked_add(ICON_BYTES)
                         .filter(|total| *total <= self.budget.limit)
                 })
-                .is_ok()
-            {
+                .is_ok();
+            if reserved {
                 return Some(ByteLease {
                     budget: self.budget.clone(),
                     bytes: ICON_BYTES,

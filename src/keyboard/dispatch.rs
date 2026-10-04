@@ -108,13 +108,17 @@ impl InputDispatch {
         };
         // Reserve before publication so the receiver can never release an
         // uncounted event. Ordinary cycles leave the final slot for a terminal.
-        if self
+        #[allow(
+            deprecated,
+            reason = "try_update requires Rust 1.95; preserve MSRV 1.88"
+        )]
+        let rejected = self
             .queued
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < limit).then_some(count + 1)
             })
-            .is_err()
-        {
+            .is_err();
+        if rejected {
             self.queue_full_rejections.fetch_add(1, Ordering::Relaxed);
             return false;
         }
