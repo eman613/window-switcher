@@ -39,6 +39,7 @@ pub(crate) const RELAYOUT: u32 = 4;
 pub(crate) const BACK: u32 = 8;
 
 pub(super) struct ViewState {
+    pub announcer: RefCell<Option<crate::accessibility::announcement::Announcer>>,
     pub alive: Cell<bool>,
     pub target: Arc<WindowTarget>,
     pub kind: ViewKind,
@@ -98,6 +99,11 @@ impl ViewState {
 
     pub(super) fn signal(&self, flags: u32) {
         if self.visible.get() {
+            if flags & (CHANGED | CANCEL | BACK) != 0 {
+                self.cancel_announcement(true);
+            } else {
+                self.announce();
+            }
             super::scrollbar::refresh(self);
             self.flags.set(self.flags.get() | flags);
             self.target.try_post(WM_INPUT_READY);
@@ -105,6 +111,7 @@ impl ViewState {
     }
 
     pub(super) fn changed(&self) {
+        self.cancel_announcement(true);
         self.reset_scroll.set(true);
         self.wheel_remainder.set(0);
         self.busy.set(true);
@@ -178,6 +185,11 @@ pub(super) unsafe extern "system" fn window_proc(
         }
         match msg {
             WM_NCDESTROY => {
+                if let Ok(announcer) = state.announcer.try_borrow() {
+                    if let Some(announcer) = announcer.as_ref() {
+                        announcer.retire();
+                    }
+                }
                 state.alive.set(false);
                 state.visible.set(false);
                 state.accept.set(None);
@@ -193,6 +205,20 @@ pub(super) unsafe extern "system" fn window_proc(
             WM_CLOSE => {
                 state.signal(CANCEL);
                 return LRESULT(0);
+            }
+            WM_GETOBJECT
+                if lparam.0 as i32 == windows::Win32::UI::Accessibility::UiaRootObjectId =>
+            {
+                if let Ok(announcer) = state.announcer.try_borrow() {
+                    if let Some(announcer) = announcer.as_ref() {
+                        return windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(
+                            hwnd,
+                            wparam,
+                            lparam,
+                            &announcer.root,
+                        );
+                    }
+                }
             }
             WM_ACTIVATE if wparam.0 & 0xffff == WA_INACTIVE as usize => state.signal(CANCEL),
             WM_SETFOCUS if state.visible.get() => {
@@ -245,6 +271,9 @@ pub(super) unsafe extern "system" fn window_proc(
                 }
                 if id == LIST_ID && notification == LBN_DBLCLK && state.kind == ViewKind::Details {
                     state.accept();
+                }
+                if id == LIST_ID && notification == LBN_SELCHANGE {
+                    state.announce();
                 }
                 if notification == BN_CLICKED {
                     state.command(id);

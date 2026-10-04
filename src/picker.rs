@@ -1,4 +1,5 @@
 //! Shared native list surface; search and details retain their own session models.
+mod announcement;
 mod controls;
 mod drawing;
 #[cfg(test)]
@@ -108,6 +109,7 @@ impl PickerWindow {
             Ok(atom)
         })?;
         let state = Box::new(ViewState {
+            announcer: RefCell::new(None),
             alive: Cell::new(true),
             target,
             kind,
@@ -185,6 +187,12 @@ impl PickerWindow {
         };
         check_error(|| set_window_user_data(hwnd, window.state() as *const ViewState as isize))?;
         window.controls = Some(Controls::create(hwnd, window.state(), text)?);
+        if kind == ViewKind::Search {
+            match crate::accessibility::announcement::Announcer::new(hwnd, text.search_label()) {
+                Ok(announcer) => *window.state().announcer.borrow_mut() = Some(announcer),
+                Err(error) => warn!("uia stage=search-init error={error:#}"),
+            }
+        }
         Ok(window)
     }
 
@@ -250,6 +258,9 @@ impl PickerWindow {
         self.state().composing.set(false);
         self.state().suppress_enter.set(false);
         self.state().visible.set(true);
+        if let Some(announcer) = self.state().announcer.borrow().as_ref() {
+            announcer.set_visible(true);
+        }
         self.pending()?;
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
@@ -267,6 +278,7 @@ impl PickerWindow {
             "search stage=focus denied"
         );
         let _ = unsafe { SetFocus(Some(self.state().focus_target())) };
+        self.state().announce();
         Ok(())
     }
 
@@ -280,6 +292,9 @@ impl PickerWindow {
         self.state().scroll_drag.set(None);
         self.state().wheel_remainder.set(0);
         self.state().visible.set(false);
+        if let Some(announcer) = self.state().announcer.borrow().as_ref() {
+            announcer.set_visible(false);
+        }
         self.state().truncated.set(false);
         self.state().accept.set(None);
         self.state().flags.set(0);
@@ -425,6 +440,7 @@ impl PickerWindow {
     }
     pub(crate) fn pending(&self) -> Result<()> {
         self.require_live()?;
+        self.state().cancel_announcement(false);
         self.state().busy.set(true);
         self.state().failed.set(false);
         self.state().accept.set(None);

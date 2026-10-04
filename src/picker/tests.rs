@@ -5,6 +5,7 @@ use crate::{
 };
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 
+mod announcement;
 mod dpi;
 mod interaction_regressions;
 mod lifecycle;

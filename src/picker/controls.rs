@@ -370,6 +370,7 @@ impl Controls {
         super::placement::visible(self.notice, show);
         super::placement::visible(self.help, state.help_open.get() || state.truncated.get());
         super::placement::visible(self.list, !show);
+        state.announce();
         Ok(())
     }
 }

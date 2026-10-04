@@ -25,7 +25,7 @@ pub(crate) struct PickerRow {
 }
 
 impl PickerRow {
-    fn accessible_label(&self) -> String {
+    pub(super) fn accessible_label(&self) -> String {
         let value = if self.meta.is_empty() {
             format!("{} — {}", self.primary, self.secondary)
         } else {

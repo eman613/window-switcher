@@ -9,6 +9,7 @@ use std::{
 use windows::Win32::UI::Accessibility::{IRawElementProviderSimple, UiaDisconnectProvider};
 
 mod abi;
+pub(crate) mod announcement;
 mod arrays;
 mod events;
 mod node;

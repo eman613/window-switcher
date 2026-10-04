@@ -4,7 +4,7 @@ use windows::{
     core::w,
     Win32::{
         Foundation::HWND,
-        UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE, WM_APP},
+        UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE, LLKHF_UP, WM_APP},
     },
 };
 
@@ -123,7 +123,9 @@ fn injected_policy_is_applied_before_binding_actions_and_observes_altgr_control(
             injected: policy,
         };
         assert!(!context.process(KBDLLHOOKSTRUCT {
-            scanCode: 0x38,
+            // Captured Narrator replay: VK_LMENU, zero scan, injected down.
+            vkCode: VK_LMENU.0 as u32,
+            scanCode: 0,
             flags: LLKHF_INJECTED,
             ..Default::default()
         }));
@@ -138,6 +140,53 @@ fn injected_policy_is_applied_before_binding_actions_and_observes_altgr_control(
             policy == InjectedPolicy::Handle
         );
     }
+}
+
+#[test]
+fn virtual_modifier_replay_preserves_sides_and_does_not_rewrite_physical_keys() {
+    for (vk, scan, extended) in [
+        (VK_LMENU, 0x38, false),
+        (VK_RMENU, 0x38, true),
+        (VK_LCONTROL, 0x1d, false),
+        (VK_RCONTROL, 0x1d, true),
+        (VK_LSHIFT, 0x2a, false),
+        (VK_RSHIFT, 0x36, false),
+        (VK_LWIN, 0x5b, true),
+        (VK_RWIN, 0x5c, true),
+    ] {
+        let data = KBDLLHOOKSTRUCT {
+            vkCode: vk.0 as u32,
+            flags: LLKHF_INJECTED | LLKHF_UP,
+            ..Default::default()
+        };
+        let key = key_input::decode(data);
+        assert_eq!((key.scan, key.extended, key.down), (scan, extended, false));
+        assert_eq!(
+            key_input::decode(KBDLLHOOKSTRUCT {
+                flags: Default::default(),
+                ..data
+            })
+            .scan,
+            0
+        );
+        assert_eq!(
+            key_input::decode(KBDLLHOOKSTRUCT {
+                scanCode: 0x0f,
+                ..data
+            })
+            .scan,
+            0x0f
+        );
+    }
+    assert_eq!(
+        key_input::decode(KBDLLHOOKSTRUCT {
+            vkCode: 0x41,
+            flags: LLKHF_INJECTED,
+            ..Default::default()
+        })
+        .scan,
+        0
+    );
 }
 
 #[test]

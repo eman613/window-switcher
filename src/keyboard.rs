@@ -24,8 +24,8 @@ use windows::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW,
             SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
-            LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_KEYDOWN,
-            WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT,
+            WM_SYSKEYDOWN, WM_SYSKEYUP,
         },
     },
 };
@@ -37,12 +37,13 @@ use crate::{
 
 mod activation;
 pub(crate) mod dispatch;
+mod key_input;
 pub(crate) mod state;
 
 pub(crate) use activation::InputActivation;
 use activation::WM_INPUT_ACTIVATION;
 use dispatch::InputDispatch;
-use state::{InputMachine, InputPermissions, KeyInput};
+use state::{InputMachine, InputPermissions};
 
 thread_local! {
     static HOOK_CONTEXT: RefCell<Option<HookContext>> = const { RefCell::new(None) };
@@ -66,11 +67,7 @@ impl HookContext {
             return false;
         }
         let started = self.dispatch.sample_start();
-        let key = KeyInput {
-            scan: data.scanCode,
-            extended: data.flags.0 & LLKHF_EXTENDED.0 != 0,
-            down: data.flags.0 & LLKHF_UP.0 == 0,
-        };
+        let key = key_input::decode(data);
         if self.injected == InjectedPolicy::Passthrough && data.flags.0 & LLKHF_INJECTED.0 != 0 {
             self.machine.observe_injected_passthrough(key);
             if let Some(started) = started {
