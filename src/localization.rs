@@ -1,11 +1,13 @@
 use crate::{config::Language, startup::StartupState};
 use std::sync::atomic::{AtomicBool, Ordering};
+mod failure;
 mod quick_settings;
 mod search;
+pub(crate) use failure::{system_code, FailureReason, SystemFailure};
 
 static CHINESE: AtomicBool = AtomicBool::new(true);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum FailureKind {
     Configuration,
     Restart,
@@ -169,6 +171,9 @@ impl Text {
             FailureKind::Launch => ("WS-LAUNCH", "应用未能启动。请确认没有运行中的实例，并检查 INI、日志目录和系统权限。",
                 "The application could not start. Check for an existing instance, then verify the INI, log directory, and system permissions."),
         };
+        if let Some(reason) = self.reason_detail(detail) {
+            return format!("{reason}\n[{code}]");
+        }
         // Raw diagnostics can contain OS-localized text or user paths. Keep the
         // default Chinese detail locally; English UI uses stable actionable
         // resources and a language-independent support code instead of mixed text.

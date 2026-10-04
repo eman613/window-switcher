@@ -567,7 +567,10 @@ fn custom_permissions_and_alternate_streams_are_not_silently_discarded() {
     let error = load_at(path.clone())
         .err()
         .expect("custom permissions must reject replacement");
-    assert!(format!("{error:#}").contains("权限"));
+    assert_eq!(
+        error.downcast_ref::<crate::localization::FailureReason>(),
+        Some(&crate::localization::FailureReason::ConfigSecurity)
+    );
     assert_eq!(fs::read(&path).unwrap(), original);
     directory.assert_no_temporary_files();
 

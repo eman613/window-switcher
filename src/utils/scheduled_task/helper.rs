@@ -71,7 +71,7 @@ pub(super) fn execute() -> Result<()> {
     let folder = unsafe { service.GetFolder(&BSTR::from("\\")) }?;
     if let Some((expected, replacement)) = request {
         if query(&folder)? != expected {
-            bail!("计划任务已被外部修改；本次操作取消");
+            bail!(crate::localization::FailureReason::TaskConflict);
         }
         let executable = std::env::current_exe()?.to_string_lossy().into_owned();
         let user = current_user_sid()?;
@@ -84,7 +84,7 @@ pub(super) fn execute() -> Result<()> {
         match replacement {
             Some(xml) => {
                 if TaskDefinition::parse(&xml)?.policy.highest && !is_running_as_admin()? {
-                    bail!("最高权限自启动需要以管理员身份运行应用；不会自动提权");
+                    bail!(crate::localization::FailureReason::TaskElevation);
                 }
                 unsafe {
                     folder.RegisterTask(

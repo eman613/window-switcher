@@ -127,7 +127,7 @@ impl TaskDefinition {
 
     pub(crate) fn require_owner(&self, executable: &str, user: &str) -> Result<()> {
         if !matches_executable(&self.command, executable) || self.user != user {
-            bail!("同名计划任务属于其他程序路径或用户；未修改该任务");
+            bail!(crate::localization::FailureReason::TaskOwner);
         }
         Ok(())
     }

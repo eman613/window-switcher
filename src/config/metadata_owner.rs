@@ -12,6 +12,7 @@ use windows::{
 };
 
 use super::file_identity::handle;
+use crate::localization::FailureReason;
 
 pub(super) fn preserve_owner(
     candidate: &File,
@@ -38,7 +39,16 @@ pub(super) fn preserve_owner(
         )
     }
     .ok()
-    .context("无法为 INI 空候选文件保留原所有者；原文件未修改")?;
+    .map_err(|error| {
+        warn!(
+            "config stage=metadata-owner hresult={:#010x}",
+            error.code().0
+        );
+        let code = error.code().0 as u32;
+        anyhow::Error::new(error)
+            .context(crate::localization::SystemFailure(code))
+            .context(FailureReason::ConfigOwner)
+    })?;
     debug!("config stage=metadata candidate-owner-preserved");
     Ok(())
 }

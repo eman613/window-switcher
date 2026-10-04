@@ -23,6 +23,7 @@ use windows::Win32::{
 };
 
 use super::file_identity::handle;
+use crate::localization::FailureReason;
 
 // This bound is a safety invariant, not a user setting.
 const MAX_SECURITY_BYTES: usize = 256 * 1024;
@@ -43,9 +44,7 @@ impl PreservedMetadata {
         if security != candidate_security {
             super::metadata_owner::preserve_owner(candidate, &security, &candidate_security)?;
             if security != security_information(candidate)? {
-                bail!(
-                    "INI 与候选文件的所有者、权限或完整性标签不一致；不降低文件权限，原文件未修改"
-                );
+                bail!(FailureReason::ConfigSecurity);
             }
         }
         Ok(Self { basic, security })
@@ -187,7 +186,7 @@ fn require_supported_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> Result<()> 
     // identifies a SACL whose hidden audit entries cannot be compared safely.
     if control & SE_SACL_PRESENT.0 != 0 {
         warn!("config stage=metadata unsupported-sacl");
-        bail!("INI 含 SACL 审计或完整性安全元数据（control=0x{control:04x}）；当前自动保存无法保证完整保留，原文件未修改");
+        bail!(FailureReason::ConfigSacl);
     }
     Ok(())
 }

@@ -28,8 +28,15 @@ pub fn run_startup_helper() -> Option<i32> {
             // Only a bounded error string, never XML, usernames, or commands.
             let code = error
                 .downcast_ref::<windows::core::Error>()
-                .map_or(0, |error| error.code().0);
-            let message = format!("自启动系统操作失败（系统代码 0x{:08X}）；请检查权限、任务服务及启动项是否被外部修改", code as u32);
+                .map(|error| error.code().0 as u32);
+            let reason = error.downcast_ref::<crate::localization::FailureReason>();
+            let mut message = reason.map_or_else(
+                || "自启动请求被拒绝；请检查任务服务和启动项状态 [WS-TASK-REJECTED]".into(),
+                ToString::to_string,
+            );
+            if let Some(code) = code {
+                message.push_str(&format!("\n{}", crate::localization::SystemFailure(code)));
+            }
             let _ = helper::write_text(&mut std::io::stdout(), Some(&message));
             Some(1)
         }

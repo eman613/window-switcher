@@ -56,7 +56,12 @@ impl App {
     }
 
     pub(super) fn report_failure(&mut self, kind: crate::localization::FailureKind, detail: &str) {
-        error!("application stage=operation-failed");
+        let reason = crate::localization::FailureReason::from_detail(detail);
+        error!(
+            "application stage=operation-failed category={kind:?} reason={} hresult={:?}",
+            reason.map_or("unclassified", |reason| reason.code()),
+            crate::localization::system_code(detail)
+        );
         self.notify(
             self.text.error_title(),
             &self.text.failure(kind, detail),
