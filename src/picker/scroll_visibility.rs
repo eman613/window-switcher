@@ -24,16 +24,23 @@ pub(super) fn reveal(state: &ViewState) {
         return;
     }
     if let Ok(parent) = unsafe { GetParent(state.list.get()) } {
-        state.scroll_hint.set(true);
+        if !scrollbar::has_overflow(parent, state) {
+            return;
+        }
+        let changed = !state.scroll_hint.replace(true);
         if unsafe { SetTimer(Some(parent), TIMER, 1200, None) } == 0 {
             warn!("search stage=scroll-indicator timer-failed; keeping indicator visible");
         }
-        scrollbar::invalidate(state);
+        if changed {
+            debug!("search stage=scroll-indicator visible=true");
+            scrollbar::invalidate(state);
+        }
     }
 }
 
 pub(super) fn hide(hwnd: HWND, state: &ViewState) {
     if state.scroll_hint.replace(false) {
+        debug!("search stage=scroll-indicator visible=false");
         if let Err(error) = unsafe { KillTimer(Some(hwnd), TIMER) } {
             debug!("search stage=scroll-timer-stop code={:#x}", error.code().0);
         }

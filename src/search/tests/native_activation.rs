@@ -14,10 +14,19 @@ use windows::Win32::{
 #[test]
 #[ignore = "requires an interactive desktop; temporarily focuses an owned search window and moves the mouse"]
 fn real_mouse_confirms_a_displayed_result_while_background_refresh_is_pending() {
+    exercise_mouse_refresh(false);
+    exercise_mouse_refresh(true);
+}
+
+fn exercise_mouse_refresh(deliver_while_held: bool) {
     struct Restore(POINT, HWND);
     impl Drop for Restore {
         fn drop(&mut self) {
             unsafe {
+                let _ = SendInput(
+                    &[mouse_input(MOUSEEVENTF_LEFTUP)],
+                    std::mem::size_of::<INPUT>() as i32,
+                );
                 let _ = SetCursorPos(self.0.x, self.0.y);
                 let _ = SetForegroundWindow(self.1);
             }
@@ -67,21 +76,33 @@ fn real_mouse_confirms_a_displayed_result_while_background_refresh_is_pending() 
     );
     unsafe { SetCursorPos(point.x, point.y) }.unwrap();
     for flags in [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP] {
-        let input = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dwFlags: flags,
-                    ..Default::default()
-                },
-            },
-        };
+        assert_eq!(unsafe { GetForegroundWindow() }, session.hwnd());
+        let input = mouse_input(flags);
         assert_eq!(
             unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) },
             1
         );
         std::thread::sleep(Duration::from_millis(30));
         pump();
+        if flags == MOUSEEVENTF_LEFTDOWN && deliver_while_held {
+            // Consume the same row update used by SearchSession::poll before
+            // release, rather than keeping the worker pending throughout.
+            session
+                .window
+                .replace_rows(
+                    session
+                        .results
+                        .iter()
+                        .map(|entry| entry.row(session.text))
+                        .collect(),
+                    0,
+                    8,
+                )
+                .unwrap();
+            session.displayed_generation = 8;
+            session.pending = false;
+            pump();
+        }
     }
     loop {
         pump();
@@ -94,5 +115,17 @@ fn real_mouse_confirms_a_displayed_result_while_background_refresh_is_pending() 
             None => assert!(Instant::now() < deadline, "mouse confirmation was lost"),
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn mouse_input(flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dwFlags: flags,
+                ..Default::default()
+            },
+        },
     }
 }

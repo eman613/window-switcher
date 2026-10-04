@@ -5,7 +5,7 @@ use windows::{
     Win32::{
         Foundation::{LPARAM, WPARAM},
         UI::{
-            Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus},
+            Input::KeyboardAndMouse::{EnableWindow, GetFocus, IsWindowEnabled, SetFocus},
             WindowsAndMessaging::*,
         },
     },
@@ -17,7 +17,6 @@ impl PickerWindow {
         self.state().busy.set(true);
         self.state().accept.set(None);
         self.state().hover.set(None);
-        self.state().pressed.set(None);
         unsafe {
             SendMessageW(list, WM_SETREDRAW, Some(WPARAM(0)), None);
         }
@@ -65,13 +64,15 @@ impl PickerWindow {
         self.state().busy.set(false);
         unsafe {
             let focused_list = GetFocus() == list;
-            let _ = EnableWindow(list, !empty);
+            if IsWindowEnabled(list).as_bool() == empty {
+                let _ = EnableWindow(list, !empty);
+            }
             if empty && focused_list && GetForegroundWindow() == self.hwnd {
                 let _ = SetFocus(Some(self.state().focus_target()));
                 debug!("picker stage=empty-focus moved-to-recovery");
             }
         }
-        super::scrollbar::invalidate(self.state());
+        super::scrollbar::refresh(self.state());
         self.controls().refresh_notice(self.state())
     }
 }

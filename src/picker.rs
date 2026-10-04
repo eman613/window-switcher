@@ -10,6 +10,7 @@ mod list;
 pub(crate) mod messages;
 mod paint;
 mod placement;
+mod repaint;
 mod rows;
 mod scroll_visibility;
 mod scrollbar;
@@ -134,6 +135,11 @@ impl PickerWindow {
             visual: RefCell::new(rows::PickerVisual::default()),
             hover: Cell::new(None),
             pressed: Cell::new(None),
+            pointer: Cell::new(None),
+            scroll_hot: Cell::new(false),
+            scroll_geometry: Cell::new(None),
+            row_buffer: RefCell::new(None),
+            status_text: RefCell::new(String::new()),
             hot_control: Cell::new(HWND::default()),
             paint_error: Cell::new(false),
             reset_scroll: Cell::new(true),
@@ -283,6 +289,12 @@ impl PickerWindow {
         self.state().failed.set(false);
         self.state().hover.set(None);
         self.state().pressed.set(None);
+        self.state().pointer.set(None);
+        self.state().scroll_hot.set(false);
+        self.state().scroll_geometry.set(None);
+        if let Ok(mut buffer) = self.state().row_buffer.try_borrow_mut() {
+            *buffer = None;
+        }
         self.state().hot_control.set(HWND::default());
         if let Ok(mut visual) = self.state().visual.try_borrow_mut() {
             visual.rows.clear();
@@ -388,8 +400,12 @@ impl PickerWindow {
     }
     pub(crate) fn status(&self, value: &str) -> Result<()> {
         self.require_live()?;
+        if *self.state().status_text.borrow() == value {
+            return Ok(());
+        }
         unsafe {
             SetWindowTextW(self.controls().status, &HSTRING::from(value))?;
+            *self.state().status_text.borrow_mut() = value.to_owned();
             windows::Win32::UI::Accessibility::NotifyWinEvent(
                 EVENT_OBJECT_NAMECHANGE,
                 self.controls().status,

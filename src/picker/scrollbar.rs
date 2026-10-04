@@ -150,7 +150,32 @@ pub(super) fn wheel(state: &ViewState, wparam: WPARAM) -> bool {
 
 pub(super) fn invalidate(state: &ViewState) {
     if state.kind == ViewKind::Search {
-        let _ = unsafe { InvalidateRect(Some(state.list.get()), None, false) };
+        let mut rect = RECT::default();
+        if unsafe { GetClientRect(state.list.get(), &mut rect) }.is_ok() {
+            rect.left = (rect.right - px(14, state.dpi.get())).max(rect.left);
+            let _ = unsafe { InvalidateRect(Some(state.list.get()), Some(&rect), false) };
+        }
+    }
+}
+
+pub(super) fn has_overflow(hwnd: HWND, state: &ViewState) -> bool {
+    geometry(hwnd, state).is_some()
+}
+
+pub(super) fn refresh(state: &ViewState) {
+    if state.kind != ViewKind::Search {
+        return;
+    }
+    let Ok(parent) = (unsafe { GetParent(state.list.get()) }) else {
+        return;
+    };
+    let signature = geometry(parent, state)
+        .map(|g| (g.track.right, g.track.bottom, g.thumb.top, g.thumb.bottom));
+    if state.scroll_geometry.replace(signature) != signature {
+        invalidate(state);
+    }
+    if signature.is_none() {
+        super::scroll_visibility::hide(parent, state);
     }
 }
 
@@ -305,7 +330,12 @@ pub(super) unsafe fn handle(
     if state.scroll_mode.get() == crate::config::ScrollBarMode::Hidden {
         return None;
     }
-    if x >= g.track.left && x < g.track.right && y >= g.track.top && y < g.track.bottom {
+    if msg == WM_LBUTTONDOWN
+        && x >= g.track.left
+        && x < g.track.right
+        && y >= g.track.top
+        && y < g.track.bottom
+    {
         super::scroll_visibility::reveal(state);
     }
     if msg == WM_LBUTTONDOWN {
@@ -332,13 +362,15 @@ pub(super) unsafe fn handle(
     }
     if let Some(grab) = state.scroll_drag.get() {
         let top = position(y, grab, &g);
-        SendMessageW(
-            state.list.get(),
-            LB_SETTOPINDEX,
-            Some(WPARAM(top as usize)),
-            None,
-        );
-        state.signal(0);
+        if top != g.top {
+            SendMessageW(
+                state.list.get(),
+                LB_SETTOPINDEX,
+                Some(WPARAM(top as usize)),
+                None,
+            );
+            state.signal(0);
+        }
         return Some(LRESULT(0));
     }
     None

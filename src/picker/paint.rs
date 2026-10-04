@@ -188,27 +188,29 @@ pub(super) fn item(state: &ViewState, item: &DRAWITEMSTRUCT) -> Result<bool> {
         return Ok(false);
     };
     if item.CtlType == ODT_LISTBOX && item.CtlID as usize == LIST_ID {
-        if let Some(row) = visual.rows.get(item.itemID as usize) {
-            draw_row(
-                item.hDC,
-                item.rcItem,
-                row,
-                skin,
-                RowState {
-                    selected: item.itemState.0 & ODS_SELECTED.0 != 0,
-                    focused: item.itemState.0 & ODS_FOCUS.0 != 0,
-                    hovered: state.hover.get() == Some(item.itemID as usize),
-                    pressed: state.pressed.get() == Some((state.epoch.get(), item.itemID as usize)),
-                    disabled: state.busy.get() || item.itemState.0 & ODS_DISABLED.0 != 0,
-                },
-                &visual.query,
-            )?;
-        } else {
-            rounded(item.hDC, item.rcItem, 0, skin.palette.surface, None)?;
-        }
-        drop(visual);
-        super::scrollbar::paint_row(state, item.hDC, item.rcItem)?;
-        return Ok(true);
+        return super::repaint::buffered(state, item.hDC, item.rcItem, |dc| {
+            if let Some(row) = visual.rows.get(item.itemID as usize) {
+                draw_row(
+                    dc,
+                    item.rcItem,
+                    row,
+                    skin,
+                    RowState {
+                        selected: item.itemState.0 & ODS_SELECTED.0 != 0,
+                        focused: item.itemState.0 & ODS_FOCUS.0 != 0,
+                        hovered: state.hover.get() == Some(item.itemID as usize),
+                        pressed: state.pressed.get() == Some(row.key.identity),
+                        disabled: state.busy.get() || item.itemState.0 & ODS_DISABLED.0 != 0,
+                    },
+                    &visual.query,
+                )?;
+            } else {
+                rounded(dc, item.rcItem, 0, skin.palette.surface, None)?;
+            }
+            super::scrollbar::paint_row(state, dc, item.rcItem)?;
+            Ok(())
+        })
+        .map(|()| true);
     }
     if item.CtlType == ODT_BUTTON && item.CtlID as usize == DISMISS_ID {
         ensure!(

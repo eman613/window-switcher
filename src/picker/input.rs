@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::InvalidateRect,
     UI::{
         Controls::WM_MOUSELEAVE,
@@ -133,37 +133,51 @@ pub(super) unsafe extern "system" fn control_proc(
             }
             match msg {
                 WM_MOUSEMOVE => {
-                    super::scroll_visibility::reveal(state);
-                    let hover = item_at(hwnd, lparam);
-                    if state.hover.replace(hover) != hover {
-                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    let mut point = POINT::default();
+                    if GetCursorPos(&mut point).is_ok()
+                        && state.pointer.replace(Some((point.x, point.y)))
+                            != Some((point.x, point.y))
+                    {
+                        super::scroll_visibility::reveal(state);
                     }
+                    if let Ok(parent) = GetParent(hwnd) {
+                        let hot = super::scrollbar::pointer_on_track(parent, state);
+                        if state.scroll_hot.replace(hot) != hot {
+                            super::scrollbar::invalidate(state);
+                        }
+                    }
+                    let hover = item_at(hwnd, lparam);
+                    super::repaint::hover(state, hover);
                     track(hwnd);
                 }
                 WM_MOUSELEAVE => {
-                    state.hover.set(None);
-                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    state.pointer.set(None);
+                    super::repaint::hover(state, None);
+                    if state.scroll_hot.replace(false) {
+                        super::scrollbar::invalidate(state);
+                    }
                 }
                 WM_LBUTTONDOWN if !state.busy.get() => {
-                    state
-                        .pressed
-                        .set(item_at(hwnd, lparam).map(|index| (state.epoch.get(), index)));
-                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    super::repaint::pressed(
+                        state,
+                        item_at(hwnd, lparam)
+                            .and_then(|index| super::repaint::identity(state, index)),
+                    );
                 }
                 WM_LBUTTONUP => {
-                    let pressed = state.pressed.take();
+                    let pressed = state.pressed.get();
+                    super::repaint::pressed(state, None);
                     let result = DefSubclassProc(hwnd, msg, wparam, lparam);
-                    if pressed.is_some_and(|(epoch, index)| {
-                        epoch == state.epoch.get() && Some(index) == item_at(hwnd, lparam)
-                    }) {
-                        state.accept();
+                    if let Some(index) = item_at(hwnd, lparam) {
+                        if pressed.is_some() && pressed == super::repaint::identity(state, index) {
+                            SendMessageW(hwnd, LB_SETCURSEL, Some(WPARAM(index)), None);
+                            state.accept();
+                        }
                     }
-                    let _ = InvalidateRect(Some(hwnd), None, false);
                     return result;
                 }
                 WM_CAPTURECHANGED | WM_CANCELMODE => {
-                    state.pressed.set(None);
-                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    super::repaint::pressed(state, None);
                 }
                 WM_VSCROLL => {
                     state.hover.set(None);

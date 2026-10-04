@@ -284,3 +284,83 @@ fn hidden_scrollbar_keeps_wheel_and_auto_indicator_has_a_bounded_lifetime() {
     assert!(unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0 <= 10);
     assert_eq!(search.selected(), Some(0));
 }
+
+#[test]
+fn identical_refresh_and_stationary_mouse_do_not_repaint_or_reveal_again() {
+    use windows::Win32::Graphics::Gdi::{GetUpdateRect, ValidateRect};
+    let search = fixture();
+    let state = search.state();
+    let list = search.controls().list;
+    let point = LPARAM((12 << 16) | 30);
+    unsafe {
+        let _ = ShowWindow(search.hwnd, SW_SHOWNOACTIVATE);
+        SendMessageW(list, WM_MOUSEMOVE, None, Some(point));
+    }
+    scroll_visibility::hide(search.hwnd, state);
+    unsafe {
+        let _ = ValidateRect(Some(list), None);
+    }
+    for epoch in 2..8 {
+        search
+            .replace_rows(
+                (0..40).map(|index| row(index, "Window")).collect(),
+                0,
+                epoch,
+            )
+            .unwrap();
+        unsafe {
+            SendMessageW(list, WM_MOUSEMOVE, None, Some(point));
+        }
+        assert!(
+            !state.scroll_hint.get(),
+            "stationary messages must not reveal a hidden indicator"
+        );
+        assert!(
+            !unsafe { GetUpdateRect(list, None, false) }.as_bool(),
+            "unchanged rows must not invalidate the list"
+        );
+    }
+}
+
+#[test]
+fn hover_invalidates_only_the_previous_and_current_rows() {
+    use windows::Win32::Graphics::Gdi::{GetUpdateRect, ValidateRect};
+    let search = fixture();
+    let state = search.state();
+    let list = search.controls().list;
+    let height = unsafe { SendMessageW(list, LB_GETITEMHEIGHT, Some(WPARAM(0)), None) }.0 as i32;
+    unsafe {
+        let _ = ShowWindow(search.hwnd, SW_SHOWNOACTIVATE);
+    }
+    super::super::repaint::hover(state, Some(0));
+    unsafe {
+        let _ = ValidateRect(Some(list), None);
+    }
+    super::super::repaint::hover(state, Some(1));
+    let mut update = windows::Win32::Foundation::RECT::default();
+    assert!(unsafe { GetUpdateRect(list, Some(&mut update), false) }.as_bool());
+    assert_eq!((update.top, update.bottom), (0, height * 2));
+}
+
+#[test]
+fn held_identity_survives_same_query_rows_but_not_removal_or_query_change() {
+    let search = fixture();
+    let state = search.state();
+    let identity = state.visual.borrow().rows[0].key.identity;
+    state.pressed.set(Some(identity));
+    search
+        .replace_rows(
+            (0..40).rev().map(|index| row(index, "Window")).collect(),
+            0,
+            2,
+        )
+        .unwrap();
+    assert_eq!(state.pressed.get(), Some(identity));
+    search
+        .replace_rows((1..40).map(|index| row(index, "Window")).collect(), 0, 3)
+        .unwrap();
+    assert_eq!(state.pressed.get(), None);
+    state.pressed.set(Some(identity));
+    state.changed();
+    assert_eq!(state.pressed.get(), None);
+}

@@ -65,7 +65,12 @@ pub(super) struct ViewState {
     pub query_bottom: Cell<i32>,
     pub visual: RefCell<PickerVisual>,
     pub hover: Cell<Option<usize>>,
-    pub pressed: Cell<Option<(u64, usize)>>,
+    pub pressed: Cell<Option<crate::utils::window_identity::WindowIdentity>>,
+    pub pointer: Cell<Option<(i32, i32)>>,
+    pub scroll_hot: Cell<bool>,
+    pub scroll_geometry: Cell<Option<(i32, i32, i32, i32)>>,
+    pub row_buffer: RefCell<Option<crate::render_surface::RenderSurface>>,
+    pub status_text: RefCell<String>,
     pub hot_control: Cell<HWND>,
     pub paint_error: Cell<bool>,
     pub reset_scroll: Cell<bool>,
@@ -93,7 +98,7 @@ impl ViewState {
 
     pub(super) fn signal(&self, flags: u32) {
         if self.visible.get() {
-            super::scrollbar::invalidate(self);
+            super::scrollbar::refresh(self);
             self.flags.set(self.flags.get() | flags);
             self.target.try_post(WM_INPUT_READY);
         }

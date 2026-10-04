@@ -96,6 +96,14 @@ impl PickerWindow {
                 }
             }
             visual.rows = rows;
+            if self
+                .state()
+                .pressed
+                .get()
+                .is_some_and(|identity| !visual.rows.iter().any(|row| row.key.identity == identity))
+            {
+                self.state().pressed.set(None);
+            }
         }
         if unchanged {
             debug!("search stage=refresh retained-viewport top={top}");
