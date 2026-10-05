@@ -1,6 +1,7 @@
 use super::*;
 
 mod creation;
+mod early_failure;
 mod menu;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, IsWindow, SendMessageW,
