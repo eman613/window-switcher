@@ -94,6 +94,16 @@ impl App {
             .transpose()?
             .flatten();
         match action {
+            Some(DetailsAction::Close(record)) => {
+                let message = self.request_window_close(
+                    record.identity,
+                    &record.process.executable,
+                    SwitchKind::Apps,
+                );
+                if let Some(details) = &self.details {
+                    details.close_status(message)?;
+                }
+            }
             Some(DetailsAction::Cancel) => self.complete_switch(),
             Some(DetailsAction::Back) => {
                 self.cancel_preview();

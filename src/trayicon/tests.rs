@@ -20,6 +20,8 @@ fn menu_state(configuration: &Config) -> TrayMenuState<'_> {
         restarting: false,
         settings_busy: false,
         pending_settings: false,
+        report_busy: false,
+        report_available: false,
     }
 }
 

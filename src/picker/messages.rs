@@ -39,6 +39,7 @@ pub(crate) const RELAYOUT: u32 = 4;
 pub(crate) const BACK: u32 = 8;
 
 pub(super) struct ViewState {
+    pub close: super::close_confirmation::CloseState,
     pub announcer: RefCell<Option<crate::accessibility::announcement::Announcer>>,
     pub alive: Cell<bool>,
     pub target: Arc<WindowTarget>,
@@ -98,6 +99,10 @@ impl ViewState {
     }
 
     pub(super) fn signal(&self, flags: u32) {
+        if flags & (CHANGED | CANCEL | BACK) != 0 {
+            self.close.cancel();
+        }
+        super::close_confirmation::refresh(self);
         if self.visible.get() {
             if flags & (CHANGED | CANCEL | BACK) != 0 {
                 self.cancel_announcement(true);
@@ -111,6 +116,8 @@ impl ViewState {
     }
 
     pub(super) fn changed(&self) {
+        self.close.cancel();
+        super::close_confirmation::refresh(self);
         self.cancel_announcement(true);
         self.reset_scroll.set(true);
         self.wheel_remainder.set(0);
@@ -144,6 +151,15 @@ impl ViewState {
     }
 
     pub(super) fn command(&self, id: usize) {
+        if matches!(
+            id,
+            super::close_confirmation::CLOSE
+                | super::close_confirmation::YES
+                | super::close_confirmation::NO
+        ) {
+            super::close_confirmation::native_command(self, id);
+            return;
+        }
         match id {
             BACK_ID => self.signal(BACK),
             DISMISS_ID => {
@@ -184,6 +200,28 @@ pub(super) unsafe extern "system" fn window_proc(
             return result;
         }
         match msg {
+            WM_DRAWITEM if lparam.0 != 0 => {
+                let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
+                match super::close_confirmation::draw(state, item) {
+                    Ok(true) => return LRESULT(1),
+                    Err(error) => {
+                        state.paint_result(Err(error));
+                        return LRESULT(1);
+                    }
+                    Ok(false) => {
+                        if state.kind == ViewKind::Search {
+                            match super::paint::item(state, item) {
+                                Ok(true) => return LRESULT(1),
+                                Err(error) => {
+                                    state.paint_result(Err(error));
+                                    return LRESULT(1);
+                                }
+                                Ok(false) => {}
+                            }
+                        }
+                    }
+                }
+            }
             WM_NCDESTROY => {
                 if let Ok(announcer) = state.announcer.try_borrow() {
                     if let Some(announcer) = announcer.as_ref() {
@@ -273,7 +311,7 @@ pub(super) unsafe extern "system" fn window_proc(
                     state.accept();
                 }
                 if id == LIST_ID && notification == LBN_SELCHANGE {
-                    state.announce();
+                    state.signal(0);
                 }
                 if notification == BN_CLICKED {
                     state.command(id);
@@ -290,17 +328,6 @@ pub(super) unsafe extern "system" fn window_proc(
                         .unwrap_or(px(64, state.dpi.get()))
                         as u32;
                     return LRESULT(1);
-                }
-            }
-            WM_DRAWITEM if state.kind == ViewKind::Search && lparam.0 != 0 => {
-                let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
-                match super::paint::item(state, item) {
-                    Ok(true) => return LRESULT(1),
-                    Ok(false) => {}
-                    Err(error) => {
-                        state.paint_result(Err(error));
-                        return LRESULT(1);
-                    }
                 }
             }
             WM_PAINT if state.kind == ViewKind::Search => {

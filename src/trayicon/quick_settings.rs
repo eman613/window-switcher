@@ -30,6 +30,7 @@ use QuickSetting as Setting;
 use QuickSettingsGroup as Group;
 
 const ITEMS: &[(u32, Group, Setting)] = &[
+    (127, Group::Windows, Setting::CloseEnabled),
     (100, Group::Appearance, Setting::Theme(Theme::Auto)),
     (101, Group::Appearance, Setting::Theme(Theme::Light)),
     (102, Group::Appearance, Setting::Theme(Theme::Dark)),
@@ -201,6 +202,18 @@ pub(super) fn build(state: TrayMenuState<'_>, text: Text) -> Result<Menu> {
     )?;
     menu.item(IDM_APPLY_SETTINGS, text.apply_settings(), false, busy)?;
     menu.item(IDM_CONFIGURE, text.configure(), false, false)?;
+    menu.item(
+        crate::app::IDM_REPORT,
+        text.report_label(),
+        false,
+        state.report_busy || state.restarting,
+    )?;
+    menu.item(
+        crate::app::IDM_REPORT_OPEN,
+        text.report_open(),
+        false,
+        state.report_busy || !state.report_available,
+    )?;
     menu.separator()?;
     menu.item(IDM_EXIT, text.exit(), false, false)?;
     Ok(menu)

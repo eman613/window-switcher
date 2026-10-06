@@ -394,6 +394,7 @@ impl App {
         self.startup.cancel();
         self.pause.cancel();
         self.quick_settings.cancel();
+        self.report.cancel();
         self.config_watcher.take();
         if let Some(activation) = &self.lifecycle.activation {
             let _ = activation.request(false);

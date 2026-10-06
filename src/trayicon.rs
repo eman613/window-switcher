@@ -35,6 +35,8 @@ pub(crate) struct TrayMenuState<'a> {
     pub(crate) restarting: bool,
     pub(crate) settings_busy: bool,
     pub(crate) pending_settings: bool,
+    pub(crate) report_busy: bool,
+    pub(crate) report_available: bool,
     pub(crate) configuration: &'a Config,
 }
 

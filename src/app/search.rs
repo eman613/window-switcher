@@ -45,6 +45,16 @@ impl App {
             .transpose()?
             .flatten();
         match action {
+            Some(SearchAction::Close(entry)) => {
+                let message = self.request_window_close(
+                    entry.identity,
+                    &entry.executable,
+                    SwitchKind::Search,
+                );
+                if let Some(search) = &self.search {
+                    search.close_status(message)?;
+                }
+            }
             Some(SearchAction::Cancel) => self.complete_switch(),
             Some(SearchAction::Activate(entry)) => {
                 self.cancel_preview();

@@ -33,6 +33,7 @@ mod search;
 mod startup;
 mod text_raster;
 mod trayicon;
+mod window_actions;
 mod window_details;
 mod window_snapshot;
 mod window_target;

@@ -63,6 +63,7 @@ struct SearchResults {
 pub(crate) enum SearchAction {
     Cancel,
     Activate(SearchEntry),
+    Close(SearchEntry),
 }
 
 pub(crate) struct SearchSession {
@@ -173,6 +174,9 @@ impl SearchSession {
         }
         Ok(())
     }
+    pub(crate) fn close_status(&self, message: &str) -> Result<()> {
+        self.window.close_status(message)
+    }
     pub(crate) fn invalidate(&mut self) -> Result<()> {
         self.service.cancel();
         self.source = None;
@@ -216,6 +220,18 @@ impl SearchSession {
         // Confirm the identity the user saw, before a background result can
         // reorder the list. App::poll_search still revalidates it before focus.
         if events.flags & messages::CHANGED == 0 && self.window.selection_available() {
+            if let Some((_, index, identity)) = events
+                .close
+                .filter(|(epoch, _, _)| *epoch == self.displayed_generation)
+            {
+                if let Some(entry) = self
+                    .results
+                    .get(index)
+                    .filter(|entry| entry.identity == identity)
+                {
+                    return Ok(Some(SearchAction::Close(entry.clone())));
+                }
+            }
             if let Some((_, index)) = events
                 .accept
                 .filter(|(epoch, _)| *epoch == self.displayed_generation)
@@ -263,6 +279,13 @@ impl SearchSession {
             )?;
             self.window
                 .result_count(result.entries.len(), result.total)?;
+            self.window.close_targets(
+                result
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.identity, crate::picker::label(&entry.title)))
+                    .collect(),
+            );
             self.results = result.entries;
             self.displayed_generation = generation;
             self.window.fit_results(self.results.len())?;

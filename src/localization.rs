@@ -1,5 +1,6 @@
 use crate::{config::Language, startup::StartupState};
 use std::sync::atomic::{AtomicBool, Ordering};
+mod actions;
 mod failure;
 mod quick_settings;
 mod search;

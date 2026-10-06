@@ -7,6 +7,7 @@ use super::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QuickSetting {
+    CloseEnabled,
     Theme(Theme),
     Names,
     Badges,
@@ -25,6 +26,7 @@ pub(crate) enum QuickSetting {
 impl QuickSetting {
     pub(crate) fn key(self) -> (&'static str, &'static str) {
         match self {
+            Self::CloseEnabled => ("window-actions", "close_enable"),
             Self::Theme(_) => ("appearance", "theme"),
             Self::Names => ("appearance", "app_name_mode"),
             Self::Badges => ("switch-apps", "show_badge"),
@@ -44,6 +46,7 @@ impl QuickSetting {
     pub(crate) fn value(self, config: &Config) -> String {
         let boolean = |value| if value { "yes" } else { "no" }.to_owned();
         match self {
+            Self::CloseEnabled => boolean(config.close_enable),
             Self::Theme(_) => config.theme.to_string(),
             Self::Names => config.app_name_mode.to_string(),
             Self::Badges => boolean(config.switch_apps_show_badge),
@@ -63,6 +66,7 @@ impl QuickSetting {
     pub(crate) fn changed_value(self, config: &Config) -> Result<String> {
         let mut changed = config.clone();
         match self {
+            Self::CloseEnabled => changed.close_enable = !config.close_enable,
             Self::Theme(value) => changed.theme = value,
             Self::Names => {
                 changed.app_name_mode = if config.app_name_mode == AppNameMode::Off {
@@ -95,6 +99,7 @@ impl QuickSetting {
 
     pub(crate) fn checked(self, config: &Config) -> bool {
         match self {
+            Self::CloseEnabled => config.close_enable,
             Self::Theme(value) => config.theme == value,
             Self::Names => config.app_name_mode == AppNameMode::Selected,
             Self::Badges => config.switch_apps_show_badge,

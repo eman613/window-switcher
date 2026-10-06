@@ -50,7 +50,13 @@ pub(super) struct Controls {
     styled: Option<(Config, u32)>,
 }
 
-fn child(parent: HWND, class: PCWSTR, name: &str, style: WINDOW_STYLE, id: usize) -> Result<HWND> {
+pub(super) fn child(
+    parent: HWND,
+    class: PCWSTR,
+    name: &str,
+    style: WINDOW_STYLE,
+    id: usize,
+) -> Result<HWND> {
     unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -156,6 +162,7 @@ impl Controls {
         };
         state.clear.set(clear);
         state.dismiss.set(dismiss);
+        super::close_confirmation::create(parent, state)?;
         let notice = if search {
             child(
                 parent,
@@ -258,7 +265,7 @@ impl Controls {
         unsafe { GetClientRect(parent, &mut bounds) }.context("search stage=client-bounds")?;
         let top = unsafe { SendMessageW(self.list, LB_GETTOPINDEX, None, None) };
         let (row_height, text_height) = self.metrics(state, dpi);
-        let layout = PickerLayout::calculate(
+        let mut layout = PickerLayout::calculate(
             bounds.right,
             bounds.bottom,
             dpi,
@@ -267,6 +274,9 @@ impl Controls {
             text_height,
             state.help_open.get() || state.truncated.get(),
         )?;
+        if state.kind == ViewKind::Details && super::close_confirmation::enabled(state) {
+            layout.list.right -= px(59, dpi);
+        }
         state.query_bottom.set(layout.query_bottom);
         for (hwnd, rect) in [
             (self.label, layout.label),
@@ -343,6 +353,7 @@ impl Controls {
     }
 
     pub(super) fn refresh_notice(&self, state: &ViewState) -> Result<()> {
+        super::close_confirmation::refresh(state);
         if state.kind != ViewKind::Search {
             return Ok(());
         }

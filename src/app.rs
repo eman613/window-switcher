@@ -40,10 +40,12 @@ mod panel;
 mod pause;
 mod pointer;
 mod preview;
+mod report;
 mod runtime;
 mod search;
 mod settings;
 mod switching;
+mod window_actions;
 mod window_cycle;
 
 pub use bootstrap::run;
@@ -59,6 +61,8 @@ pub const IDM_CONFIGURE: u32 = 3;
 pub const IDM_PAUSE: u32 = 4;
 pub const IDM_ELEVATE: u32 = 5;
 pub const IDM_APPLY_SETTINGS: u32 = 6;
+pub const IDM_REPORT: u32 = 7;
+pub const IDM_REPORT_OPEN: u32 = 8;
 
 pub fn start(loaded: &LoadedConfig) -> Result<()> {
     let instance = crate::utils::SingleInstance::create(crate::utils::INSTANCE_NAME)?;
@@ -79,6 +83,7 @@ struct App {
     startup: Startup,
     pause: crate::pause::PauseControl,
     quick_settings: settings::QuickSettingsState,
+    report: report::ReportState,
     config: Config,
     config_watcher: Option<ConfigWatcher>,
     switch_windows_state: SwitchWindowsState,
@@ -128,6 +133,8 @@ impl App {
                                         crate::startup::StartupState::Saved(_)
                                     ),
                                 configuration: self.quick_settings.configuration(&self.config),
+                                report_busy: self.report.busy(),
+                                report_available: self.report.available(),
                             },
                             self.text,
                         )? {
@@ -149,6 +156,8 @@ impl App {
 
     fn handle_command(&mut self, command: u32) -> Result<()> {
         match command {
+            IDM_REPORT => self.export_report(),
+            IDM_REPORT_OPEN => self.open_report(),
             IDM_EXIT => self.request_exit(),
             IDM_STARTUP => self.toggle_startup()?,
             IDM_PAUSE => self.toggle_pause()?,

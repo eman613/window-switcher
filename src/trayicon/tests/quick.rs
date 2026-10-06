@@ -35,6 +35,7 @@ fn every_quick_command_persists_its_value_and_rebuilds_the_native_checkmark() {
             | QuickSetting::Topmost
             | QuickSetting::HiddenMinimized
             | QuickSetting::SearchEnabled
+            | QuickSetting::CloseEnabled
             | QuickSetting::Field(_) => !setting.checked(&original.config),
             _ => true,
         };
@@ -48,5 +49,5 @@ fn every_quick_command_persists_its_value_and_rebuilds_the_native_checkmark() {
             .unwrap()
             .contains("untouched=keep"));
     }
-    assert_eq!(checked_commands, 24);
+    assert_eq!(checked_commands, 25);
 }

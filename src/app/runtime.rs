@@ -142,6 +142,7 @@ pub(super) fn run(
                 target.clone(),
             ),
             config: loaded.config.clone(),
+            report: super::report::ReportState::new(target.clone()),
             trayicon: loaded.config.trayicon.then(TrayIcon::create).transpose()?,
             config_watcher: None,
             switch_windows_state: SwitchWindowsState {

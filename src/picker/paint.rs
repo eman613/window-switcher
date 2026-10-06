@@ -63,6 +63,7 @@ fn draw_icon(
 }
 
 struct RowState {
+    close_enabled: bool,
     selected: bool,
     focused: bool,
     hovered: bool,
@@ -133,7 +134,13 @@ fn draw_row(
     )?;
     let left = bounds.left + p(25);
     // Keep text clear of the overlay's hit area without shortening the row fill.
-    let right = bounds.right - p(17);
+    let right = bounds.right
+        - p(17)
+        - if state.close_enabled {
+            p(28).min(height)
+        } else {
+            0
+        };
     let app_width = ((right - left) / 3).min(p(106));
     super::highlight::draw(
         dc,
@@ -196,6 +203,7 @@ pub(super) fn item(state: &ViewState, item: &DRAWITEMSTRUCT) -> Result<bool> {
                     row,
                     skin,
                     RowState {
+                        close_enabled: super::close_confirmation::enabled(state),
                         selected: item.itemState.0 & ODS_SELECTED.0 != 0,
                         focused: item.itemState.0 & ODS_FOCUS.0 != 0,
                         hovered: state.hover.get() == Some(item.itemID as usize),

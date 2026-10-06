@@ -144,8 +144,11 @@ fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage()
             (section, "exclude_processes", "app.exe", "bad\0.exe"),
         ]);
     }
+    cases.extend([
+        ("window-actions", "close_enable", "yes", "maybe"),
+        ("window-actions", "close_confirm", "no", "maybe"),
+    ]);
     let template = document::parse_ini(DEFAULT_CONFIG).unwrap();
-    assert_eq!(SETTINGS.len(), 124);
     assert_eq!(cases.len(), SETTINGS.len());
     assert_eq!(
         template

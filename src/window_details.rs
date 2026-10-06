@@ -16,6 +16,7 @@ pub(crate) enum DetailsAction {
     Cancel,
     Back,
     Activate(WindowRecord),
+    Close(WindowRecord),
 }
 
 pub(crate) struct WindowDetails {
@@ -97,6 +98,13 @@ impl WindowDetails {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("details stage=epoch exhausted"))?;
         self.window.replace(&labels, selected, self.epoch)?;
+        self.window.close_targets(
+            records
+                .iter()
+                .zip(&labels)
+                .map(|(record, label)| (record.identity, label.clone()))
+                .collect(),
+        );
         self.window
             .status(&self.text.details_status(records.len()))?;
         self.records = records;
@@ -125,12 +133,29 @@ impl WindowDetails {
         if events.flags & messages::RELAYOUT != 0 {
             self.window.layout()?;
         }
+        if let Some((_, index, identity)) =
+            events.close.filter(|(epoch, _, _)| *epoch == self.epoch)
+        {
+            if let Some(record) = self
+                .records
+                .get(index)
+                .filter(|record| record.identity == identity)
+            {
+                return Ok(Some(DetailsAction::Close(record.clone())));
+            }
+        }
         Ok(events
             .accept
             .filter(|(epoch, _)| *epoch == self.epoch)
             .and_then(|(_, index)| self.records.get(index))
             .cloned()
             .map(DetailsAction::Activate))
+    }
+}
+
+impl WindowDetails {
+    pub(crate) fn close_status(&self, message: &str) -> Result<()> {
+        self.window.close_status(message)
     }
 }
 

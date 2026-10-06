@@ -112,6 +112,7 @@ fn exercise_mouse_refresh(deliver_while_held: bool) {
                 break;
             }
             Some(SearchAction::Cancel) => panic!("fixture lost focus"),
+            Some(SearchAction::Close(_)) => panic!("activation unexpectedly requested close"),
             None => assert!(Instant::now() < deadline, "mouse confirmation was lost"),
         }
         std::thread::sleep(Duration::from_millis(5));

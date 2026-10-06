@@ -17,6 +17,7 @@ impl App {
             return;
         }
         self.poll_feedback();
+        self.poll_report();
         self.poll_pause();
         self.switching.paint_dirty |= self.painter.poll_fonts();
         if self.diagnostics.tick() {

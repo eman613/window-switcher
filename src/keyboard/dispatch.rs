@@ -265,6 +265,25 @@ impl InputDispatch {
         );
     }
 
+    pub(crate) fn diagnostic_counts(&self) -> [(&'static str, u64); 5] {
+        [
+            ("input_queued", self.queued.load(Ordering::Relaxed) as u64),
+            ("input_rejected", self.rejected.load(Ordering::Relaxed)),
+            (
+                "input_queue_full",
+                self.queue_full_rejections.load(Ordering::Relaxed),
+            ),
+            (
+                "input_disconnected",
+                self.disconnected_rejections.load(Ordering::Relaxed),
+            ),
+            (
+                "input_notify_deferred",
+                self.notification_deferrals.load(Ordering::Relaxed),
+            ),
+        ]
+    }
+
     #[cfg(test)]
     pub(super) fn callback_statistics(&self) -> (u64, u64) {
         (

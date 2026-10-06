@@ -10,6 +10,7 @@ use windows::Win32::{
 
 use crate::config::Config;
 
+pub(crate) mod report;
 pub(crate) mod thread_work;
 pub(crate) mod ui;
 

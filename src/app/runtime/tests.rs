@@ -137,6 +137,7 @@ fn native_fixture() -> NativeRuntimeFixture {
             feedback: Default::default(),
             text: crate::localization::Text::new(crate::config::Language::Chinese),
             diagnostics: Default::default(),
+            report: super::super::report::ReportState::new(target.clone()),
         }),
         target: target.clone(),
         accessible_root,

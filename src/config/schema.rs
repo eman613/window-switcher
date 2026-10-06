@@ -47,6 +47,8 @@ macro_rules! settings {
 }
 
 settings! {
+    close_enable: bool => ("window-actions", "close_enable", "no", boolean, "PickerWindow/WindowActions");
+    close_confirm: bool => ("window-actions", "close_confirm", "yes", boolean, "PickerWindow/CloseConfirmation");
     trayicon: bool => ("", "trayicon", "yes", boolean, "App::start_services");
     auto_restart: bool => ("", "auto_restart", "yes", boolean, "App::start_services");
     restart_delay_ms: u32 => ("", "restart_delay_ms", "1000", |v| integer(v, 200, 10000), "ConfigWatcher::start");

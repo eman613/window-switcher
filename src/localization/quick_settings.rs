@@ -20,6 +20,9 @@ impl Text {
 
     pub(crate) fn quick_setting(self, setting: QuickSetting) -> &'static str {
         match setting {
+            QuickSetting::CloseEnabled => {
+                self.choose("允许关闭选中窗口", "Allow closing selected windows")
+            }
             QuickSetting::Theme(Theme::Auto) => self.choose("跟随系统", "Follow system theme"),
             QuickSetting::Theme(Theme::Light) => self.choose("浅色", "Light"),
             QuickSetting::Theme(Theme::Dark) => self.choose("深色", "Dark"),

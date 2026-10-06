@@ -1,5 +1,6 @@
 //! Shared native list surface; search and details retain their own session models.
 mod announcement;
+mod close_confirmation;
 mod controls;
 mod drawing;
 #[cfg(test)]
@@ -59,6 +60,7 @@ pub(crate) enum ViewKind {
 }
 
 pub(crate) struct ViewEvents {
+    pub close: Option<close_confirmation::CloseEvent>,
     pub flags: u32,
     pub accept: Option<(u64, usize)>,
 }
@@ -109,6 +111,7 @@ impl PickerWindow {
             Ok(atom)
         })?;
         let state = Box::new(ViewState {
+            close: Default::default(),
             announcer: RefCell::new(None),
             alive: Cell::new(true),
             target,
@@ -249,6 +252,7 @@ impl PickerWindow {
     }
 
     pub(crate) fn show(&mut self, config: &Config, monitor: MonitorSnapshot) -> Result<()> {
+        self.state().close.configure(config);
         self.state().help_open.set(false);
         self.position(config, monitor)?;
         if self.state().kind == ViewKind::Search {
@@ -283,6 +287,7 @@ impl PickerWindow {
     }
 
     pub(crate) fn hide(&self) {
+        self.state().close.cancel();
         if !self.state().alive.get() {
             return;
         }
@@ -328,6 +333,7 @@ impl PickerWindow {
 
     pub(crate) fn take_events(&self) -> ViewEvents {
         ViewEvents {
+            close: self.state().close.request.take(),
             flags: self.state().flags.replace(0),
             accept: self.state().accept.take(),
         }
@@ -351,7 +357,9 @@ impl PickerWindow {
                 dpi,
             )?;
         }
-        self.controls().layout(self.hwnd, self.state(), dpi)
+        self.controls().layout(self.hwnd, self.state(), dpi)?;
+        close_confirmation::refresh(self.state());
+        Ok(())
     }
 
     pub(crate) fn fit_results(&mut self, count: usize) -> Result<()> {
@@ -440,6 +448,7 @@ impl PickerWindow {
     }
     pub(crate) fn pending(&self) -> Result<()> {
         self.require_live()?;
+        self.state().close.cancel();
         self.state().cancel_announcement(false);
         self.state().busy.set(true);
         self.state().failed.set(false);

@@ -65,6 +65,7 @@ unsafe fn tab(state: &ViewState, hwnd: HWND) {
             state.list.get(),
         ]
     };
+    controls.extend(super::close_confirmation::buttons(state));
     controls.retain(|control| {
         !control.is_invalid()
             && IsWindowEnabled(*control).as_bool()
@@ -100,6 +101,24 @@ pub(super) unsafe extern "system" fn control_proc(
     }
     if msg == WM_KEYUP && wparam.0 == VK_RETURN.0 as usize {
         state.suppress_enter.set(false);
+    }
+    if state.visible.get() && super::close_confirmation::buttons(state).contains(&hwnd) {
+        if msg == WM_LBUTTONDOWN || (msg == WM_KEYDOWN && wparam.0 == 0x20) {
+            super::close_confirmation::press(state, hwnd);
+        }
+        match msg {
+            WM_MOUSEMOVE => {
+                if state.hot_control.replace(hwnd) != hwnd {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                track(hwnd);
+            }
+            WM_MOUSELEAVE => {
+                state.hot_control.set(HWND::default());
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            _ => {}
+        }
     }
     if hwnd == state.edit.get() {
         match msg {
@@ -207,6 +226,20 @@ pub(super) unsafe extern "system" fn control_proc(
     if state.visible.get() && !state.composing.get() {
         if msg == WM_KEYDOWN || (msg == WM_SYSKEYDOWN && state.kind == ViewKind::Details) {
             match wparam.0 {
+                0x57 if GetKeyState(0x11) < 0 && GetKeyState(0x12) >= 0 => {
+                    if lparam.0 & (1 << 30) == 0 {
+                        super::close_confirmation::command(state, super::close_confirmation::CLOSE);
+                    }
+                    return LRESULT(0);
+                }
+                0x0d if super::close_confirmation::confirming(state) => {
+                    if lparam.0 & (1 << 30) == 0 {
+                        state.suppress_enter.set(true);
+                        super::close_confirmation::keyboard_confirm(state, hwnd);
+                    }
+                    return LRESULT(0);
+                }
+                0x1b if super::close_confirmation::escape(state) => return LRESULT(0),
                 0x41 if hwnd == state.edit.get() && GetKeyState(0x11) < 0 => {
                     SendMessageW(
                         hwnd,
@@ -223,6 +256,14 @@ pub(super) unsafe extern "system" fn control_proc(
                         state.command(CLEAR_ID);
                     } else if hwnd == state.dismiss.get() {
                         state.command(DISMISS_ID);
+                    } else if super::close_confirmation::buttons(state).contains(&hwnd) {
+                        if lparam.0 & (1 << 30) == 0 {
+                            state.suppress_enter.set(true);
+                            super::close_confirmation::command(
+                                state,
+                                super::close_confirmation::CLOSE,
+                            );
+                        }
                     } else {
                         state.accept();
                     }
@@ -261,11 +302,16 @@ pub(super) unsafe extern "system" fn control_proc(
                 _ => {}
             }
         }
-        if matches!(msg, WM_CHAR | WM_SYSCHAR) && matches!(wparam.0, 0x01 | 0x09 | 0x0d | 0x1b) {
+        if matches!(msg, WM_CHAR | WM_SYSCHAR)
+            && matches!(wparam.0, 0x01 | 0x09 | 0x0d | 0x1b | 0x17)
+        {
             return LRESULT(0);
         }
     }
     let result = DefSubclassProc(hwnd, msg, wparam, lparam);
+    if hwnd == state.list.get() && matches!(msg, WM_MOUSEWHEEL | WM_VSCROLL) {
+        super::close_confirmation::refresh(state);
+    }
     if hwnd == state.list.get() && msg == WM_KEYDOWN {
         super::scroll_visibility::reveal(state);
         state.signal(0);
