@@ -31,6 +31,7 @@ fn pending_session() -> (SearchSession, HWND) {
         minimized: false,
         title: "Displayed window".into(),
         app: "Fixture".into(),
+        highlights: RowHighlights::default(),
     };
     let edit = session
         .window

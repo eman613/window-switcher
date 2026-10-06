@@ -52,6 +52,7 @@ impl ReportSnapshot {
         value!("switch_windows_enabled", config.switch_windows_enable);
         value!("switch_apps_enabled", config.switch_apps_enable);
         value!("search_enabled", config.search_enable);
+        value!("search_pinyin", config.search_pinyin);
         value!("details_enabled", config.details_enable);
         value!("close_enabled", config.close_enable);
         value!("close_confirmation", config.close_confirm);

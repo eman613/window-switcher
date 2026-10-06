@@ -1,4 +1,4 @@
-//! Inline emphasis follows the matcher's Unicode and matching-mode rules.
+//! Draw validated worker-provided ranges without matching or transliteration.
 use super::{drawing::text, skin::SearchSkin};
 use crate::utils::gdi::SavedDc;
 use anyhow::{ensure, Result};
@@ -10,19 +10,26 @@ use windows::Win32::{
 pub(super) fn draw(
     dc: HDC,
     value: &str,
-    query: &str,
+    ranges: &[std::ops::Range<usize>],
     bounds: RECT,
     color: u32,
     align: DRAW_TEXT_FORMAT,
     skin: &SearchSkin,
 ) -> Result<()> {
-    let ranges = crate::search::highlight_ranges(value, query, skin.match_mode);
     if ranges.is_empty() {
         return text(dc, &skin.normal, value, bounds, color, align);
     }
     let mut runs = Vec::new();
     let mut previous = 0;
     for range in ranges {
+        ensure!(
+            range.start >= previous
+                && range.start < range.end
+                && range.end <= value.len()
+                && value.is_char_boundary(range.start)
+                && value.is_char_boundary(range.end),
+            "search stage=highlight invalid-range"
+        );
         if previous < range.start {
             runs.push((&value[previous..range.start], &skin.normal));
         }

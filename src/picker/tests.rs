@@ -19,6 +19,7 @@ fn row(index: usize, title: &str) -> PickerRow {
         },
         primary: "Fixture".into(),
         secondary: title.into(),
+        highlights: RowHighlights::default(),
         meta: "Administrator".into(),
         icon: None,
         remembered: Default::default(),

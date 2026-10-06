@@ -364,3 +364,36 @@ fn held_identity_survives_same_query_rows_but_not_removal_or_query_change() {
     state.changed();
     assert_eq!(state.pressed.get(), None);
 }
+
+#[test]
+fn changing_only_highlights_repaints_without_losing_the_scrolled_anchor() {
+    use windows::Win32::Graphics::Gdi::{GetUpdateRect, ValidateRect};
+    let search = fixture();
+    let list = search.controls().list;
+    unsafe {
+        let _ = ShowWindow(search.hwnd, SW_SHOWNOACTIVATE);
+        SendMessageW(list, LB_SETTOPINDEX, Some(WPARAM(12)), None);
+        let _ = ValidateRect(Some(list), None);
+    }
+    let mut rows: Vec<_> = (0..40).map(|index| row(index, "Window")).collect();
+    rows[12].highlights = RowHighlights {
+        query: Arc::from("win"),
+        primary: vec![],
+        secondary: std::iter::once(0..3).collect(),
+    };
+    search.replace_rows(rows, 0, 2).unwrap();
+    assert_eq!(
+        unsafe { SendMessageW(list, LB_GETTOPINDEX, None, None) }.0,
+        12
+    );
+    assert!(unsafe { GetUpdateRect(list, None, false) }.as_bool());
+    search.highlight_query("new query");
+    assert_eq!(search.state().visual.borrow().query, "new query");
+    assert_ne!(
+        search.state().visual.borrow().rows[12]
+            .highlights
+            .query
+            .as_ref(),
+        "new query"
+    );
+}

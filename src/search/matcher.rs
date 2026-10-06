@@ -61,7 +61,7 @@ pub(crate) fn highlight_ranges(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Score(u8, usize, usize);
+pub(super) struct Score(pub(super) u8, pub(super) usize, pub(super) usize);
 
 pub(super) fn score(field: &str, query: &str, mode: SearchMatch) -> Option<Score> {
     if query.is_empty() {
@@ -94,7 +94,7 @@ pub(super) fn score(field: &str, query: &str, mode: SearchMatch) -> Option<Score
         matched += 1;
         match wanted.next() {
             Some(character) => next = character,
-            None => return Some(Score(2, offset + 1 - start - matched, start)),
+            None => return Some(Score(4, offset + 1 - start - matched, start)),
         }
     }
     None

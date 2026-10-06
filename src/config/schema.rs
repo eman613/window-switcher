@@ -101,6 +101,7 @@ settings! {
     search_enable: bool => ("search", "enable", "no", boolean, "Config::to_hotkeys");
     search_hotkey: Hotkey => ("search", "hotkey", "ctrl+space", |v| Hotkey::create(SEARCH_HOTKEY_ID, "search", v), "KeyboardListener");
     search_match: SearchMatch => ("search", "match", "fuzzy", str::parse::<SearchMatch>, "SearchService");
+    search_pinyin: bool => ("search", "pinyin", "yes", boolean, "SearchService");
     search_fields: SearchFields => ("search", "fields", "app,title", str::parse::<SearchFields>, "SearchService");
     search_max_results: u32 => ("search", "max_results", "50", |v| integer(v, 10, 200), "SearchService");
     search_width: u32 => ("search", "width", "720", |v| integer(v, 480, 1600), "PickerLayout::target");

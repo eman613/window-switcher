@@ -50,6 +50,7 @@ impl Text {
                 self.choose("最近使用优先", "Most recently used first")
             }
             QuickSetting::SearchEnabled => self.choose("启用搜索快捷键", "Enable search shortcut"),
+            QuickSetting::Pinyin => self.choose("拼音搜索", "Pinyin search"),
             QuickSetting::Match(SearchMatch::Fuzzy) => self.choose("模糊匹配", "Fuzzy match"),
             QuickSetting::Match(SearchMatch::Contains) => self.choose("包含文字", "Contains text"),
             QuickSetting::Match(SearchMatch::Prefix) => self.choose("开头匹配", "Prefix match"),

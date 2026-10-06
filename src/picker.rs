@@ -20,7 +20,7 @@ mod skin;
 #[cfg(test)]
 mod tests;
 pub(crate) use list::label;
-pub(crate) use rows::PickerRow;
+pub(crate) use rows::{PickerRow, RowHighlights};
 
 use self::{controls::Controls, messages::ViewState};
 use crate::{

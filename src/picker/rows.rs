@@ -15,10 +15,18 @@ use windows::Win32::{
 use super::{skin::SearchSkin, PickerWindow};
 use crate::icon_cache::{CachedIcon, IconKey};
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RowHighlights {
+    pub query: Arc<str>,
+    pub primary: Vec<std::ops::Range<usize>>,
+    pub secondary: Vec<std::ops::Range<usize>>,
+}
+
 pub(crate) struct PickerRow {
     pub key: IconKey,
     pub primary: String,
     pub secondary: String,
+    pub highlights: RowHighlights,
     pub meta: String,
     pub icon: Option<Arc<CachedIcon>>,
     pub remembered: Weak<CachedIcon>,
@@ -51,6 +59,7 @@ impl PickerWindow {
         if let Ok(mut visual) = self.state().visual.try_borrow_mut() {
             visual.query = query.to_owned();
         }
+        let _ = unsafe { InvalidateRect(Some(self.controls().list), None, false) };
     }
     pub(crate) fn replace_rows(
         &self,
@@ -77,7 +86,9 @@ impl PickerWindow {
             if !self.state().reset_scroll.get() {
                 unchanged = visual.rows.len() == rows.len()
                     && visual.rows.iter().zip(&rows).all(|(old, new)| {
-                        old.key == new.key && old.accessible_label() == new.accessible_label()
+                        old.key == new.key
+                            && old.accessible_label() == new.accessible_label()
+                            && old.highlights == new.highlights
                     });
                 restore_top = visual
                     .rows

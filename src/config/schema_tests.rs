@@ -3,6 +3,7 @@ use super::{document, schema::SETTINGS, Config, DEFAULT_CONFIG, SWITCH_APPS_HOTK
 #[test]
 fn every_declared_setting_has_template_default_nondefault_and_invalid_coverage() {
     let mut cases = vec![
+        ("search", "pinyin", "no", "maybe"),
         ("", "trayicon", "no", "maybe"),
         ("", "auto_restart", "no", "maybe"),
         ("", "restart_delay_ms", "200", "199"),

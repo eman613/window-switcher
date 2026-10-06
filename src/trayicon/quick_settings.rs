@@ -50,6 +50,7 @@ const ITEMS: &[(u32, Group, Setting)] = &[
     (116, Group::Windows, Setting::Order(SwitchOrder::Existing)),
     (117, Group::Windows, Setting::Order(SwitchOrder::Mru)),
     (120, Group::Search, Setting::SearchEnabled),
+    (128, Group::Search, Setting::Pinyin),
     (121, Group::Search, Setting::Match(SearchMatch::Fuzzy)),
     (122, Group::Search, Setting::Match(SearchMatch::Contains)),
     (123, Group::Search, Setting::Match(SearchMatch::Prefix)),

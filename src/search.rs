@@ -1,5 +1,9 @@
 //! Search owns a native text surface and one cancellable offline matcher.
+mod entry;
+mod field;
+mod index;
 mod matcher;
+mod phonetic;
 mod service;
 #[cfg(test)]
 mod tests;
@@ -9,7 +13,7 @@ use crate::{
     icon_cache::{CachedIcon, IconKey},
     layout::MonitorSnapshot,
     localization::Text,
-    picker::{messages, PickerRow, PickerWindow, ViewKind},
+    picker::{messages, PickerRow, PickerWindow, RowHighlights, ViewKind},
     utils::window_identity::WindowIdentity,
     window_snapshot::WindowSnapshot,
     window_target::WindowTarget,
@@ -19,7 +23,6 @@ use std::sync::Arc;
 use windows::Win32::Foundation::HWND;
 
 pub(crate) use crate::picker::MAX_QUERY_UNITS;
-pub(crate) use matcher::highlight_ranges;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SearchEntry {
@@ -30,29 +33,7 @@ pub(crate) struct SearchEntry {
     minimized: bool,
     title: Arc<str>,
     app: Arc<str>,
-}
-
-impl SearchEntry {
-    fn row(&self, text: Text) -> PickerRow {
-        let title = crate::picker::label(&self.title);
-        PickerRow {
-            key: self.key.clone(),
-            primary: if title.trim().is_empty() {
-                crate::picker::label(&self.app)
-            } else {
-                title
-            },
-            secondary: std::path::Path::new(self.executable.as_ref())
-                .file_stem()
-                .map(|name| crate::picker::label(&name.to_string_lossy()))
-                .unwrap_or_else(|| crate::picker::label(&self.app)),
-            meta: text
-                .search_window_meta(self.elevated, self.minimized)
-                .into(),
-            icon: None,
-            remembered: Default::default(),
-        }
-    }
+    highlights: RowHighlights,
 }
 
 struct SearchResults {

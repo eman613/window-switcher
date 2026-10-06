@@ -145,7 +145,11 @@ fn draw_row(
     super::highlight::draw(
         dc,
         &row.primary,
-        query,
+        if row.highlights.query.as_ref() == query {
+            &row.highlights.primary
+        } else {
+            &[]
+        },
         RECT {
             left,
             right: right - app_width - p(3),
@@ -158,7 +162,11 @@ fn draw_row(
     super::highlight::draw(
         dc,
         &row.secondary,
-        query,
+        if row.highlights.query.as_ref() == query {
+            &row.highlights.secondary
+        } else {
+            &[]
+        },
         RECT {
             left: right - app_width,
             right,
