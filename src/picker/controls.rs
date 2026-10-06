@@ -179,7 +179,13 @@ impl Controls {
                 parent,
                 w!("STATIC"),
                 "",
-                WINDOW_STYLE(SS_RIGHT.0 | SS_CENTERIMAGE.0 | SS_ENDELLIPSIS.0 | SS_NOPREFIX.0),
+                WINDOW_STYLE(
+                    SS_RIGHT.0
+                        | SS_CENTERIMAGE.0
+                        | SS_ENDELLIPSIS.0
+                        | SS_NOPREFIX.0
+                        | windows::Win32::System::SystemServices::SS_NOTIFY.0,
+                ),
                 HELP_ID,
             )?
         } else {
@@ -367,6 +373,13 @@ impl Controls {
         } else {
             text.search_empty_title()
         };
+        let help = text.search_keyboard_help(
+            super::close_confirmation::enabled(state),
+            super::close_confirmation::confirming(state),
+        );
+        super::close_confirmation::help_tooltip(state, self.help, help)?;
+        // The accessible name and tooltip retain the complete instructions even
+        // when the inline static control must ellipsize on a narrow display.
         unsafe {
             SetWindowTextW(self.notice, &HSTRING::from(title))?;
             SetWindowTextW(
@@ -374,7 +387,7 @@ impl Controls {
                 &HSTRING::from(if state.truncated.get() && !state.help_open.get() {
                     text.search_truncated_hint()
                 } else {
-                    text.search_keyboard_help()
+                    help
                 }),
             )?;
         }

@@ -113,7 +113,7 @@ impl PickerLayout {
         let button_left = width - p(8) - button_width;
         let input_right = button_left - p(6);
         let help_width = if help_open {
-            (text_height * 19).min((input_right - p(10) - p(120)).max(0))
+            (text_height * 30).min((input_right - p(10) - p(120)).max(0))
         } else {
             0
         };

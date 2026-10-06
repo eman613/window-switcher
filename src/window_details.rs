@@ -97,14 +97,14 @@ impl WindowDetails {
             .epoch
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("details stage=epoch exhausted"))?;
-        self.window.replace(&labels, selected, self.epoch)?;
-        self.window.close_targets(
+        self.window.update_close_targets(
             records
                 .iter()
                 .zip(&labels)
                 .map(|(record, label)| (record.identity, label.clone()))
                 .collect(),
-        );
+            || self.window.replace(&labels, selected, self.epoch),
+        )?;
         self.window
             .status(&self.text.details_status(records.len()))?;
         self.records = records;

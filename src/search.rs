@@ -249,24 +249,26 @@ impl SearchSession {
                         .position(|entry| entry.identity == identity)
                 })
                 .unwrap_or(0);
-            self.window.replace_rows(
-                result
-                    .entries
-                    .iter()
-                    .map(|entry| entry.row(self.text))
-                    .collect::<Vec<_>>(),
-                selected,
-                generation,
-            )?;
-            self.window
-                .result_count(result.entries.len(), result.total)?;
-            self.window.close_targets(
+            self.window.update_close_targets(
                 result
                     .entries
                     .iter()
                     .map(|entry| (entry.identity, crate::picker::label(&entry.title)))
                     .collect(),
-            );
+                || {
+                    self.window.replace_rows(
+                        result
+                            .entries
+                            .iter()
+                            .map(|entry| entry.row(self.text))
+                            .collect::<Vec<_>>(),
+                        selected,
+                        generation,
+                    )
+                },
+            )?;
+            self.window
+                .result_count(result.entries.len(), result.total)?;
             self.results = result.entries;
             self.displayed_generation = generation;
             self.window.fit_results(self.results.len())?;

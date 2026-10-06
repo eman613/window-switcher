@@ -309,6 +309,16 @@ pub(super) unsafe extern "system" fn control_proc(
         }
     }
     let result = DefSubclassProc(hwnd, msg, wparam, lparam);
+    if matches!(
+        msg,
+        WM_MOUSEMOVE | WM_MOUSELEAVE | WM_SETFOCUS | WM_KILLFOCUS
+    ) && (hwnd == state.list.get() || super::close_confirmation::buttons(state).contains(&hwnd))
+    {
+        if msg == WM_MOUSEMOVE {
+            track(hwnd);
+        }
+        super::close_confirmation::refresh(state);
+    }
     if hwnd == state.list.get() && matches!(msg, WM_MOUSEWHEEL | WM_VSCROLL) {
         super::close_confirmation::refresh(state);
     }

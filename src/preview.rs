@@ -3,6 +3,7 @@ mod layout;
 mod native;
 mod paint;
 mod selection;
+mod tooltip;
 mod window;
 
 use crate::{
@@ -250,6 +251,7 @@ impl WindowPreview {
         }
         window.show()?;
         if changed {
+            tooltip::raise(HWND(request.surface as _));
             debug!("preview stage=present kind={} width={} height={} output_bytes={} budget_bytes={remaining_bytes}",
                 if placeholder.is_some() { "placeholder" } else { "live" }, layout.bounds.width(), layout.bounds.height(), layout.output_bytes);
         }

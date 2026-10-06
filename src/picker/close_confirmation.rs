@@ -10,7 +10,10 @@ use windows::Win32::{
         WindowsAndMessaging::{SendMessageW, LB_GETCURSEL},
     },
 };
+mod tooltip;
 mod view;
+pub(super) use tooltip::help as help_tooltip;
+pub(super) use tooltip::notify;
 pub(super) use view::{create, draw, refresh};
 pub(super) const CLOSE: usize = 111;
 pub(super) const YES: usize = 112;
@@ -32,6 +35,9 @@ pub(super) struct CloseState {
     no: Cell<HWND>,
     label: Cell<HWND>,
     tips: RefCell<Vec<Vec<u16>>>,
+    tooltip: Cell<HWND>,
+    updating: Cell<bool>,
+    help_tip: RefCell<Vec<u16>>,
 }
 impl CloseState {
     pub(super) fn configure(&self, config: &crate::config::Config) {
@@ -40,6 +46,9 @@ impl CloseState {
         self.cancel();
     }
     pub(super) fn cancel(&self) {
+        if self.pending.get().is_some() {
+            debug!("close stage=confirmation-cancelled");
+        }
         self.pending.set(None);
         self.request.set(None);
         *self.notice.borrow_mut() = None;
@@ -51,6 +60,7 @@ fn selected(state: &ViewState) -> Option<CloseEvent> {
         || state.busy.get()
         || state.failed.get()
         || state.composing.get()
+        || state.close.updating.get()
     {
         return None;
     }
@@ -67,6 +77,9 @@ fn selected(state: &ViewState) -> Option<CloseEvent> {
         .map(|(id, _)| (state.epoch.get(), index as usize, *id))
 }
 pub(super) fn command(state: &ViewState, id: usize) {
+    if state.close.updating.get() {
+        return;
+    }
     refresh(state);
     match id {
         CLOSE => {
@@ -76,6 +89,7 @@ pub(super) fn command(state: &ViewState, id: usize) {
             if let Some(target) = selected(state) {
                 if state.close.confirm.get() {
                     state.close.pending.set(Some(target));
+                    debug!("close stage=confirmation-opened");
                     if let Some((_, title)) = state.close.targets.borrow().get(target.1) {
                         if let Some(announcer) = state.announcer.borrow().as_ref() {
                             announcer.say(state.text.close_question(title));
@@ -99,6 +113,7 @@ pub(super) fn command(state: &ViewState, id: usize) {
         _ => return,
     }
     refresh(state);
+    state.signal(super::messages::RELAYOUT);
     unsafe {
         let _ = SetFocus(Some(state.focus_target()));
     }
@@ -107,12 +122,12 @@ pub(super) fn command(state: &ViewState, id: usize) {
         .try_post(crate::keyboard::dispatch::WM_INPUT_READY);
 }
 pub(super) fn press(state: &ViewState, hwnd: HWND) {
-    if hwnd == state.close.close.get() {
+    if hwnd == state.close.close.get() || hwnd == state.close.yes.get() {
         state.close.pressed.set(Some(selected(state)));
     }
 }
 pub(super) fn native_command(state: &ViewState, id: usize) {
-    if id == CLOSE {
+    if id == CLOSE || id == YES {
         if let Some(pressed) = state.close.pressed.take() {
             if pressed.is_none() || pressed != selected(state) {
                 refresh(state);
@@ -154,11 +169,33 @@ pub(super) fn buttons(state: &ViewState) -> [HWND; 3] {
     ]
 }
 impl PickerWindow {
-    pub(crate) fn close_targets(&self, targets: Vec<(WindowIdentity, String)>) {
+    pub(crate) fn update_close_targets(
+        &self,
+        targets: Vec<(WindowIdentity, String)>,
+        update: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         let state = self.state();
-        state.close.cancel();
+        // Row replacement sends synchronous native messages. Never expose a
+        // new epoch with the old identity table to those callbacks.
+        state.close.updating.set(true);
+        let result = update();
         *state.close.targets.borrow_mut() = targets;
+        state.close.updating.set(false);
+        let current = selected(state);
+        if result.is_err() {
+            state.close.cancel();
+        } else if let Some(previous) = state.close.pending.get() {
+            if current.is_some_and(|target| target.2 == previous.2) {
+                state.close.pending.set(current);
+                state.close.displayed.set(current);
+                debug!("close stage=confirmation-refresh retained=true");
+            } else {
+                debug!("close stage=confirmation-refresh retained=false");
+                state.close.cancel();
+            }
+        }
         refresh(state);
+        result
     }
     pub(crate) fn close_status(&self, message: &str) -> Result<()> {
         *self.state().close.notice.borrow_mut() = Some(message.to_owned());

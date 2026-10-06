@@ -200,6 +200,11 @@ pub(super) unsafe extern "system" fn window_proc(
             return result;
         }
         match msg {
+            WM_NOTIFY => {
+                if let Some(result) = super::close_confirmation::notify(state, lparam) {
+                    return result;
+                }
+            }
             WM_DRAWITEM if lparam.0 != 0 => {
                 let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
                 match super::close_confirmation::draw(state, item) {

@@ -195,7 +195,12 @@ impl PreviewWindow {
                 bounds.top,
                 bounds.width(),
                 bounds.height(),
-                SWP_NOACTIVATE,
+                SWP_NOACTIVATE
+                    | if self.state().visible.get() {
+                        SWP_NOZORDER
+                    } else {
+                        SET_WINDOW_POS_FLAGS(0)
+                    },
             )?;
             InvalidateRect(Some(self.hwnd), None, false).ok()?;
         }

@@ -53,6 +53,7 @@ pub(in crate::picker) fn create(parent: HWND, state: &ViewState) -> Result<()> {
             None,
         )
     }?;
+    state.close.tooltip.set(tooltip);
     for (id, title) in labels {
         let control = crate::picker::controls::child(
             parent,
@@ -118,6 +119,9 @@ pub(in crate::picker) fn create(parent: HWND, state: &ViewState) -> Result<()> {
     Ok(())
 }
 pub(in crate::picker) fn refresh(state: &ViewState) {
+    if state.close.updating.get() {
+        return;
+    }
     let selected = selected(state);
     if state.close.displayed.replace(selected) != selected {
         state.close.cancel();
@@ -156,24 +160,50 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
             );
         }
         for (hwnd, x, show) in [
-            (state.close.close.get(), left, !pending),
+            (
+                state.close.close.get(),
+                left,
+                !pending && pointer_on_row(state, row),
+            ),
             (state.close.yes.get(), left, pending),
             (state.close.no.get(), left + width, pending),
         ] {
             unsafe {
-                let _ = SetWindowPos(
+                state.paint_result(crate::picker::placement::move_child(
+                    parent,
                     hwnd,
-                    Some(HWND_TOP),
-                    origin.x + x,
-                    origin.y,
-                    width,
-                    row.bottom - row.top,
-                    SWP_NOACTIVATE,
-                );
-                let _ = EnableWindow(hwnd, state.close.request.get().is_none());
+                    RECT {
+                        left: origin.x + x,
+                        top: origin.y,
+                        right: origin.x + x + width,
+                        bottom: origin.y + row.bottom - row.top,
+                    },
+                ));
+                let enabled = state.close.request.get().is_none();
+                if windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(hwnd).as_bool()
+                    != enabled
+                {
+                    let _ = EnableWindow(hwnd, enabled);
+                }
                 let font = SendMessageW(list, WM_GETFONT, None, None);
-                SendMessageW(hwnd, WM_SETFONT, Some(WPARAM(font.0 as usize)), None);
-                let _ = ShowWindow(hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                if SendMessageW(hwnd, WM_GETFONT, None, None) != font {
+                    SendMessageW(hwnd, WM_SETFONT, Some(WPARAM(font.0 as usize)), None);
+                }
+                if show && !IsWindowVisible(hwnd).as_bool() {
+                    state.paint_result(
+                        SetWindowPos(
+                            hwnd,
+                            Some(HWND_TOP),
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        )
+                        .map_err(Into::into),
+                    );
+                }
+                crate::picker::placement::visible(hwnd, show);
             }
         }
         if pending || state.close.notice.borrow().is_some() {
@@ -228,6 +258,29 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
         }
+    }
+}
+fn pointer_on_row(state: &ViewState, row: RECT) -> bool {
+    use windows::Win32::{
+        Foundation::POINT, Graphics::Gdi::ScreenToClient, UI::Input::KeyboardAndMouse::GetFocus,
+    };
+    if unsafe { GetFocus() } == state.close.close.get() {
+        return true;
+    }
+    let mut point = POINT::default();
+    unsafe {
+        GetCursorPos(&mut point).is_ok()
+            && ScreenToClient(state.list.get(), &mut point).as_bool()
+            && point.x >= row.left
+            && point.x
+                < row.right
+                    + if state.kind == crate::picker::ViewKind::Details {
+                        px(59, state.dpi.get())
+                    } else {
+                        0
+                    }
+            && point.y >= row.top
+            && point.y < row.bottom
     }
 }
 pub(in crate::picker) fn draw(state: &ViewState, item: &DRAWITEMSTRUCT) -> Result<bool> {

@@ -11,7 +11,23 @@ impl Text {
     pub(crate) fn search_help_toggle(self) -> &'static str {
         self.choose("显示或隐藏快捷键帮助", "Show or hide keyboard help")
     }
-    pub(crate) fn search_keyboard_help(self) -> &'static str {
+    pub(crate) fn search_keyboard_help(
+        self,
+        close_enabled: bool,
+        confirming: bool,
+    ) -> &'static str {
+        if confirming {
+            return self.choose(
+                "Enter 确认关闭 · Esc 取消",
+                "Enter Confirm close · Esc Cancel",
+            );
+        }
+        if close_enabled {
+            return self.choose(
+                "Ctrl+W 关闭 · ↑↓/Tab 选择 · Enter 切换 · Esc 退出",
+                "Ctrl+W Close · ↑↓/Tab Navigate · Enter Switch · Esc Dismiss",
+            );
+        }
         self.choose(
             "Tab / ↑↓ 选择    Enter 切换    Esc 关闭",
             "Tab / ↑↓ Navigate    Enter Switch    Esc Dismiss",
