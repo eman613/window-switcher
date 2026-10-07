@@ -37,6 +37,51 @@ fn fixture() -> PickerWindow {
 }
 
 #[test]
+fn action_button_restores_edges_after_hover_press_and_focus() {
+    use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FLAGS, ODS_FOCUS, ODS_SELECTED};
+    let search = fixture();
+    let state = search.state();
+    let button = super::super::close_confirmation::buttons(state)[0];
+    let mut actual = crate::render_surface::RenderSurface::new(28, 29).unwrap();
+    let mut clean = crate::render_surface::RenderSurface::new(28, 29).unwrap();
+    actual.fill_rgb(0).unwrap();
+    clean.fill_rgb(0).unwrap();
+    let mut item = DRAWITEMSTRUCT {
+        CtlID: super::super::close_confirmation::CLOSE as u32,
+        hwndItem: button,
+        hDC: clean.dc(),
+        rcItem: windows::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: 28,
+            bottom: 29,
+        },
+        ..Default::default()
+    };
+    assert!(super::super::close_confirmation::draw(state, &item).unwrap());
+    item.hDC = actual.dc();
+    for flags in [0, ODS_SELECTED.0, ODS_FOCUS.0, ODS_SELECTED.0 | ODS_FOCUS.0] {
+        state.hot_control.set(button);
+        item.itemState = ODS_FLAGS(flags);
+        assert!(super::super::close_confirmation::draw(state, &item).unwrap());
+        state.hot_control.set(HWND::default());
+        item.itemState = ODS_FLAGS(0);
+        assert!(super::super::close_confirmation::draw(state, &item).unwrap());
+        assert!(
+            actual
+                .pixels()
+                .unwrap()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(clean.pixels().unwrap().as_chunks::<4>().0.iter())
+                .all(|(a, b)| a[..3] == b[..3]),
+            "stale button edge after leaving state {flags}"
+        );
+    }
+}
+
+#[test]
 fn leaving_confirmation_invalidates_the_complete_old_and_new_rows() {
     use windows::Win32::Graphics::Gdi::{GetUpdateRect, ValidateRect};
     let search = fixture();

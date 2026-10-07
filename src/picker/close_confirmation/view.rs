@@ -4,7 +4,10 @@ use windows::{
     core::{w, HSTRING, PWSTR},
     Win32::{
         Foundation::{HWND, LPARAM, RECT, WPARAM},
-        Graphics::Gdi::{FillRect, SetBkMode, SetTextColor, TRANSPARENT},
+        Graphics::Gdi::{
+            FillRect, GetStockObject, SetBkMode, SetDCBrushColor, SetTextColor, DC_BRUSH, HBRUSH,
+            TRANSPARENT,
+        },
         System::SystemServices::{SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX},
         UI::{
             Controls::{
@@ -302,7 +305,13 @@ pub(in crate::picker) fn draw(state: &ViewState, item: &DRAWITEMSTRUCT) -> Resul
     });
     unsafe {
         if let Some((background, _)) = colors {
-            crate::picker::drawing::rounded(item.hDC, rect, 0, background, None)?;
+            // An unoutlined RoundRect leaves edge pixels from the previous
+            // hover/focus outline. Restore every pixel before drawing the state.
+            SetDCBrushColor(item.hDC, crate::text_raster::colorref(background));
+            ensure!(
+                FillRect(item.hDC, &rect, HBRUSH(GetStockObject(DC_BRUSH).0)) != 0,
+                "close stage=button-background"
+            );
         } else {
             ensure!(
                 FillRect(item.hDC, &rect, state.brush.get()) != 0,
