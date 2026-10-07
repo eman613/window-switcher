@@ -122,12 +122,20 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
         return;
     }
     let selected = selected(state);
-    let selection_changed = state.close.displayed.replace(selected) != selected;
+    let selection_changed = state.close.displayed.get() != selected;
     if selection_changed {
         state.close.cancel();
+        state.close.displayed.set(selected);
     }
     if state.close.pending.get().is_some() && state.close.pending.get() != selected {
         state.close.cancel();
+    }
+    // Native list selection may have painted the old row before LBN_SELCHANGE.
+    // State is now final; restore the whole row, not just uncovered button pixels.
+    if let Some(index) = state.close.restore_row.take() {
+        crate::picker::repaint::row(state, Some(index));
+        crate::picker::repaint::row(state, selected.map(|target| target.1));
+        debug!("close stage=restore-row row={index}");
     }
     let pending = state.close.pending.get().is_some();
     let target = if pending || state.close.notice.borrow().is_some() {
@@ -176,9 +184,9 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
                     hwnd,
                     RECT {
                         left: origin.x + x,
-                        top: origin.y,
+                        top: origin.y + 1,
                         right: origin.x + x + width,
-                        bottom: origin.y + row.bottom - row.top,
+                        bottom: origin.y + row.bottom - row.top - 1,
                     },
                 ));
                 let enabled = state.close.request.get().is_none();
@@ -274,12 +282,16 @@ pub(in crate::picker) fn draw(state: &ViewState, item: &DRAWITEMSTRUCT) -> Resul
         NO => "↶",
         _ => return Ok(false),
     };
+    let _saved = crate::utils::gdi::SavedDc::new(item.hDC)?;
     let mut rect = item.rcItem;
+    let active = item.itemState.0 & ODS_SELECTED.0 != 0;
     let colors = state.visual.try_borrow().ok().and_then(|visual| {
         let palette = visual.skin.as_ref()?.palette;
         let selected = selected(state).map(|target| target.1)
             == state.close.offered.get().map(|target| target.1);
-        Some(if selected {
+        Some(if active && item.itemState.0 & ODS_DISABLED.0 == 0 {
+            (palette.pressed, palette.pressed_text)
+        } else if selected {
             (palette.selected, palette.selected_text)
         } else {
             (palette.hover, palette.text)
@@ -306,28 +318,26 @@ pub(in crate::picker) fn draw(state: &ViewState, item: &DRAWITEMSTRUCT) -> Resul
                 foreground
             },
         );
-        let active = item.itemState.0 & ODS_SELECTED.0 != 0;
         if (active || state.hot_control.get() == item.hwndItem)
             && item.itemState.0 & ODS_DISABLED.0 == 0
         {
-            let inset = if active { 3 } else { 1 };
-            let outline = RECT {
-                left: rect.left + inset,
-                top: rect.top + inset,
-                right: rect.right - inset,
-                bottom: rect.bottom - inset,
-            };
             crate::picker::drawing::rounded(
                 item.hDC,
-                outline,
+                rect,
                 0,
                 colors.map_or(state.background.get().0, |(background, _)| background),
                 Some(colors.map_or(state.foreground.get().0, |(_, foreground)| foreground)),
             )?;
         }
         if item.itemState.0 & ODS_FOCUS.0 != 0 {
+            let focus = RECT {
+                left: rect.left + 2,
+                top: rect.top + 2,
+                right: rect.right - 2,
+                bottom: rect.bottom - 2,
+            };
             ensure!(
-                windows::Win32::Graphics::Gdi::DrawFocusRect(item.hDC, &rect).as_bool(),
+                windows::Win32::Graphics::Gdi::DrawFocusRect(item.hDC, &focus).as_bool(),
                 "close stage=button-focus"
             );
         }

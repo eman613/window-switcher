@@ -19,7 +19,7 @@ pub(super) fn layout(state: &ViewState, row: RECT, confirming: bool) -> RowActio
         let count = unsafe { SendMessageW(state.list.get(), LB_GETCOUNT, None, None) }.0;
         let overflow = unsafe { GetClientRect(state.list.get(), &mut bounds) }.is_ok()
             && count > i64::from((bounds.bottom / height).max(1)) as isize;
-        row.right - px(if overflow { 17 } else { 2 }, dpi)
+        row.right - px(if overflow { 17 } else { 0 }, dpi)
     };
     RowActions {
         left: right - width * if confirming { 2 } else { 1 },

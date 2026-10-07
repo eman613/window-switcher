@@ -42,6 +42,7 @@ pub(super) struct CloseState {
     help_tip: RefCell<Vec<u16>>,
     offered: Cell<Option<CloseEvent>>,
     hint_font: RefCell<Option<crate::utils::gdi::OwnedGdiObject>>,
+    restore_row: Cell<Option<usize>>,
 }
 impl CloseState {
     pub(super) fn configure(&self, config: &crate::config::Config) {
@@ -50,6 +51,13 @@ impl CloseState {
         self.cancel();
     }
     pub(super) fn cancel(&self) {
+        let old = self
+            .pending
+            .get()
+            .or_else(|| self.notice.borrow().as_ref().and(self.displayed.get()));
+        if let Some((_, index, _)) = old {
+            self.restore_row.set(Some(index));
+        }
         if self.pending.get().is_some() {
             debug!("close stage=confirmation-cancelled");
         }

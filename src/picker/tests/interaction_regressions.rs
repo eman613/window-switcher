@@ -37,6 +37,73 @@ fn fixture() -> PickerWindow {
 }
 
 #[test]
+fn leaving_confirmation_invalidates_the_complete_old_and_new_rows() {
+    use windows::Win32::Graphics::Gdi::{GetUpdateRect, ValidateRect};
+    let search = fixture();
+    unsafe {
+        let _ = ShowWindow(search.hwnd, SW_SHOWNOACTIVATE);
+    }
+    let state = search.state();
+    state.close.configure(&Config {
+        close_enable: true,
+        ..Default::default()
+    });
+    let targets = state
+        .visual
+        .borrow()
+        .rows
+        .iter()
+        .map(|row| (row.key.identity, row.primary.clone()))
+        .collect();
+    search.update_close_targets(targets, || Ok(())).unwrap();
+    super::super::close_confirmation::command(state, super::super::close_confirmation::CLOSE);
+    assert!(super::super::close_confirmation::confirming(state));
+    let list = state.list.get();
+    let mut first = windows::Win32::Foundation::RECT::default();
+    let mut second = windows::Win32::Foundation::RECT::default();
+    unsafe {
+        SendMessageW(
+            list,
+            LB_GETITEMRECT,
+            Some(WPARAM(0)),
+            Some(LPARAM(&mut first as *mut _ as isize)),
+        );
+        SendMessageW(
+            list,
+            LB_GETITEMRECT,
+            Some(WPARAM(1)),
+            Some(LPARAM(&mut second as *mut _ as isize)),
+        );
+        SendMessageW(list, LB_SETCURSEL, Some(WPARAM(1)), None);
+        let _ = ValidateRect(Some(list), None);
+    }
+    state.signal(0);
+    assert!(!super::super::close_confirmation::confirming(state));
+    let mut dirty = windows::Win32::Foundation::RECT::default();
+    assert!(unsafe { GetUpdateRect(list, Some(&mut dirty), false) }.as_bool());
+    assert!(dirty.left <= first.left && dirty.right >= first.right);
+    assert!(dirty.top <= first.top && dirty.bottom >= second.bottom);
+}
+
+#[test]
+fn action_layout_shares_the_row_end_without_a_scrollbar() {
+    let search = fixture();
+    search.replace_rows(vec![row(0, "Window")], 0, 2).unwrap();
+    let bounds = windows::Win32::Foundation::RECT {
+        left: 0,
+        top: 0,
+        right: 720,
+        bottom: 31,
+    };
+    for dpi in [96, 144, 192] {
+        search.state().dpi.set(dpi);
+        let actions = super::super::row_actions::layout(search.state(), bounds, true);
+        assert_eq!(actions.right, bounds.right);
+        assert_eq!(actions.left + 2 * actions.width, bounds.right);
+    }
+}
+
+#[test]
 fn row_repaint_removes_previous_selection_edges() {
     use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED, ODT_LISTBOX};
 

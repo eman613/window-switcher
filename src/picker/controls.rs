@@ -354,6 +354,14 @@ impl Controls {
             // so that its following layout does not assign the same region again.
             super::placement::region(parent, bounds, radius)?;
             self.region.set(Some(signature));
+            // Resizing can preserve valid pixels from the old client area.
+            // Redraw the new frame after child placement; WS_CLIPCHILDREN
+            // keeps unchanged list contents out of this paint.
+            unsafe { InvalidateRect(Some(parent), None, false) }.ok()?;
+            debug!(
+                "picker stage=chrome-invalidated width={} height={}",
+                bounds.right, bounds.bottom
+            );
         }
         self.refresh_notice(state)
     }
