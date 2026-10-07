@@ -163,6 +163,7 @@ impl SearchSkin {
             HGDIOBJ(unsafe { CreateSolidBrush(crate::text_raster::colorref(palette.surface)) }.0),
             "picker-background",
         )?;
+        let help_font = crate::utils::gdi::hint_font(&normal)?;
         Ok(Self {
             palette,
             title: make_font(title_height, 400)?,
@@ -172,7 +173,7 @@ impl SearchSkin {
             secondary_height: base,
             row_height: px(31, dpi).max(title_height * 127 / 100 + px(12, dpi)),
             bold: make_font(base, 700)?,
-            help_font: make_font(base * 10 / 12, 400)?,
+            help_font,
             question_font: make_font(base * 18 / 12, 700)?,
             dpi,
             panel_radius: radii[0].round() as i32,

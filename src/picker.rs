@@ -13,6 +13,7 @@ pub(crate) mod messages;
 mod paint;
 mod placement;
 mod repaint;
+mod row_actions;
 mod rows;
 mod scroll_visibility;
 mod scrollbar;

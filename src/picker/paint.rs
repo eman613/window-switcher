@@ -63,7 +63,8 @@ fn draw_icon(
 }
 
 struct RowState {
-    close_enabled: bool,
+    text_right: i32,
+    notice: Option<String>,
     selected: bool,
     focused: bool,
     hovered: bool,
@@ -120,6 +121,20 @@ fn draw_row(
         background,
         state.selected.then_some(palette.divider),
     )?;
+    if let Some(notice) = &state.notice {
+        return text(
+            dc,
+            &skin.normal,
+            notice,
+            RECT {
+                left: bounds.left + p(3),
+                right: state.text_right,
+                ..bounds
+            },
+            foreground,
+            DT_LEFT,
+        );
+    }
     let height = bounds.bottom - bounds.top;
     let icon_size = p(19).max(1);
     let icon_left = bounds.left + p(3);
@@ -134,13 +149,7 @@ fn draw_row(
     )?;
     let left = bounds.left + p(25);
     // Keep text clear of the overlay's hit area without shortening the row fill.
-    let right = bounds.right
-        - p(17)
-        - if state.close_enabled {
-            p(28).min(height)
-        } else {
-            0
-        };
+    let right = state.text_right;
     let app_width = ((right - left) / 3).min(p(106));
     super::highlight::draw(
         dc,
@@ -205,13 +214,24 @@ pub(super) fn item(state: &ViewState, item: &DRAWITEMSTRUCT) -> Result<bool> {
     if item.CtlType == ODT_LISTBOX && item.CtlID as usize == LIST_ID {
         return super::repaint::buffered(state, item.hDC, item.rcItem, |dc| {
             if let Some(row) = visual.rows.get(item.itemID as usize) {
+                let notice = super::close_confirmation::row_notice(state, item.itemID as usize);
+                let actions = super::row_actions::layout(
+                    state,
+                    item.rcItem,
+                    notice.is_some() && super::close_confirmation::confirming(state),
+                );
                 draw_row(
                     dc,
                     item.rcItem,
                     row,
                     skin,
                     RowState {
-                        close_enabled: super::close_confirmation::enabled(state),
+                        text_right: if super::close_confirmation::enabled(state) {
+                            actions.left - px(6, skin.dpi)
+                        } else {
+                            actions.right
+                        },
+                        notice,
                         selected: item.itemState.0 & ODS_SELECTED.0 != 0,
                         focused: item.itemState.0 & ODS_FOCUS.0 != 0,
                         hovered: state.hover.get() == Some(item.itemID as usize),

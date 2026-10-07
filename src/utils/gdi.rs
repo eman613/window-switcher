@@ -9,6 +9,28 @@ use windows::Win32::UI::{
 
 pub(crate) struct OwnedGdiObject(pub(crate) HGDIOBJ);
 
+/// A smaller hint face derived from the actual content face, including fallback.
+pub(crate) fn hint_font(content: &OwnedGdiObject) -> Result<OwnedGdiObject> {
+    use windows::Win32::Graphics::Gdi::{GetObjectW, LOGFONTW};
+    let mut font = LOGFONTW::default();
+    anyhow::ensure!(
+        unsafe {
+            GetObjectW(
+                content.0,
+                std::mem::size_of::<LOGFONTW>() as i32,
+                Some((&mut font as *mut LOGFONTW).cast()),
+            )
+        } == std::mem::size_of::<LOGFONTW>() as i32,
+        "font stage=hint-metrics failed"
+    );
+    font.lfHeight = -(font.lfHeight.saturating_abs() * 10 / 12).max(1);
+    font.lfWeight = 400;
+    OwnedGdiObject::new(
+        HGDIOBJ(unsafe { CreateFontIndirectW(&font) }.0),
+        "hint-font",
+    )
+}
+
 impl OwnedGdiObject {
     pub(crate) fn new(object: HGDIOBJ, operation: &str) -> Result<Self> {
         if object.is_invalid() {
@@ -112,6 +134,43 @@ pub(crate) fn message_font_with_floor(dpi: u32, minimum_dip: u32) -> Result<Owne
 mod content_font_tests {
     use super::*;
     use windows::Win32::Graphics::Gdi::{GetObjectW, LOGFONTW};
+
+    #[test]
+    fn hint_face_matches_content_at_each_size_and_dpi() {
+        for size in [12, 20, 48] {
+            for dpi in [96, 144, 192] {
+                let content = content_font(
+                    &crate::config::Config {
+                        unified_font: true,
+                        ui_font_family: "Arial".into(),
+                        ui_font_size: size,
+                        ..Default::default()
+                    },
+                    dpi,
+                    0,
+                )
+                .unwrap();
+                let hint = hint_font(&content).unwrap();
+                let mut base = LOGFONTW::default();
+                let mut small = LOGFONTW::default();
+                for (object, metrics) in [(&content, &mut base), (&hint, &mut small)] {
+                    assert_ne!(
+                        unsafe {
+                            GetObjectW(
+                                object.0,
+                                std::mem::size_of::<LOGFONTW>() as i32,
+                                Some((metrics as *mut LOGFONTW).cast()),
+                            )
+                        },
+                        0
+                    );
+                }
+                assert_eq!(base.lfFaceName, small.lfFaceName);
+                assert_eq!(small.lfHeight.abs(), base.lfHeight.abs() * 10 / 12);
+                assert!(small.lfHeight.abs() < base.lfHeight.abs());
+            }
+        }
+    }
 
     #[test]
     fn global_content_font_uses_dip_size_on_each_native_dpi() {

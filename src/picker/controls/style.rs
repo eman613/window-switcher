@@ -25,6 +25,7 @@ impl Controls {
         state.paint_error.set(false);
         if state.kind == ViewKind::Search {
             let skin = SearchSkin::new(config, dpi)?;
+            let hint = crate::utils::gdi::hint_font(&skin.normal)?;
             // Acquire the fallible borrow before publishing any native handles.
             // Retain the old skin until every control has its replacement font.
             let mut visual = state
@@ -64,6 +65,7 @@ impl Controls {
             Self::set_font(self.edit, &skin.input);
             Self::set_font(self.help, &skin.help_font);
             Self::set_font(self.notice, &skin.title);
+            super::super::close_confirmation::set_hint_font(state, hint);
             visual.skin = Some(skin);
         } else {
             let appearance = Appearance::capture(config);
@@ -78,6 +80,7 @@ impl Controls {
             #[cfg(test)]
             fail_style_at(2)?;
             let mut metrics = LOGFONTW::default();
+            let hint = crate::utils::gdi::hint_font(&font)?;
             ensure!(
                 unsafe {
                     GetObjectW(
@@ -99,6 +102,7 @@ impl Controls {
                 Self::set_font(hwnd, &font);
             }
             self.font = Some(font);
+            super::super::close_confirmation::set_hint_font(state, hint);
             self.background = Some(brush);
         }
         state.dpi.set(dpi);

@@ -259,7 +259,7 @@ pub(super) unsafe extern "system" fn control_proc(
                     } else if super::close_confirmation::buttons(state).contains(&hwnd) {
                         if lparam.0 & (1 << 30) == 0 {
                             state.suppress_enter.set(true);
-                            super::close_confirmation::command(
+                            super::close_confirmation::native_command(
                                 state,
                                 super::close_confirmation::CLOSE,
                             );

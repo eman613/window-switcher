@@ -1,5 +1,4 @@
 use super::*;
-use crate::picker::skin::px;
 use anyhow::ensure;
 use windows::{
     core::{w, HSTRING, PWSTR},
@@ -123,16 +122,31 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
         return;
     }
     let selected = selected(state);
-    if state.close.displayed.replace(selected) != selected {
+    let selection_changed = state.close.displayed.replace(selected) != selected;
+    if selection_changed {
         state.close.cancel();
     }
     if state.close.pending.get().is_some() && state.close.pending.get() != selected {
         state.close.cancel();
     }
     let pending = state.close.pending.get().is_some();
+    let target = if pending || state.close.notice.borrow().is_some() {
+        selected
+    } else {
+        targeting::hovered(state)
+    };
+    if state.close.offered.replace(target) != target || selection_changed {
+        for button in buttons(state) {
+            let _ =
+                unsafe { windows::Win32::Graphics::Gdi::InvalidateRect(Some(button), None, false) };
+        }
+    }
+    if state.kind == crate::picker::ViewKind::Search && state.close.enabled.get() && !pending {
+        crate::picker::repaint::hover(state, target.map(|target| target.1));
+    }
     let mut row = RECT::default();
     let mut bounds = RECT::default();
-    let visible=selected.is_some_and(|(_,index,_)|unsafe{SendMessageW(state.list.get(),LB_GETITEMRECT,Some(WPARAM(index)),Some(LPARAM(&mut row as *mut _ as isize)))}.0>=0)
+    let visible=target.is_some_and(|(_,index,_)|unsafe{SendMessageW(state.list.get(),LB_GETITEMRECT,Some(WPARAM(index)),Some(LPARAM(&mut row as *mut _ as isize)))}.0>=0)
         && unsafe{GetClientRect(state.list.get(),&mut bounds)}.is_ok() && row.top>=0 && row.bottom<=bounds.bottom;
     let list = state.list.get();
     let parent = unsafe { GetParent(list) }.unwrap_or_default();
@@ -140,16 +154,8 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
         return;
     }
     if visible {
-        let width = px(28, state.dpi.get()).min((row.bottom - row.top).max(1));
-        let left = if state.kind == crate::picker::ViewKind::Search {
-            bounds.right - width * if pending { 2 } else { 1 } - px(17, state.dpi.get())
-        } else {
-            let mut outer = RECT::default();
-            if unsafe { GetWindowRect(list, &mut outer) }.is_err() {
-                return;
-            }
-            outer.right - outer.left + px(3, state.dpi.get())
-        };
+        let layout = crate::picker::row_actions::layout(state, row, pending);
+        let (left, width) = (layout.left, layout.width);
         // Convert from list client to picker client; handles DPI/position changes.
         let mut origin = windows::Win32::Foundation::POINT { x: 0, y: row.top };
         unsafe {
@@ -160,11 +166,7 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
             );
         }
         for (hwnd, x, show) in [
-            (
-                state.close.close.get(),
-                left,
-                !pending && pointer_on_row(state, row),
-            ),
+            (state.close.close.get(), left, !pending),
             (state.close.yes.get(), left, pending),
             (state.close.no.get(), left + width, pending),
         ] {
@@ -206,7 +208,9 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
                 crate::picker::placement::visible(hwnd, show);
             }
         }
-        if pending || state.close.notice.borrow().is_some() {
+        if state.kind == crate::picker::ViewKind::Details
+            && (pending || state.close.notice.borrow().is_some())
+        {
             if let Some((_, index, _)) = selected {
                 if let Some((_, title)) = state.close.targets.borrow().get(index) {
                     let question = state
@@ -243,7 +247,10 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
     unsafe {
         let _ = ShowWindow(
             state.close.label.get(),
-            if visible && (pending || state.close.notice.borrow().is_some()) {
+            if state.kind == crate::picker::ViewKind::Details
+                && visible
+                && (pending || state.close.notice.borrow().is_some())
+            {
                 SW_SHOWNOACTIVATE
             } else {
                 SW_HIDE
@@ -260,29 +267,6 @@ pub(in crate::picker) fn refresh(state: &ViewState) {
         }
     }
 }
-fn pointer_on_row(state: &ViewState, row: RECT) -> bool {
-    use windows::Win32::{
-        Foundation::POINT, Graphics::Gdi::ScreenToClient, UI::Input::KeyboardAndMouse::GetFocus,
-    };
-    if unsafe { GetFocus() } == state.close.close.get() {
-        return true;
-    }
-    let mut point = POINT::default();
-    unsafe {
-        GetCursorPos(&mut point).is_ok()
-            && ScreenToClient(state.list.get(), &mut point).as_bool()
-            && point.x >= row.left
-            && point.x
-                < row.right
-                    + if state.kind == crate::picker::ViewKind::Details {
-                        px(59, state.dpi.get())
-                    } else {
-                        0
-                    }
-            && point.y >= row.top
-            && point.y < row.bottom
-    }
-}
 pub(in crate::picker) fn draw(state: &ViewState, item: &DRAWITEMSTRUCT) -> Result<bool> {
     let glyph = match item.CtlID as usize {
         CLOSE => "×",
@@ -291,18 +275,35 @@ pub(in crate::picker) fn draw(state: &ViewState, item: &DRAWITEMSTRUCT) -> Resul
         _ => return Ok(false),
     };
     let mut rect = item.rcItem;
+    let colors = state.visual.try_borrow().ok().and_then(|visual| {
+        let palette = visual.skin.as_ref()?.palette;
+        let selected = selected(state).map(|target| target.1)
+            == state.close.offered.get().map(|target| target.1);
+        Some(if selected {
+            (palette.selected, palette.selected_text)
+        } else {
+            (palette.hover, palette.text)
+        })
+    });
+    let foreground = colors.map_or(state.foreground.get(), |(_, color)| {
+        crate::text_raster::colorref(color)
+    });
     unsafe {
-        ensure!(
-            FillRect(item.hDC, &rect, state.brush.get()) != 0,
-            "close stage=button-background"
-        );
+        if let Some((background, _)) = colors {
+            crate::picker::drawing::rounded(item.hDC, rect, 0, background, None)?;
+        } else {
+            ensure!(
+                FillRect(item.hDC, &rect, state.brush.get()) != 0,
+                "close stage=button-background"
+            );
+        }
         SetBkMode(item.hDC, TRANSPARENT);
         SetTextColor(
             item.hDC,
             if item.itemState.0 & ODS_DISABLED.0 != 0 {
                 state.muted.get()
             } else {
-                state.foreground.get()
+                foreground
             },
         );
         let active = item.itemState.0 & ODS_SELECTED.0 != 0;
@@ -320,8 +321,8 @@ pub(in crate::picker) fn draw(state: &ViewState, item: &DRAWITEMSTRUCT) -> Resul
                 item.hDC,
                 outline,
                 0,
-                state.background.get().0,
-                Some(state.foreground.get().0),
+                colors.map_or(state.background.get().0, |(background, _)| background),
+                Some(colors.map_or(state.foreground.get().0, |(_, foreground)| foreground)),
             )?;
         }
         if item.itemState.0 & ODS_FOCUS.0 != 0 {

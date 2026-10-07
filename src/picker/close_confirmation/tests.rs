@@ -8,6 +8,56 @@ use crate::{
 use std::sync::Arc;
 use windows::Win32::{Foundation::WPARAM, UI::WindowsAndMessaging::LB_SETCURSEL};
 #[test]
+fn pointer_can_close_an_unselected_row_without_retargeting_keyboard_actions() {
+    let _com = crate::utils::com::ComApartment::sta().unwrap();
+    for kind in [ViewKind::Search, ViewKind::Details] {
+        let window = PickerWindow::create(
+            HWND::default(),
+            Arc::new(WindowTarget::new(HWND::default())),
+            Text::new(Language::English),
+            kind,
+        )
+        .unwrap();
+        let state = window.state();
+        state.visible.set(true);
+        state.close.configure(&Config {
+            close_enable: true,
+            ..Default::default()
+        });
+        let first = WindowIdentity::fixture(1);
+        let second = WindowIdentity::fixture(2);
+        window
+            .update_close_targets(vec![(first, "one".into()), (second, "two".into())], || {
+                window.replace(&["one".into(), "two".into()], 0, 1)
+            })
+            .unwrap();
+        state.close.offered.set(Some((1, 1, second)));
+        assert_eq!(selected(state), Some((1, 0, first)));
+        press(state, state.close.close.get());
+        native_command(state, CLOSE);
+        assert_eq!(state.close.pending.get(), Some((1, 1, second)));
+        assert!(state.close.request.get().is_none());
+        command(state, NO);
+        state.close.offered.set(Some((1, 0, first)));
+        command(state, CLOSE);
+        assert_eq!(state.close.pending.get(), Some((1, 1, second)));
+        command(state, NO);
+        state.close.offered.set(Some((1, 0, first)));
+        press(state, state.close.close.get());
+        window
+            .update_close_targets(vec![(second, "two".into()), (first, "one".into())], || {
+                window.replace(&["two".into(), "one".into()], 0, 2)
+            })
+            .unwrap();
+        state.close.offered.set(Some((2, 0, second)));
+        native_command(state, CLOSE);
+        assert!(!confirming(state));
+        assert!(state.close.request.get().is_none());
+        assert_eq!(selected(state), Some((2, 0, second)));
+    }
+}
+
+#[test]
 fn confirmation_is_local_explicit_and_rejects_changed_selection_or_epoch() {
     let _com = crate::utils::com::ComApartment::sta().unwrap();
     let window = PickerWindow::create(

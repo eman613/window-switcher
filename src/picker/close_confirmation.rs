@@ -10,10 +10,12 @@ use windows::Win32::{
         WindowsAndMessaging::{SendMessageW, LB_GETCURSEL},
     },
 };
+mod targeting;
 mod tooltip;
 mod view;
 pub(super) use tooltip::help as help_tooltip;
 pub(super) use tooltip::notify;
+pub(super) use tooltip::set_font as set_hint_font;
 pub(super) use view::{create, draw, refresh};
 pub(super) const CLOSE: usize = 111;
 pub(super) const YES: usize = 112;
@@ -38,6 +40,8 @@ pub(super) struct CloseState {
     tooltip: Cell<HWND>,
     updating: Cell<bool>,
     help_tip: RefCell<Vec<u16>>,
+    offered: Cell<Option<CloseEvent>>,
+    hint_font: RefCell<Option<crate::utils::gdi::OwnedGdiObject>>,
 }
 impl CloseState {
     pub(super) fn configure(&self, config: &crate::config::Config) {
@@ -55,6 +59,12 @@ impl CloseState {
     }
 }
 fn selected(state: &ViewState) -> Option<CloseEvent> {
+    let index = unsafe { SendMessageW(state.list.get(), LB_GETCURSEL, None, None) }.0;
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| target_at(state, index))
+}
+fn target_at(state: &ViewState, index: usize) -> Option<CloseEvent> {
     if !state.close.enabled.get()
         || !state.visible.get()
         || state.busy.get()
@@ -64,17 +74,13 @@ fn selected(state: &ViewState) -> Option<CloseEvent> {
     {
         return None;
     }
-    let index = unsafe { SendMessageW(state.list.get(), LB_GETCURSEL, None, None) }.0;
-    if index < 0 {
-        return None;
-    }
     state
         .close
         .targets
         .try_borrow()
         .ok()?
-        .get(index as usize)
-        .map(|(id, _)| (state.epoch.get(), index as usize, *id))
+        .get(index)
+        .map(|(id, _)| (state.epoch.get(), index, *id))
 }
 pub(super) fn command(state: &ViewState, id: usize) {
     if state.close.updating.get() {
@@ -113,6 +119,7 @@ pub(super) fn command(state: &ViewState, id: usize) {
         _ => return,
     }
     refresh(state);
+    crate::picker::repaint::row(state, selected(state).map(|target| target.1));
     state.signal(super::messages::RELAYOUT);
     unsafe {
         let _ = SetFocus(Some(state.focus_target()));
@@ -122,12 +129,24 @@ pub(super) fn command(state: &ViewState, id: usize) {
         .try_post(crate::keyboard::dispatch::WM_INPUT_READY);
 }
 pub(super) fn press(state: &ViewState, hwnd: HWND) {
-    if hwnd == state.close.close.get() || hwnd == state.close.yes.get() {
+    if hwnd == state.close.close.get() {
+        state.close.pressed.set(Some(state.close.offered.get()));
+    } else if hwnd == state.close.yes.get() {
         state.close.pressed.set(Some(selected(state)));
     }
 }
 pub(super) fn native_command(state: &ViewState, id: usize) {
-    if id == CLOSE || id == YES {
+    if id == CLOSE {
+        let target = state
+            .close
+            .pressed
+            .take()
+            .unwrap_or(state.close.offered.get());
+        if !targeting::select_offered(state, target) {
+            refresh(state);
+            return;
+        }
+    } else if id == YES {
         if let Some(pressed) = state.close.pressed.take() {
             if pressed.is_none() || pressed != selected(state) {
                 refresh(state);
@@ -150,6 +169,16 @@ pub(super) fn confirming(state: &ViewState) -> bool {
 }
 pub(super) fn enabled(state: &ViewState) -> bool {
     state.close.enabled.get()
+}
+pub(super) fn row_notice(state: &ViewState, index: usize) -> Option<String> {
+    let target = selected(state).filter(|target| target.1 == index)?;
+    state.close.notice.borrow().clone().or_else(|| {
+        (state.close.pending.get() == Some(target)).then(|| {
+            state
+                .text
+                .close_question(&state.close.targets.borrow()[index].1)
+        })
+    })
 }
 pub(super) fn keyboard_confirm(state: &ViewState, hwnd: HWND) {
     command(
@@ -200,6 +229,7 @@ impl PickerWindow {
     pub(crate) fn close_status(&self, message: &str) -> Result<()> {
         *self.state().close.notice.borrow_mut() = Some(message.to_owned());
         refresh(self.state());
+        crate::picker::repaint::row(self.state(), selected(self.state()).map(|target| target.1));
         self.status(message)
     }
 }
